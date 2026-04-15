@@ -391,7 +391,13 @@ app.get("/reward/:eventId", async (req, res) => {
   }
 });
 
-app.listen(PORT, async () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
-  await testRedisConnection();
+app.get("/health", (req, res) => {
+  res.json({ ok: true, port: PORT });
+});
+
+app.listen(PORT, () => {
+  console.log(`Backend running on port ${PORT}`);
+  testRedisConnection().catch((err) => {
+    console.error("Redis test failed:", err.message);
+  });
 });
