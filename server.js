@@ -116,23 +116,32 @@ app.get("/event/:eventId", async (req, res) => {
   try {
     let { eventId } = req.params;
 
-const resolvedId = await redis.get(`eventcode:${eventId}`);
-if (resolvedId) {
-  eventId = resolvedId;
+// Try Redis lookup if available
+if (redis) {
+  const resolvedId = await redis.get(`eventcode:${eventId}`);
+  if (resolvedId) {
+    eventId = resolvedId;
+  }
 }
-    console.log("RESOLVED EVENT ID:", eventId);
 
-    if (events[eventId]) {
-      return res.json(events[eventId]);
-    }
+console.log("RESOLVED EVENT ID:", eventId);
 
-    const meta = await redis.hgetall(`event:${eventId}:meta`);
-    console.log("EVENT META FROM REDIS:", meta);
+// Check in-memory first
+if (events[eventId]) {
+  return res.json(events[eventId]);
+}
 
-    if (!meta || !meta.id) {
-      return res.status(404).json({ error: "Event not found" });
-    }
+let meta = null;
 
+// Try Redis meta if available
+if (redis) {
+  meta = await redis.hgetall(`event:${eventId}:meta`);
+  console.log("EVENT META FROM REDIS:", meta);
+}
+
+if (!meta || !meta.id) {
+  return res.status(404).json({ error: "Event not found" });
+}
     const normalizedMeta = {
       id: meta.id,
       code: meta.code,
