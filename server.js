@@ -131,6 +131,14 @@ if (events[eventId]) {
   return res.json(events[eventId]);
 }
 
+// Fallback: find by code in memory when Redis is unavailable
+const inMemoryEvent = Object.values(events).find(
+  (event) => event.code === eventId
+);
+
+if (inMemoryEvent) {
+  return res.json(inMemoryEvent);
+}
 let meta = null;
 
 // Try Redis meta if available
