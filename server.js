@@ -86,17 +86,21 @@ app.post("/event", async (req, res) => {
 };
     events[id] = event;
 
-await redis.hset(`event:${id}:meta`, {
-  id,
-  code: code || id,
-  name,
-  startAt,
-  unlockAt,
-  endAt,
-  maxClaims: String(maxClaims),
-  status,
-});
-await redis.set(`eventcode:${code || id}`, id);
+if (redis) {
+  await redis.hset(`event:${id}:meta`, {
+    id,
+    code: code || id,
+    name,
+    startAt,
+    unlockAt,
+    endAt,
+    maxClaims: String(maxClaims),
+    status,
+  });
+
+  await redis.set(`eventcode:${code || id}`, id);
+  await redis.set(`event:${id}:claims`, "0");
+}
     res.json({
       success: true,
       eventId: id,
