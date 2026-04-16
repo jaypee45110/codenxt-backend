@@ -357,8 +357,8 @@ const claimNumber = 1;
 
 let reward = rewards[eventId] || {
   title: "codeNXT Reward",
-  type: "image",
-  url: "https://via.placeholder.com/300x300.png?text=Reward"
+  type: "text",
+  content: "Reward granted"
 };
 
     return res.json({
