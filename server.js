@@ -173,12 +173,33 @@ app.get("/access/:eventId", async (req, res) => {
   try {
     let { eventId } = req.params;
 
-    const resolvedId = await redis.get(`eventcode:${eventId}`);
-    if (resolvedId) {
-      eventId = resolvedId;
+    // Try Redis lookup if available
+    if (redis) {
+      const resolvedId = await redis.get(`eventcode:${eventId}`);
+      if (resolvedId) {
+        eventId = resolvedId;
+      }
     }
 
-    const meta = await redis.hgetall(`event:${eventId}:meta`);
+    let meta = null;
+
+    // In-memory lookup by id
+    if (events[eventId]) {
+      meta = events[eventId];
+    }
+
+    // In-memory lookup by code
+    if (!meta) {
+      meta = Object.values(events).find((event) => event.code === eventId);
+      if (meta) {
+        eventId = meta.id;
+      }
+    }
+
+    // Redis lookup if available
+    if (!meta && redis) {
+      meta = await redis.hgetall(`event:${eventId}:meta`);
+    }
 
     if (!meta || !meta.id) {
       return res.status(404).json({ error: "Event not found" });
@@ -203,7 +224,11 @@ app.get("/access/:eventId", async (req, res) => {
       accessStatus = "closed";
     }
 
-    const claims = await redis.get(`event:${eventId}:claims`);
+    let claims = "0";
+    if (redis) {
+      claims = await redis.get(`event:${eventId}:claims`);
+    }
+
     const fingerprint = makeFingerprint(req);
     const jti = uuidv4();
 
@@ -219,7 +244,9 @@ app.get("/access/:eventId", async (req, res) => {
       expiresIn: "10m",
     });
 
-    await redis.set(`event:${eventId}:token:${jti}`, "fresh", "EX", 600);
+    if (redis) {
+      await redis.set(`event:${eventId}:token:${jti}`, "fresh", "EX", 600);
+    }
 
     res.json({
       success: true,
