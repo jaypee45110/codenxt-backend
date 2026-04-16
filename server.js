@@ -388,8 +388,10 @@ app.post("/reward", async (req, res) => {
     }
 
     rewards[eventId] = reward;
-    await redis.set(`reward:${eventId}:json`, JSON.stringify(reward));
 
+if (redis) {
+  await redis.set(`reward:${eventId}:json`, JSON.stringify(reward));
+}
     res.json({ success: true });
   } catch (err) {
     console.error("Upload reward failed:", err.message);
