@@ -422,7 +422,78 @@ app.get("/reward/:eventId", async (req, res) => {
     res.status(500).json({ error: "Failed to get reward" });
   }
 });
+// GET REPORT
+app.get("/report/:eventCode", async (req, res) => {
+  try {
+    let { eventCode } = req.params;
+    let event = null;
+    let eventId = null;
 
+    // 1) Finn event i minne via code
+    event = Object.values(events).find((item) => item.code === eventCode);
+
+    if (event) {
+      eventId = event.id;
+    }
+
+    // 2) Fallback til Redis hvis tilgjengelig
+    if (!event && redis) {
+      const resolvedId = await redis.get(`eventcode:${eventCode}`);
+      if (resolvedId) {
+        eventId = resolvedId;
+
+        const meta = await redis.hgetall(`event:${eventId}:meta`);
+        if (meta && meta.id) {
+          event = {
+            id: meta.id,
+            code: meta.code,
+            name: meta.name,
+            startAt: meta.startAt,
+            unlockAt: meta.unlockAt,
+            endAt: meta.endAt,
+            maxClaims: Number(meta.maxClaims || 0),
+            status: meta.status,
+          };
+        }
+      }
+    }
+
+    if (!event || !eventId) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    // 3) Hent joins fra minnebasert report-struktur finnes ikke på backend,
+    // så vi simulerer foreløpig et rapportgrunnlag
+    const simulatedScans = 7286;
+    const simulatedJoins = 2184;
+    const simulatedConversionRate = 39.6;
+
+    // 4) Lag simulerte telefonnumre i ønsket format
+    const innerCircle = Array.from({ length: 25 }, (_, i) => {
+      const suffix = String(10000 + i).padStart(5, "0");
+      return `+47900${suffix}`;
+    });
+
+    return res.json({
+      event: {
+        id: event.id,
+        eventCode: event.code,
+        artistName: event.name || "Artist / Event Name",
+        venue: "Venue Name",
+        date: event.startAt ? event.startAt.slice(0, 10) : "",
+      },
+      metrics: {
+        scans: simulatedScans,
+        joins: simulatedJoins,
+        conversionRate: simulatedConversionRate,
+      },
+      innerCircle,
+    });
+  } catch (err) {
+    console.error("Get report failed:", err.message);
+    res.status(500).json({ error: "Failed to get report" });
+  }
+});
 app.get("/health", (req, res) => {
   res.json({ ok: true, port: PORT });
 });
