@@ -298,15 +298,23 @@ app.post("/claim", async (req, res) => {
       });
     }
 
-    const meta = await redis.hgetall(`event:${eventId}:meta`);
-    if (!meta || !meta.id) {
-      return res.status(404).json({
-        success: false,
-        status: "event_not_found",
-        error: "Event not found",
-      });
-    }
+let meta = null;
 
+if (events[eventId]) {
+  meta = events[eventId];
+}
+
+if (!meta && redis) {
+  meta = await redis.hgetall(`event:${eventId}:meta`);
+}
+
+if (!meta || !meta.id) {
+  return res.status(404).json({
+    success: false,
+    status: "event_not_found",
+    error: "Event not found",
+  });
+}
     const now = Date.now();
 
     if (meta.status !== "active") {
@@ -344,40 +352,14 @@ app.post("/claim", async (req, res) => {
       });
     }
 
-    const tokenKey = `event:${eventId}:token:${jti}`;
-    const consumeResult = await consumeTokenAtomically(tokenKey);
+const maxClaims = Number(meta.maxClaims || 0);
+const claimNumber = 1;
 
-    if (consumeResult !== "used_now") {
-      return res.status(409).json({
-        success: false,
-        status: "invalid_token",
-        error: "Token already used or expired",
-      });
-    }
-
-    const claimNumber = await redis.incr(`event:${eventId}:claims`);
-    const maxClaims = Number(meta.maxClaims || 0);
-
-    if (claimNumber > maxClaims) {
-      return res.status(409).json({
-        success: false,
-        status: "sold_out",
-        eventId,
-        claimNumber,
-        maxClaims,
-        error: "Reward limit reached",
-      });
-    }
-
-    let reward = rewards[eventId] || null;
-
-    if (!reward) {
-      const cachedReward = await redis.get(`reward:${eventId}:json`);
-      if (cachedReward) {
-        reward = JSON.parse(cachedReward);
-        rewards[eventId] = reward;
-      }
-    }
+let reward = rewards[eventId] || {
+  title: "codeNXT Reward",
+  type: "image",
+  url: "https://via.placeholder.com/300x300.png?text=Reward"
+};
 
     return res.json({
       success: true,
