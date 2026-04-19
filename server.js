@@ -1,9 +1,12 @@
+const REDIS_ENABLED = !!process.env.REDIS_URL;
 const express = require("express");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
 const jwt = require("jsonwebtoken");
 const redis = require("./redis");
-
+const fs = require("fs");
+const path = require("path");
+const { spawn } = require("child_process");
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -13,6 +16,12 @@ const JWT_SECRET = "codenxt-dev-secret-change-later";
 
 let events = {};
 let rewards = {};
+const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
+const VIDEO_DIR = path.join(__dirname, "public", "screen-videos");
+
+fs.mkdirSync(VIDEO_DIR, { recursive: true });
+app.use("/screen-videos", express.static(VIDEO_DIR));
 
 async function testRedisConnection() {
   try {
@@ -54,6 +63,72 @@ async function consumeTokenAtomically(tokenKey) {
   return redis.eval(lua, 1, tokenKey);
 }
 
+function runScreenVideoGenerator({
+  eventCode,
+  lang = "en",
+  artistName = "ARTIST NAME",
+  venue = "VENUE",
+  eventDate = "DATE",
+}) {
+  return new Promise((resolve, reject) => {
+    const safeEventCode = String(eventCode).replace(/[^A-Za-z0-9_-]/g, "");
+    const outputPath = path.join(VIDEO_DIR, `${safeEventCode}_screen.mp4`);
+
+    const args = [
+      "pete_qr_video.py",
+      safeEventCode,
+      String(lang),
+      String(artistName),
+      String(venue),
+      String(eventDate),
+      outputPath,
+    ];
+
+    const child = spawn(PYTHON_BIN, args, {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+      },
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    child.on("error", (err) => {
+      reject(err);
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        return reject(
+          new Error(stderr || stdout || `Video process exited with code ${code}`)
+        );
+      }
+
+      const videoPath = `/screen-videos/${safeEventCode}_screen.mp4`;
+      const videoUrl = PUBLIC_BASE_URL
+        ? `${PUBLIC_BASE_URL}${videoPath}`
+        : videoPath;
+
+      resolve({
+        eventCode: safeEventCode,
+        outputPath,
+        videoPath,
+        videoUrl,
+        stdout,
+      });
+    });
+  });
+}
 // CREATE EVENT
 app.post("/event", async (req, res) => {
   try {
@@ -86,7 +161,7 @@ app.post("/event", async (req, res) => {
 };
     events[id] = event;
 
-if (redis) {
+if (process.env.REDIS_URL) {
   await redis.hset(`event:${id}:meta`, {
     id,
     code: code || id,
@@ -117,15 +192,16 @@ app.get("/event/:eventId", async (req, res) => {
     let { eventId } = req.params;
 
 // Try Redis lookup if available
-if (redis) {
+if (process.env.REDIS_URL) {
   const resolvedId = await redis.get(`eventcode:${eventId}`);
   if (resolvedId) {
     eventId = resolvedId;
   }
 }
 
-console.log("RESOLVED EVENT ID:", eventId);
-
+if (process.env.DEBUG_EVENT_LOOKUP === "1") {
+  console.log("RESOLVED EVENT ID:", eventId);
+}
 // Check in-memory first
 if (events[eventId]) {
   return res.json(events[eventId]);
@@ -142,8 +218,8 @@ if (inMemoryEvent) {
 let meta = null;
 
 // Try Redis meta if available
-if (redis) {
-  meta = await redis.hgetall(`event:${eventId}:meta`);
+if (process.env.REDIS_URL) {
+    meta = await redis.hgetall(`event:${eventId}:meta`);
   console.log("EVENT META FROM REDIS:", meta);
 }
 
@@ -174,8 +250,8 @@ app.get("/access/:eventId", async (req, res) => {
     let { eventId } = req.params;
 
     // Try Redis lookup if available
-    if (redis) {
-      const resolvedId = await redis.get(`eventcode:${eventId}`);
+if (process.env.REDIS_URL) {
+        const resolvedId = await redis.get(`eventcode:${eventId}`);
       if (resolvedId) {
         eventId = resolvedId;
       }
@@ -197,8 +273,8 @@ app.get("/access/:eventId", async (req, res) => {
     }
 
     // Redis lookup if available
-    if (!meta && redis) {
-      meta = await redis.hgetall(`event:${eventId}:meta`);
+if (!meta && process.env.REDIS_URL) {
+        meta = await redis.hgetall(`event:${eventId}:meta`);
     }
 
     if (!meta || !meta.id) {
@@ -225,8 +301,8 @@ app.get("/access/:eventId", async (req, res) => {
     }
 
     let claims = "0";
-    if (redis) {
-      claims = await redis.get(`event:${eventId}:claims`);
+if (process.env.REDIS_URL) {
+        claims = await redis.get(`event:${eventId}:claims`);
     }
 
     const fingerprint = makeFingerprint(req);
@@ -244,8 +320,8 @@ app.get("/access/:eventId", async (req, res) => {
       expiresIn: "10m",
     });
 
-    if (redis) {
-      await redis.set(`event:${eventId}:token:${jti}`, "fresh", "EX", 600);
+if (process.env.REDIS_URL) {
+        await redis.set(`event:${eventId}:token:${jti}`, "fresh", "EX", 600);
     }
 
     res.json({
@@ -304,8 +380,8 @@ if (events[eventId]) {
   meta = events[eventId];
 }
 
-if (!meta && redis) {
-  meta = await redis.hgetall(`event:${eventId}:meta`);
+if (!meta && process.env.REDIS_URL) {
+    meta = await redis.hgetall(`event:${eventId}:meta`);
 }
 
 if (!meta || !meta.id) {
@@ -389,8 +465,8 @@ app.post("/reward", async (req, res) => {
 
     rewards[eventId] = reward;
 
-if (redis) {
-  await redis.set(`reward:${eventId}:json`, JSON.stringify(reward));
+if (process.env.REDIS_URL) {
+    await redis.set(`reward:${eventId}:json`, JSON.stringify(reward));
 }
     res.json({ success: true });
   } catch (err) {
@@ -408,14 +484,17 @@ app.get("/reward/:eventId", async (req, res) => {
       return res.json(rewards[eventId]);
     }
 
-    const cachedReward = await redis.get(`reward:${eventId}:json`);
+let cachedReward = null;
 
-    if (cachedReward) {
-      const parsed = JSON.parse(cachedReward);
-      rewards[eventId] = parsed;
-      return res.json(parsed);
-    }
+if (process.env.REDIS_URL) {
+  cachedReward = await redis.get(`reward:${eventId}:json`);
+}
 
+if (cachedReward) {
+  const parsed = JSON.parse(cachedReward);
+  rewards[eventId] = parsed;
+  return res.json(parsed);
+}
     return res.status(404).json({ error: "Not found" });
   } catch (err) {
     console.error("Get reward failed:", err.message);
@@ -437,8 +516,8 @@ app.get("/report/:eventCode", async (req, res) => {
     }
 
     // 2) Fallback til Redis hvis tilgjengelig
-    if (!event && redis) {
-      const resolvedId = await redis.get(`eventcode:${eventCode}`);
+if (!event && process.env.REDIS_URL) {
+        const resolvedId = await redis.get(`eventcode:${eventCode}`);
       if (resolvedId) {
         eventId = resolvedId;
 
@@ -494,13 +573,111 @@ app.get("/report/:eventCode", async (req, res) => {
     res.status(500).json({ error: "Failed to get report" });
   }
 });
+app.post("/generate-screen-video", async (req, res) => {
+  try {
+    const {
+      eventCode,
+      lang = "en",
+      artistName,
+      venue,
+      eventDate,
+    } = req.body || {};
+
+    if (!eventCode) {
+      return res.status(400).json({
+        ok: false,
+        error: "eventCode is required",
+      });
+    }
+
+    let event = null;
+    let eventId = null;
+
+    event = Object.values(events).find((item) => item.code === eventCode);
+
+    if (event) {
+      eventId = event.id;
+    }
+
+if (!event && process.env.REDIS_URL) {
+        const resolvedId = await redis.get(`eventcode:${eventCode}`);
+      if (resolvedId) {
+        eventId = resolvedId;
+
+        const meta = await redis.hgetall(`event:${eventId}:meta`);
+        if (meta && meta.id) {
+          event = {
+            id: meta.id,
+            code: meta.code,
+            name: meta.name,
+            startAt: meta.startAt,
+            unlockAt: meta.unlockAt,
+            endAt: meta.endAt,
+            maxClaims: Number(meta.maxClaims || 0),
+            status: meta.status,
+          };
+        }
+      }
+    }
+
+    const finalArtistName =
+      artistName ||
+      (event && event.name) ||
+      "ARTIST NAME";
+
+    const finalVenue =
+      venue ||
+      (event && event.venue) ||
+      "VENUE";
+
+    const finalEventDate =
+      eventDate ||
+      (event && event.startAt ? event.startAt.slice(0, 10) : "DATE");
+
+    const result = await runScreenVideoGenerator({
+      eventCode,
+      lang,
+      artistName: finalArtistName,
+      venue: finalVenue,
+      eventDate: finalEventDate,
+    });
+
+    if (eventId && redis) {
+      await redis.hset(`event:${eventId}:meta`, {
+        screenVideoUrl: result.videoUrl,
+      });
+    }
+
+    if (eventId && events[eventId]) {
+      events[eventId].screenVideoUrl = result.videoUrl;
+    }
+
+    return res.json({
+      ok: true,
+      eventCode: result.eventCode,
+      videoUrl: result.videoUrl,
+    });
+  } catch (err) {
+    console.error("Generate screen video failed:", err.message);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to generate screen video",
+      details: err.message,
+    });
+  }
+});
 app.get("/health", (req, res) => {
   res.json({ ok: true, port: PORT });
 });
 
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
-  testRedisConnection().catch((err) => {
-    console.error("Redis test failed:", err.message);
-  });
+
+  if (process.env.REDIS_URL) {
+    testRedisConnection().catch((err) => {
+      console.error("Redis test failed:", err.message);
+    });
+  } else {
+    console.log("Redis disabled - running in memory mode");
+  }
 });
