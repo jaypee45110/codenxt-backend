@@ -43,7 +43,7 @@ event_date = sys.argv[5] if len(sys.argv) > 5 else "JULY 4, 2026"
 qr_data = f"https://codetone.codenxt.global/join/{event_code}?lang={lang}"
 
 # Bruk din ferdige transparente ramme med kvadratisk hull:
-frame_path = "src/assets/innercircle-frame.png"
+frame_path = "PeteA.png"
 
 output_dir = "screen_videos"
 os.makedirs(output_dir, exist_ok=True)
