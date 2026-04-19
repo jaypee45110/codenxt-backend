@@ -16,7 +16,7 @@ const JWT_SECRET = "codenxt-dev-secret-change-later";
 
 let events = {};
 let rewards = {};
-const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+const PYTHON_BIN = process.env.PYTHON_BIN || "python";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
 const VIDEO_DIR = path.join(__dirname, "public", "screen-videos");
 

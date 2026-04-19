@@ -1,0 +1,6 @@
+numpy
+pillow
+qrcode
+moviepy
+imageio
+imageio-ffmpeg
