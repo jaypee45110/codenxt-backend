@@ -36,6 +36,7 @@ lang = sys.argv[2] if len(sys.argv) > 2 else "en"
 artist_name = sys.argv[3] if len(sys.argv) > 3 else "PETE ANDERSON"
 venue_name = sys.argv[4] if len(sys.argv) > 4 else "THE TUNING FORK"
 event_date = sys.argv[5] if len(sys.argv) > 5 else "JULY 4, 2026"
+output_path = sys.argv[6] if len(sys.argv) > 6 else f"./public/screen-videos/{event_code}_screen.mp4"
 
 # -----------------------------
 # PATHS
