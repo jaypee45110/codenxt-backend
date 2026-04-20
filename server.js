@@ -142,7 +142,7 @@ function runScreenVideoGenerator({
           new Error(stderr || stdout || `Video process exited with code ${code}`)
         );
       }
-
+console.log("VIDEO EXISTS AFTER GENERATION:", fs.existsSync(outputPath), outputPath);
 const videoPath = `/screen-video/${safeEventCode}`;      const videoUrl = PUBLIC_BASE_URL
         ? `${PUBLIC_BASE_URL}${videoPath}`
         : videoPath;
@@ -683,10 +683,13 @@ if (!event && process.env.REDIS_URL) {
     }
 
     return res.json({
-      ok: true,
-      eventCode: result.eventCode,
-      videoUrl: result.videoUrl,
-    });
+  ok: true,
+  eventCode: result.eventCode,
+  videoUrl: result.videoUrl,
+  outputPath: result.outputPath,
+  stdout: result.stdout,
+  fileExists: fs.existsSync(result.outputPath),
+});
   } catch (err) {
     console.error("Generate screen video failed:", err.message);
     return res.status(500).json({
