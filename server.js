@@ -22,7 +22,21 @@ const VIDEO_DIR = path.join(__dirname, "public", "screen-videos");
 
 fs.mkdirSync(VIDEO_DIR, { recursive: true });
 app.use("/screen-videos", express.static(VIDEO_DIR));
+app.get("/screen-video/:eventCode", (req, res) => {
+  const safeEventCode = String(req.params.eventCode).replace(/[^A-Za-z0-9_-]/g, "");
+  const filePath = path.join(VIDEO_DIR, `${safeEventCode}_screen.mp4`);
 
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({
+      ok: false,
+      error: "Screen video not found",
+      eventCode: safeEventCode,
+      expectedPath: filePath,
+    });
+  }
+
+  res.sendFile(filePath);
+});
 async function testRedisConnection() {
   try {
     await redis.connect();
@@ -114,8 +128,7 @@ function runScreenVideoGenerator({
         );
       }
 
-      const videoPath = `/screen-videos/${safeEventCode}_screen.mp4`;
-      const videoUrl = PUBLIC_BASE_URL
+const videoPath = `/screen-video/${safeEventCode}`;      const videoUrl = PUBLIC_BASE_URL
         ? `${PUBLIC_BASE_URL}${videoPath}`
         : videoPath;
 
@@ -200,7 +213,9 @@ if (process.env.REDIS_URL) {
 }
 
 if (process.env.DEBUG_EVENT_LOOKUP === "1") {
+if (process.env.DEBUG_EVENT_LOOKUP === "1") {
   console.log("RESOLVED EVENT ID:", eventId);
+}
 }
 // Check in-memory first
 if (events[eventId]) {
