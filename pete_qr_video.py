@@ -45,9 +45,7 @@ qr_data = f"https://codetone.codenxt.global/join/{event_code}?lang={lang}"
 # Bruk din ferdige transparente ramme med kvadratisk hull:
 frame_path = "PeteA.png"
 
-output_dir = "screen_videos"
-os.makedirs(output_dir, exist_ok=True)
-output_path = os.path.join(output_dir, f"{event_code}_screen.mp4")
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
 # -----------------------------
 # VIDEO CONFIG
