@@ -37,6 +37,21 @@ app.get("/screen-video/:eventCode", (req, res) => {
 
   res.sendFile(filePath);
 });
+app.get("/screen-video/:eventCode", (req, res) => {
+  const safeEventCode = String(req.params.eventCode).replace(/[^A-Za-z0-9_-]/g, "");
+  const filePath = path.join(VIDEO_DIR, `${safeEventCode}_screen.mp4`);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({
+      ok: false,
+      error: "Screen video not found",
+      eventCode: safeEventCode,
+      expectedPath: filePath,
+    });
+  }
+
+  res.sendFile(filePath);
+});
 async function testRedisConnection() {
   try {
     await redis.connect();
