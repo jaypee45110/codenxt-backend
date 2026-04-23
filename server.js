@@ -9,14 +9,15 @@ const path = require("path");
 const { spawn } = require("child_process");
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ limit: '20mb', extended: true }));
 
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = "codenxt-dev-secret-change-later";
 
 let events = {};
 let rewards = {};
-const PYTHON_BIN = process.env.PYTHON_BIN || "python";
+const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
 const VIDEO_DIR = path.join(__dirname, "public", "screen-videos");
 
@@ -125,12 +126,16 @@ function runScreenVideoGenerator({
     let stderr = "";
 
     child.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
+  const text = data.toString();
+  stdout += text;
+  console.log("PYTHON STDOUT:", text);
+});
 
-    child.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
+child.stderr.on("data", (data) => {
+  const text = data.toString();
+  stderr += text;
+  console.error("PYTHON STDERR:", text);
+});
 
     child.on("error", (err) => {
       reject(err);
@@ -160,9 +165,10 @@ const videoPath = `/screen-video/${safeEventCode}`;      const videoUrl = PUBLIC
 // CREATE EVENT
 app.post("/event", async (req, res) => {
   try {
-    const {
-        code,
+const {
+    code,
   name,
+  artistLogo = "",
   startAt,
   unlockAt,
   endAt,
@@ -177,10 +183,11 @@ app.post("/event", async (req, res) => {
 
     const id = uuidv4();
 
-    const event = {
+const event = {
   id,
   code: code || id,
   name,
+  artistLogo,
   startAt,
   unlockAt,
   endAt,
@@ -191,15 +198,16 @@ app.post("/event", async (req, res) => {
 
 if (process.env.REDIS_URL) {
   await redis.hset(`event:${id}:meta`, {
-    id,
-    code: code || id,
-    name,
-    startAt,
-    unlockAt,
-    endAt,
-    maxClaims: String(maxClaims),
-    status,
-  });
+  id,
+  code: code || id,
+  name,
+  artistLogo,
+  startAt,
+  unlockAt,
+  endAt,
+  maxClaims: String(maxClaims),
+  status,
+});
 
   await redis.set(`eventcode:${code || id}`, id);
   await redis.set(`event:${id}:claims`, "0");
@@ -233,46 +241,62 @@ if (process.env.DEBUG_EVENT_LOOKUP === "1") {
 }
 }
 // Check in-memory first
-if (events[eventId]) {
-  return res.json(events[eventId]);
-}
 
 // Fallback: find by code in memory when Redis is unavailable
 const inMemoryEvent = Object.values(events).find(
   (event) => event.code === eventId
 );
 
-if (inMemoryEvent) {
-  return res.json(inMemoryEvent);
-}
-let meta = null;
 
-// Try Redis meta if available
-if (process.env.REDIS_URL) {
+  let meta = null;
+
+  if (process.env.REDIS_URL) {
     meta = await redis.hgetall(`event:${eventId}:meta`);
-  console.log("EVENT META FROM REDIS:", meta);
+    console.log("EVENT META FROM REDIS:", meta);
+    if ((!meta || !meta.id) && events[eventId]) {
+  meta = events[eventId];
 }
 
-if (!meta || !meta.id) {
-  return res.status(404).json({ error: "Event not found" });
+if ((!meta || !meta.id) && inMemoryEvent) {
+  meta = inMemoryEvent;
 }
-    const normalizedMeta = {
-      id: meta.id,
-      code: meta.code,
-      name: meta.name,
-      startAt: meta.startAt,
-      unlockAt: meta.unlockAt,
-      endAt: meta.endAt,
-      maxClaims: Number(meta.maxClaims || 0),
-      status: meta.status,
-    };
-
-    events[eventId] = normalizedMeta;
-    return res.json(normalizedMeta);
-  } catch (err) {
-    console.error("Get event failed:", err.message);
-    return res.status(500).json({ error: "Failed to get event" });
   }
+let rawScans = 0;
+let uniqueScans = 0;
+let innerCircleJoinCount = 0;
+
+if (process.env.REDIS_URL) {
+  rawScans = Number(await redis.get(`event:${eventId}:rawScans`) || 0);
+  uniqueScans = Number(await redis.get(`event:${eventId}:uniqueScans`) || 0);
+  innerCircleJoinCount = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
+} else if (meta) {
+  rawScans = Number(meta.rawScans || 0);
+  uniqueScans = Number(meta.uniqueScans || 0);
+  innerCircleJoinCount = Number(meta.innerCircleJoinCount || 0);
+}
+
+  const normalizedMeta = {
+    id: meta?.id,
+    code: meta?.code,
+    name: meta?.name,
+    startAt: meta?.startAt,
+    unlockAt: meta?.unlockAt,
+    endAt: meta?.endAt,
+    maxClaims: Number(meta?.maxClaims || 0),
+    status: meta?.status,
+    screenVideoUrl: meta?.screenVideoUrl || "",
+    rawScans,
+    uniqueScans,
+    innerCircleJoinCount,
+  };
+
+  events[eventId] = normalizedMeta;
+  return res.json(normalizedMeta);
+
+} catch (err) {
+  console.error("Get event failed:", err.message);
+  return res.status(500).json({ error: "Failed to get event" });
+}
 });
 // ACCESS STATUS + SHORT-LIVED TOKEN
 app.get("/access/:eventId", async (req, res) => {
@@ -335,9 +359,28 @@ if (process.env.REDIS_URL) {
         claims = await redis.get(`event:${eventId}:claims`);
     }
 
-    const fingerprint = makeFingerprint(req);
-    const jti = uuidv4();
+const fingerprint = makeFingerprint(req);
 
+if (process.env.REDIS_URL) {
+  await redis.incr(`event:${eventId}:rawScans`);
+
+  const fpKey = `event:${eventId}:fp:${fingerprint}`;
+  const isNew = await redis.set(fpKey, "1", "NX", "EX", 86400);
+
+  if (isNew) {
+    await redis.incr(`event:${eventId}:uniqueScans`);
+  }
+} else if (meta) {
+  meta.rawScans = Number(meta.rawScans || 0) + 1;
+  meta._fingerprints = meta._fingerprints || {};
+
+  if (!meta._fingerprints[fingerprint]) {
+    meta._fingerprints[fingerprint] = true;
+    meta.uniqueScans = Number(meta.uniqueScans || 0) + 1;
+  }
+}
+
+const jti = uuidv4();
     const tokenPayload = {
       sub: "access",
       eventId,
@@ -421,7 +464,14 @@ if (!meta || !meta.id) {
     error: "Event not found",
   });
 }
-    const now = Date.now();
+
+if (process.env.REDIS_URL) {
+  await redis.incr(`event:${eventId}:innerCircleJoinCount`);
+} else if (meta) {
+  meta.innerCircleJoinCount = Number(meta.innerCircleJoinCount || 0) + 1;
+}
+
+const now = Date.now();
 
     if (meta.status !== "active") {
       return res.status(403).json({
@@ -553,15 +603,109 @@ if (!event && process.env.REDIS_URL) {
 
         const meta = await redis.hgetall(`event:${eventId}:meta`);
         if (meta && meta.id) {
+event = {
+  id: meta.id,
+  code: meta.code,
+  name: meta.name,
+  artistLogo: meta.artistLogo || "",
+  startAt: meta.startAt,
+  unlockAt: meta.unlockAt,
+  endAt: meta.endAt,
+  maxClaims: Number(meta.maxClaims || 0),
+  status: meta.status,
+  screenVideoUrl: meta.screenVideoUrl || "",
+  screenVideoUrl: meta.screenVideoUrl || "",
+};
+        }
+      }
+    }
+
+    if (!event || !eventId) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const rawScans = Number(
+      process.env.REDIS_URL
+        ? await redis.get(`event:${eventId}:rawScans`) || 0
+        : event.rawScans || 0
+    );
+
+    const uniqueScans = Number(
+      process.env.REDIS_URL
+        ? await redis.get(`event:${eventId}:uniqueScans`) || 0
+        : event.uniqueScans || 0
+    );
+
+    const joins = Number(
+      process.env.REDIS_URL
+        ? await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0
+        : event.innerCircleJoinCount || 0
+    );
+const audienceSize = Number(event.audienceSize || 0);
+    const conversionRate =
+      audienceSize > 0 ? Number(((uniqueScans / audienceSize) * 100).toFixed(1)) : 0;
+
+    const innerCircle = [];
+
+    return res.json({
+      event: {
+        id: event.id,
+        eventCode: event.code,
+        artistName: event.name || "Artist / Event Name",
+        venue: event.venue || "Venue Name",
+        date: event.startAt ? event.startAt.slice(0, 10) : "",
+      },
+metrics: {
+  scans: rawScans,
+  uniqueScans,
+  joins,
+  conversionRate,
+},
+      innerCircle,
+    });
+  } catch (err) {
+    console.error("Get report failed:", err.message);
+    res.status(500).json({ error: "Failed to get report" });
+  }
+});
+app.post("/inner-circle", async (req, res) => {
+  try {
+    const { eventCode } = req.body || {};
+
+    if (!eventCode) {
+      return res.status(400).json({ error: "eventCode is required" });
+    }
+
+    let eventId = null;
+    let event = null;
+
+    for (const id in events) {
+      if (events[id]?.code === eventCode) {
+        eventId = id;
+        event = events[id];
+        break;
+      }
+    }
+
+    if (!eventId && process.env.REDIS_URL) {
+      const resolvedId = await redis.get(`eventcode:${eventCode}`);
+      if (resolvedId) {
+        eventId = resolvedId;
+
+        const meta = await redis.hgetall(`event:${eventId}:meta`);
+        if (meta && meta.id) {
           event = {
             id: meta.id,
             code: meta.code,
             name: meta.name,
+            artistLogo: meta.artistLogo || "",
             startAt: meta.startAt,
             unlockAt: meta.unlockAt,
             endAt: meta.endAt,
             maxClaims: Number(meta.maxClaims || 0),
             status: meta.status,
+            screenVideoUrl: meta.screenVideoUrl || "",
+            innerCircleJoinCount: Number(meta.innerCircleJoinCount || 0),
           };
         }
       }
@@ -571,36 +715,24 @@ if (!event && process.env.REDIS_URL) {
       return res.status(404).json({ error: "Event not found" });
     }
 
-    // 3) Hent joins fra minnebasert report-struktur finnes ikke på backend,
-    // så vi simulerer foreløpig et rapportgrunnlag
-    const simulatedScans = 7286;
-    const simulatedJoins = 2184;
-    const simulatedConversionRate = 39.6;
+    let joins = 0;
 
-    // 4) Lag simulerte telefonnumre i ønsket format
-    const innerCircle = Array.from({ length: 25 }, (_, i) => {
-      const suffix = String(10000 + i).padStart(5, "0");
-      return `+47900${suffix}`;
-    });
+    if (process.env.REDIS_URL) {
+      joins = await redis.incr(`event:${eventId}:innerCircleJoinCount`);
+    } else {
+      event.innerCircleJoinCount = Number(event.innerCircleJoinCount || 0) + 1;
+      joins = event.innerCircleJoinCount;
+    }
 
     return res.json({
-      event: {
-        id: event.id,
-        eventCode: event.code,
-        artistName: event.name || "Artist / Event Name",
-        venue: "Venue Name",
-        date: event.startAt ? event.startAt.slice(0, 10) : "",
-      },
-      metrics: {
-        scans: simulatedScans,
-        joins: simulatedJoins,
-        conversionRate: simulatedConversionRate,
-      },
-      innerCircle,
+      success: true,
+      eventCode,
+      eventId,
+      innerCircleJoinCount: Number(joins || 0),
     });
   } catch (err) {
-    console.error("Get report failed:", err.message);
-    res.status(500).json({ error: "Failed to get report" });
+    console.error("InnerCircle increment failed:", err.message);
+    res.status(500).json({ error: "Failed to increment InnerCircle count" });
   }
 });
 app.post("/generate-screen-video", async (req, res) => {
@@ -649,7 +781,23 @@ if (!event && process.env.REDIS_URL) {
         }
       }
     }
+const lockKey = `event:${eventId}:video:lock`;
 
+const isLocked = process.env.REDIS_URL
+  ? await redis.get(lockKey)
+  : false;
+
+if (isLocked) {
+  return res.json({
+    ok: true,
+    message: "Video already generating or ready",
+    videoUrl: `/screen-video/${eventCode}`,
+  });
+}
+
+if (process.env.REDIS_URL) {
+  await redis.set(lockKey, "1", "EX", 30);
+}
     const finalArtistName =
       artistName ||
       (event && event.name) ||
@@ -673,13 +821,16 @@ if (!event && process.env.REDIS_URL) {
     });
 
     if (eventId && redis) {
-      await redis.hset(`event:${eventId}:meta`, {
-        screenVideoUrl: result.videoUrl,
-      });
+      await redis.hset(`event:${eventId}:meta`, "screenVideoUrl", result.videoUrl);
+      if (process.env.REDIS_URL) {
+  await redis.del(lockKey);
+}
     }
 
     if (eventId && events[eventId]) {
-      events[eventId].screenVideoUrl = result.videoUrl;
+if (events[eventId]) {
+  events[eventId].screenVideoUrl = result.videoUrl;
+}
     }
 
     return res.json({
