@@ -51,7 +51,7 @@ os.makedirs(os.path.dirname(output_path), exist_ok=True)
 # -----------------------------
 # VIDEO CONFIG
 # -----------------------------
-duration = 8
+duration = 6
 fps = 24
 
 BG_W = 640
@@ -60,7 +60,7 @@ BG_H = 640
 # Badge-plassering og størrelse
 badge_size = 560
 badge_center_x = BG_W // 2
-badge_center_y = 455
+badge_center_y = 320
 
 # QR i badge
 qr_size = 168
@@ -72,7 +72,7 @@ base_glow_blur = 36
 base_glow_strength = 1.12
 pulse_scale_amount = 0.022
 pulse_speed = 1.0
-unlock_boost_start = 7.4
+unlock_boost_start = 5.2
 unlock_flash_strength = 0.16
 
 # Stjerner
@@ -80,13 +80,12 @@ np.random.seed(42)
 num_stars = 260
 stars = []
 
-# Tekst
-headline_y = 90
-cta_y = 770
-status_y = 845
-footer_rule_y = 920
-footer_y = 960
-brand_y = 1005
+headline_y = 22
+cta_y = 560
+status_y = 620
+footer_rule_y = 640
+footer_y = 660
+brand_y = 700
 
 headline_color = (255, 255, 255, 255)
 cta_color = (255, 255, 255, 255)
@@ -103,11 +102,16 @@ qr_back_color = "#F4EFE6"
 # FONTS
 # -----------------------------
 FONT_CANDIDATES_BOLD = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/Helvetica.ttc",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
 ]
+
 FONT_CANDIDATES_REGULAR = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Supplemental/Helvetica.ttc",
 ]
@@ -123,7 +127,7 @@ def load_font(candidates: list[str], size: int) -> ImageFont.FreeTypeFont | Imag
     return ImageFont.load_default()
 
 
-headline_font = load_font(FONT_CANDIDATES_BOLD, 84)
+headline_font = load_font(FONT_CANDIDATES_BOLD, 52)
 cta_font = load_font(FONT_CANDIDATES_BOLD, 54)
 status_font = load_font(FONT_CANDIDATES_BOLD, 46)
 footer_font = load_font(FONT_CANDIDATES_BOLD, 42)
@@ -269,15 +273,26 @@ def make_text_layer() -> Image.Image:
     layer = Image.new("RGBA", (BG_W, BG_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer, "RGBA")
 
-    fitted_headline_font = fit_text(draw, artist_name.upper(), BG_W - 220, 84)
-    center_text(draw, headline_y, artist_name.upper(), fitted_headline_font, headline_color)
+    headline_text = artist_name.upper()
 
-    cta_text = "SCAN NOW"
+    headline_font = fit_text(draw, headline_text, BG_W - 80, 48)
+
+    bbox = draw.textbbox((0, 0), headline_text, font=headline_font)
+    text_width = bbox[2] - bbox[0]
+
+    headline_x = (BG_W - text_width) // 2
+
+    draw.text(
+    (headline_x, headline_y),
+    headline_text,
+    font=headline_font,
+    fill=headline_color
+)
+    cta_text = ""
     center_text(draw, cta_y, cta_text, cta_font, cta_color)
 
-    status_text = "ACTIVE AFTER THE SHOW"
-    center_text(draw, status_y, status_text, status_font, status_color)
-
+# status_text = "ACTIVE AFTER THE SHOW"
+# center_text(draw, status_y, status_text, status_font, status_color)
     # footer rule
     rule_w = 560
     draw.line(
@@ -287,9 +302,8 @@ def make_text_layer() -> Image.Image:
     )
 
     footer_text = f"{venue_name.upper()} • {event_date.upper()}"
-    fitted_footer_font = fit_text(draw, footer_text, BG_W - 260, 42)
-    center_text(draw, footer_y, footer_text, fitted_footer_font, footer_color)
-
+    ooter_font = load_font(FONT_CANDIDATES_REGULAR, 32)
+    center_text(draw, footer_y, footer_text, footer_font, footer_color)
     # brand
     brand_left = "codeTone"
     brand_mid = " powered by "
