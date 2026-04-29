@@ -260,6 +260,13 @@ const inMemoryEvent = Object.values(events).find(
   if (process.env.REDIS_URL) {
     meta = await redis.hgetall(`event:${eventId}:meta`);
     console.log("EVENT META FROM REDIS:", meta);
+    if (meta && meta.badgeConfig) {
+  try {
+    meta.badgeConfig = JSON.parse(meta.badgeConfig);
+  } catch {
+    meta.badgeConfig = { template: "americana" };
+  }
+}
     if ((!meta || !meta.id) && events[eventId]) {
   meta = events[eventId];
 }
@@ -286,6 +293,7 @@ if (process.env.REDIS_URL) {
     id: meta?.id,
     code: meta?.code,
     name: meta?.name,
+    badgeConfig: meta?.badgeConfig,
     startAt: meta?.startAt,
     unlockAt: meta?.unlockAt,
     endAt: meta?.endAt,
