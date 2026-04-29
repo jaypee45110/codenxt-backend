@@ -37,15 +37,14 @@ artist_name = sys.argv[3] if len(sys.argv) > 3 else "PETE ANDERSON"
 venue_name = sys.argv[4] if len(sys.argv) > 4 else "THE TUNING FORK"
 event_date = sys.argv[5] if len(sys.argv) > 5 else "JULY 4, 2026"
 output_path = sys.argv[6] if len(sys.argv) > 6 else f"./public/screen-videos/{event_code}_screen.mp4"
-
+badge_file = sys.argv[7] if len(sys.argv) > 7 else "americana.png"
 # -----------------------------
 # PATHS
 # -----------------------------
 qr_data = f"https://codetone.codenxt.global/join/{event_code}?lang={lang}"
 
 # Bruk din ferdige transparente ramme med kvadratisk hull:
-frame_path = "PeteA.png"
-
+frame_path = os.path.join("assets", "badge-vibes", badge_file)
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
 # -----------------------------
