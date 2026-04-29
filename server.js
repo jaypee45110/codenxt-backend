@@ -962,11 +962,15 @@ if (process.env.REDIS_URL) {
     const finalEventDate =
       eventDate ||
       (event && event.startAt ? event.startAt.slice(0, 10) : "DATE");
-    const badgeConfig = event?.badgeConfig
-      ? typeof event.badgeConfig === "string"
-        ? JSON.parse(event.badgeConfig)
-        : event.badgeConfig
-      : { template: "americana" };
+const incomingBadgeConfig = req.body.badgeConfig;
+
+const badgeConfig = incomingBadgeConfig
+  ? incomingBadgeConfig
+  : event?.badgeConfig
+    ? typeof event.badgeConfig === "string"
+      ? JSON.parse(event.badgeConfig)
+      : event.badgeConfig
+    : { template: "americana" };
 
     const badgeMap = {
       americana: "americana.png",
