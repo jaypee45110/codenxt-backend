@@ -96,20 +96,22 @@ function runScreenVideoGenerator({
   artistName = "ARTIST NAME",
   venue = "VENUE",
   eventDate = "DATE",
+  badgeFile = "americana.png",
 }) {
-  return new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
     const safeEventCode = String(eventCode).replace(/[^A-Za-z0-9_-]/g, "");
     const outputPath = path.join(VIDEO_DIR, `${safeEventCode}_screen.mp4`);
 
     const args = [
-      "pete_qr_video.py",
-      safeEventCode,
-      String(lang),
-      String(artistName),
-      String(venue),
-      String(eventDate),
-      outputPath,
-    ];
+  "pete_qr_video.py",
+  safeEventCode,
+  String(lang),
+  String(artistName),
+  String(venue),
+  String(eventDate),
+  outputPath,
+  String(badgeFile),
+];
 
     const child = spawn(PYTHON_BIN, args, {
       cwd: __dirname,
@@ -955,8 +957,15 @@ if (process.env.REDIS_URL) {
     const finalEventDate =
       eventDate ||
       (event && event.startAt ? event.startAt.slice(0, 10) : "DATE");
-
     const result = await runScreenVideoGenerator({
+      eventCode,
+      lang,
+      artistName: finalArtistName,
+      venue: finalVenue,
+      eventDate: finalEventDate,
+      badgeFile,
+    });
+        const result = await runScreenVideoGenerator({
       eventCode,
       lang,
       artistName: finalArtistName,
