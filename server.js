@@ -996,6 +996,7 @@ const badgeConfig = incomingBadgeConfig
 
     if (eventId && redis) {
       await redis.hset(`event:${eventId}:meta`, "screenVideoUrl", result.videoUrl);
+      await redis.hset(`event:${eventId}:meta`, "badgeConfig", JSON.stringify(badgeConfig));
       if (process.env.REDIS_URL) {
   await redis.del(lockKey);
 }
