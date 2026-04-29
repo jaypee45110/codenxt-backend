@@ -300,6 +300,7 @@ if (process.env.REDIS_URL) {
     id: meta?.id,
     code: meta?.code,
     name: meta?.name,
+    artistLogo: meta?.artistLogo || "",
     badgeConfig: meta?.badgeConfig,
     startAt: meta?.startAt,
     unlockAt: meta?.unlockAt,
