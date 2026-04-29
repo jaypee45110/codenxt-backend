@@ -962,6 +962,25 @@ if (process.env.REDIS_URL) {
     const finalEventDate =
       eventDate ||
       (event && event.startAt ? event.startAt.slice(0, 10) : "DATE");
+    const badgeConfig = event?.badgeConfig
+      ? typeof event.badgeConfig === "string"
+        ? JSON.parse(event.badgeConfig)
+        : event.badgeConfig
+      : { template: "americana" };
+
+    const badgeMap = {
+      americana: "americana.png",
+      rock: "rock.png",
+      blues: "blues.png",
+      hiphop: "rap.png",
+      folk: "folk:acoustic.png",
+      punk: "punk:grunge.png",
+      pop: "pop.png",
+      heavymetal: "heavymetal.png",
+    };
+
+    const badgeFile = badgeMap[badgeConfig.template] || "americana.png";
+
     const result = await runScreenVideoGenerator({
       eventCode,
       lang,
