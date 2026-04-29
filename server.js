@@ -23,11 +23,21 @@ const VIDEO_DIR = path.join(__dirname, "public", "screen-videos");
 
 fs.mkdirSync(VIDEO_DIR, { recursive: true });
 app.use("/screen-videos", express.static(VIDEO_DIR));
-app.get("/screen-video/:eventCode", (req, res) => {
-  const safeEventCode = String(req.params.eventCode).replace(/[^A-Za-z0-9_-]/g, "");
+app.get("/screen-video/:eventCode", async (req, res) => {
+    const safeEventCode = String(req.params.eventCode).replace(/[^A-Za-z0-9_-]/g, "");
   const filePath = path.join(VIDEO_DIR, `${safeEventCode}_screen.mp4`);
 
-  if (!fs.existsSync(filePath)) {
+if (!fs.existsSync(filePath)) {
+  console.log("Video missing, auto-generating:", safeEventCode);
+
+  try {
+    // kall samme generator som /generate-screen-video bruker
+    await generateScreenVideo({
+      eventCode: safeEventCode,
+      artistName: "Event",
+    });
+  } catch (err) {
+    console.error("Auto-generate failed:", err.message);
     return res.status(404).json({
       ok: false,
       error: "Screen video not found",
@@ -35,24 +45,11 @@ app.get("/screen-video/:eventCode", (req, res) => {
       expectedPath: filePath,
     });
   }
+}
 
   res.sendFile(filePath);
 });
-app.get("/screen-video/:eventCode", (req, res) => {
-  const safeEventCode = String(req.params.eventCode).replace(/[^A-Za-z0-9_-]/g, "");
-  const filePath = path.join(VIDEO_DIR, `${safeEventCode}_screen.mp4`);
 
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({
-      ok: false,
-      error: "Screen video not found",
-      eventCode: safeEventCode,
-      expectedPath: filePath,
-    });
-  }
-
-  res.sendFile(filePath);
-});
 async function testRedisConnection() {
   try {
     await redis.connect();
@@ -166,15 +163,17 @@ const videoPath = `/screen-video/${safeEventCode}`;      const videoUrl = PUBLIC
 app.post("/event", async (req, res) => {
   try {
 const {
-    code,
+  code,
   name,
-  artistLogo = "",
+  artistLogo,
+  badgeConfig,
   startAt,
   unlockAt,
   endAt,
-  maxClaims = 5000,
-  status = "active",
+  maxClaims,
+  status
 } = req.body;
+
     if (!name || !startAt || !unlockAt || !endAt) {
       return res.status(400).json({
         error: "name, startAt, unlockAt and endAt are required",
@@ -188,6 +187,9 @@ const event = {
   code: code || id,
   name,
   artistLogo,
+  badgeConfig,
+  venue,
+  city,
   startAt,
   unlockAt,
   endAt,
@@ -197,11 +199,13 @@ const event = {
     events[id] = event;
 
 if (process.env.REDIS_URL) {
-  await redis.hset(`event:${id}:meta`, {
+await redis.hset(`event:${id}:meta`, {
   id,
   code: code || id,
   name,
   artistLogo,
+  venue,
+  city,
   startAt,
   unlockAt,
   endAt,
@@ -645,7 +649,22 @@ const audienceSize = Number(event.audienceSize || 0);
     const conversionRate =
       audienceSize > 0 ? Number(((uniqueScans / audienceSize) * 100).toFixed(1)) : 0;
 
-    const innerCircle = [];
+let innerCircle = [];
+
+if (process.env.REDIS_URL) {
+  const storedPhones = await redis.lrange(`event:${eventId}:phones`, 0, -1);
+  innerCircle = storedPhones
+    .map((item) => {
+      try {
+        return JSON.parse(item);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+} else {
+  innerCircle = event.innerCircle || [];
+}
 
     return res.json({
       event: {
@@ -733,6 +752,56 @@ app.post("/inner-circle", async (req, res) => {
   } catch (err) {
     console.error("InnerCircle increment failed:", err.message);
     res.status(500).json({ error: "Failed to increment InnerCircle count" });
+  }
+});
+app.post("/sms-inbound", async (req, res) => {
+  try {
+    const phone = req.body.From || req.body.from || req.body.phone || "";
+    const message = req.body.Body || req.body.body || "";
+
+    const match = message.match(/CT-\d+/i);
+    const eventCode = match ? match[0].toUpperCase() : "";
+
+    if (!phone || !eventCode) {
+      return res.status(400).json({ error: "phone and eventCode are required" });
+    }
+
+    let eventId = null;
+
+    if (process.env.REDIS_URL) {
+      eventId = await redis.get(`eventcode:${eventCode}`);
+    }
+
+    if (!eventId) {
+      for (const id in events) {
+        if (events[id]?.code === eventCode) {
+          eventId = id;
+          break;
+        }
+      }
+    }
+
+    if (!eventId) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const entry = {
+      type: "sms_join",
+      timestamp: new Date().toISOString(),
+      eventCode,
+      phone,
+      source: "sms",
+      scanId: "",
+    };
+
+    if (process.env.REDIS_URL) {
+      await redis.rpush(`event:${eventId}:phones`, JSON.stringify(entry));
+    }
+
+    return res.json({ success: true, entry });
+  } catch (err) {
+    console.error("SMS inbound failed:", err.message);
+    res.status(500).json({ error: "Failed to store SMS join" });
   }
 });
 app.post("/scan", async (req, res) => {
