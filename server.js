@@ -213,7 +213,7 @@ await redis.hset(`event:${id}:meta`, {
   id,
   code: code || id,
   name,
-  artistLogo,
+artistLogo: artistLogo || "",
   badgeConfig: JSON.stringify(badgeConfig || { template: "americana" }),
   venue,
   city,
