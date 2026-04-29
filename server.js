@@ -970,13 +970,6 @@ if (process.env.REDIS_URL) {
       eventDate: finalEventDate,
       badgeFile,
     });
-        const result = await runScreenVideoGenerator({
-      eventCode,
-      lang,
-      artistName: finalArtistName,
-      venue: finalVenue,
-      eventDate: finalEventDate,
-    });
 
     if (eventId && redis) {
       await redis.hset(`event:${eventId}:meta`, "screenVideoUrl", result.videoUrl);
