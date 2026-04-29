@@ -182,6 +182,7 @@ const {
   maxClaims,
   status
 } = req.body;
+console.log("CREATE EVENT ARTIST LOGO:", artistLogo ? "HAS LOGO" : "NO LOGO");
 
     if (!name || !startAt || !unlockAt || !endAt) {
       return res.status(400).json({
