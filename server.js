@@ -978,8 +978,8 @@ if (process.env.REDIS_URL) {
       pop: "pop.png",
       heavymetal: "heavymetal.png",
     };
-    console.log("BADGE DEBUG:", badgeConfig, "=>", badgeFile);
     const badgeFile = badgeMap[badgeConfig.template] || "americana.png";
+    console.log("BADGE DEBUG:", badgeConfig, "=>", badgeFile);
 
     const result = await runScreenVideoGenerator({
       eventCode,
