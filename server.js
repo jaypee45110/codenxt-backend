@@ -32,10 +32,10 @@ if (!fs.existsSync(filePath)) {
 
   try {
     // kall samme generator som /generate-screen-video bruker
-    await generateScreenVideo({
-      eventCode: safeEventCode,
-      artistName: "Event",
-    });
+await runScreenVideoGenerator({
+  eventCode: safeEventCode,
+  artistName: "Event",
+});
   } catch (err) {
     console.error("Auto-generate failed:", err.message);
     return res.status(404).json({
