@@ -354,22 +354,24 @@ if (process.env.REDIS_URL) {
   innerCircleJoinCount = Number(meta.innerCircleJoinCount || 0);
 }
 
-  const normalizedMeta = {
-    id: meta?.id,
-    code: meta?.code,
-    name: meta?.name,
-    artistLogo: meta?.artistLogo || "",
-    badgeConfig: meta?.badgeConfig,
-    startAt: meta?.startAt,
-    unlockAt: meta?.unlockAt,
-    endAt: meta?.endAt,
-    maxClaims: Number(meta?.maxClaims || 0),
-    status: meta?.status,
-    screenVideoUrl: meta?.screenVideoUrl || "",
-    rawScans,
-    uniqueScans,
-    innerCircleJoinCount,
-  };
+const normalizedMeta = {
+  id: meta?.id,
+  code: meta?.code,
+  name: meta?.name,
+  artistLogo: meta?.artistLogo || "",
+  badgeConfig: meta?.badgeConfig,
+  venue: meta?.venue || "",
+  city: meta?.city || "",
+  startAt: meta?.startAt,
+  unlockAt: meta?.unlockAt,
+  endAt: meta?.endAt,
+  maxClaims: Number(meta?.maxClaims || 0),
+  status: meta?.status,
+  screenVideoUrl: meta?.screenVideoUrl || "",
+  rawScans,
+  uniqueScans,
+  innerCircleJoinCount,
+};
 
   events[eventId] = normalizedMeta;
   return res.json(normalizedMeta);
