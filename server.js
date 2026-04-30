@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const REDIS_ENABLED = !!process.env.REDIS_URL;
 const express = require("express");
 const cors = require("cors");
@@ -7,6 +9,8 @@ const redis = require("./redis");
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
+const multer = require("multer");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const app = express();
 app.use(cors({
   origin: "*",
@@ -25,9 +29,64 @@ let rewards = {};
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
 const VIDEO_DIR = path.join(__dirname, "public", "screen-videos");
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024,
+  },
+});
 
+const r2 = new S3Client({
+  region: "auto",
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
 fs.mkdirSync(VIDEO_DIR, { recursive: true });
 app.use("/screen-videos", express.static(VIDEO_DIR));
+app.post("/upload-reward-file", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        ok: false,
+        error: "No file uploaded",
+      });
+    }
+
+    const safeEventCode = String(req.body.eventCode || "general").replace(/[^A-Za-z0-9_-]/g, "");
+    const originalName = String(req.file.originalname || "reward-file").replace(/[^A-Za-z0-9._-]/g, "_");
+    const objectKey = `rewards/${safeEventCode}/${Date.now()}-${uuidv4()}-${originalName}`;
+
+    await r2.send(
+      new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: objectKey,
+        Body: req.file.buffer,
+        ContentType: req.file.mimetype || "application/octet-stream",
+      })
+    );
+
+    const publicBase = String(process.env.R2_PUBLIC_BASE_URL || "").replace(/\/$/, "");
+    const url = `${publicBase}/${objectKey}`;
+
+    return res.json({
+      ok: true,
+      url,
+      key: objectKey,
+      contentType: req.file.mimetype,
+      size: req.file.size,
+    });
+  } catch (error) {
+    console.error("R2 upload failed:", error);
+    return res.status(500).json({
+      ok: false,
+      error: "R2 upload failed",
+      details: error.message,
+    });
+  }
+});
 app.get("/screen-video/:eventCode", async (req, res) => {
     const safeEventCode = String(req.params.eventCode).replace(/[^A-Za-z0-9_-]/g, "");
   const filePath = path.join(VIDEO_DIR, `${safeEventCode}_screen.mp4`);
