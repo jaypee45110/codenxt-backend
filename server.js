@@ -182,7 +182,6 @@ const {
   maxClaims,
   status
 } = req.body;
-console.log("CREATE EVENT ARTIST LOGO:", artistLogo ? "HAS LOGO" : "NO LOGO");
 
     if (!name || !startAt || !unlockAt || !endAt) {
       return res.status(400).json({
@@ -267,7 +266,6 @@ const inMemoryEvent = Object.values(events).find(
 
   if (process.env.REDIS_URL) {
     meta = await redis.hgetall(`event:${eventId}:meta`);
-    console.log("EVENT META FROM REDIS:", meta);
     if (meta && meta.badgeConfig) {
   try {
     meta.badgeConfig = JSON.parse(meta.badgeConfig);
@@ -985,7 +983,6 @@ const badgeConfig = incomingBadgeConfig
       heavymetal: "heavymetal.png",
     };
     const badgeFile = badgeMap[badgeConfig.template] || "americana.png";
-    console.log("BADGE DEBUG:", badgeConfig, "=>", badgeFile);
 
     const result = await runScreenVideoGenerator({
       eventCode,
