@@ -272,8 +272,7 @@ def make_text_layer() -> Image.Image:
     layer = Image.new("RGBA", (BG_W, BG_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer, "RGBA")
 
-    headline_text = artist_name.upper()
-
+    headline_text = "SCAN & GET A PERSONAL REWARD"
     headline_font = fit_text(draw, headline_text, BG_W - 80, 48)
 
     bbox = draw.textbbox((0, 0), headline_text, font=headline_font)
