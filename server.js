@@ -821,7 +821,20 @@ app.post("/inner-circle", async (req, res) => {
       event.innerCircleJoinCount = Number(event.innerCircleJoinCount || 0) + 1;
       joins = event.innerCircleJoinCount;
     }
+const phone = req.body.phone || "";
 
+if (phone && process.env.REDIS_URL) {
+  const entry = {
+    type: "web_join",
+    timestamp: new Date().toISOString(),
+    eventCode,
+    phone,
+    source: "web",
+    scanId: "",
+  };
+
+  await redis.rpush(`event:${eventId}:phones`, JSON.stringify(entry));
+}
     return res.json({
       success: true,
       eventCode,
