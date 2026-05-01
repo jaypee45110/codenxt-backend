@@ -745,22 +745,22 @@ if (process.env.REDIS_URL) {
   innerCircle = event.innerCircle || [];
 }
 
-    return res.json({
-      event: {
-        id: event.id,
-        eventCode: event.code,
-        artistName: event.name || "Artist / Event Name",
-        venue: event.venue || "Venue Name",
-        date: event.startAt ? event.startAt.slice(0, 10) : "",
-      },
-metrics: {
-  scans: rawScans,
-  uniqueScans,
-  joins,
-  conversionRate,
-},
-      innerCircle,
-    });
+return res.json({
+  event: {
+    id: event.id,
+    eventCode: event.code,
+    artistName: event.name || "Artist / Event Name",
+    venue: event.venue || "Venue Name",
+    date: event.startAt ? event.startAt.slice(0, 10) : "",
+  },
+  metrics: {
+    scans: rawScans,
+    uniqueScans,
+    joins,
+    conversionRate,
+  },
+  innerCircle,
+});
   } catch (err) {
     console.error("Get report failed:", err.message);
     res.status(500).json({ error: "Failed to get report" });
