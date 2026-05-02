@@ -904,6 +904,25 @@ app.post("/scan", async (req, res) => {
       return res.status(400).json({ error: "eventCode is required" });
     }
 
+    const ip =
+      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+      req.socket?.remoteAddress ||
+      "unknown";
+
+    if (process.env.REDIS_URL) {
+      const rateKey = `ratelimit:scan:${ip}`;
+      const hits = await redis.incr(rateKey);
+
+      if (hits === 1) {
+        await redis.expire(rateKey, 60);
+      }
+
+      if (hits > 30) {
+        return res.status(429).json({
+          error: "Too many scan attempts. Please try again shortly.",
+        });
+      }
+    }
     let eventId = null;
     let event = null;
 
