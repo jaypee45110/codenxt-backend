@@ -261,8 +261,9 @@ const event = {
   startAt,
   unlockAt,
   endAt,
-  maxClaims,
+maxClaims,
   status,
+  momentOpen: false,
 };
     events[id] = event;
 
@@ -280,6 +281,7 @@ artistLogo: artistLogo || "",
   endAt,
   maxClaims: String(maxClaims),
   status,
+  momentOpen: "false",
 });
 
   await redis.set(`eventcode:${code || id}`, id);
@@ -367,8 +369,9 @@ const normalizedMeta = {
   endAt: meta?.endAt,
   maxClaims: Number(meta?.maxClaims || 0),
   status: meta?.status,
-  screenVideoUrl: meta?.screenVideoUrl || "",
-  rawScans,
+screenVideoUrl: meta?.screenVideoUrl || "",
+momentOpen: meta?.momentOpen === true || meta?.momentOpen === "true",
+rawScans,
   uniqueScans,
   innerCircleJoinCount,
 };
@@ -380,6 +383,49 @@ const normalizedMeta = {
   console.error("Get event failed:", err.message);
   return res.status(500).json({ error: "Failed to get event" });
 }
+});
+app.post("/event/:eventCode/moment-open", async (req, res) => {
+  try {
+    let { eventCode } = req.params;
+    let eventId = null;
+
+    if (process.env.REDIS_URL) {
+      eventId = await redis.get(`eventcode:${eventCode}`);
+    }
+
+    if (!eventId) {
+      for (const id in events) {
+        if (events[id]?.code === eventCode) {
+          eventId = id;
+          break;
+        }
+      }
+    }
+
+    if (!eventId) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    if (process.env.REDIS_URL) {
+      await redis.hset(`event:${eventId}:meta`, {
+        momentOpen: "true",
+      });
+    }
+
+    if (events[eventId]) {
+      events[eventId].momentOpen = true;
+    }
+
+    return res.json({
+      success: true,
+      eventCode,
+      eventId,
+      momentOpen: true,
+    });
+  } catch (err) {
+    console.error("Moment open failed:", err.message);
+    res.status(500).json({ error: "Failed to open moment" });
+  }
 });
 // ACCESS STATUS + SHORT-LIVED TOKEN
 app.get("/access/:eventId", async (req, res) => {
