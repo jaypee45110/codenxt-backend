@@ -859,15 +859,32 @@ app.post("/inner-circle", async (req, res) => {
       return res.status(404).json({ error: "Event not found" });
     }
 
-    let joins = 0;
+const phone = req.body.phone || "";
 
-    if (process.env.REDIS_URL) {
+let joins = 0;
+
+if (process.env.REDIS_URL) {
+  if (phone) {
+    const added = await redis.sadd(`event:${eventId}:uniquePhones`, phone);
+    if (added === 1) {
       joins = await redis.incr(`event:${eventId}:innerCircleJoinCount`);
     } else {
-      event.innerCircleJoinCount = Number(event.innerCircleJoinCount || 0) + 1;
-      joins = event.innerCircleJoinCount;
+      joins = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
     }
-const phone = req.body.phone || "";
+  } else {
+    joins = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
+  }
+} else {
+  // fallback uten redis
+  event._uniquePhones = event._uniquePhones || new Set();
+
+  if (phone && !event._uniquePhones.has(phone)) {
+    event._uniquePhones.add(phone);
+    event.innerCircleJoinCount = Number(event.innerCircleJoinCount || 0) + 1;
+  }
+
+  joins = event.innerCircleJoinCount || 0;
+}
 
 if (phone && process.env.REDIS_URL) {
   const entry = {
