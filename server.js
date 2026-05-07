@@ -37,8 +37,7 @@ function getRewardForTier(storedReward, tier) {
   }
 
   const isTieredReward =
-    storedReward.gold || storedReward.silver || storedReward.standard;
-
+storedReward.gold || storedReward.silver || storedReward.general;
   if (!isTieredReward) {
     return {
       ...storedReward,
@@ -49,7 +48,7 @@ function getRewardForTier(storedReward, tier) {
   return (
     storedReward[tier] ||
     storedReward.standard ||
-    storedReward.silver ||
+storedReward.general ||
     storedReward.gold || {
       title: "codeNXT Reward",
       type: "text",
@@ -671,8 +670,7 @@ const now = Date.now();
 
 const maxClaims = Number(meta.maxClaims || 0);
 const claimNumber = 1;
-const tier = req.body?.tier || "standard";
-
+const tier = req.body?.tier || "general";
 let reward = getRewardForTier(rewards[eventId], tier);
 
     return res.json({
@@ -701,8 +699,12 @@ app.post("/reward", async (req, res) => {
       return res.status(400).json({ error: "eventId and reward are required" });
     }
 
-    rewards[eventId] = reward;
+const tier = reward.tier || "general";
 
+rewards[eventId] = {
+  ...(rewards[eventId] || {}),
+  [tier]: reward,
+};
 if (process.env.REDIS_URL) {
     await redis.set(`reward:${eventId}:json`, JSON.stringify(reward));
 }
