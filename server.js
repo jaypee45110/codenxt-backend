@@ -32,7 +32,7 @@ function getRewardForTier(storedReward, tier) {
       title: "codeNXT Reward",
       type: "text",
       content: "Reward granted",
-      tier: tier || "standard",
+      tier: tier || "general",
     };
   }
 
@@ -41,19 +41,18 @@ storedReward.gold || storedReward.silver || storedReward.general;
   if (!isTieredReward) {
     return {
       ...storedReward,
-      tier: tier || "standard",
+      tier: tier || "general",
     };
   }
 
   return (
     storedReward[tier] ||
-    storedReward.standard ||
 storedReward.general ||
     storedReward.gold || {
       title: "codeNXT Reward",
       type: "text",
       content: "Reward granted",
-      tier: tier || "standard",
+      tier: tier || "general",
     }
   );
 }
@@ -706,7 +705,10 @@ rewards[eventId] = {
   [tier]: reward,
 };
 if (process.env.REDIS_URL) {
-    await redis.set(`reward:${eventId}:json`, JSON.stringify(reward));
+await redis.set(
+  `reward:${eventId}:json`,
+  JSON.stringify(rewards[eventId])
+);
 }
     res.json({ success: true });
   } catch (err) {
