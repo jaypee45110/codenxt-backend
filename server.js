@@ -1010,33 +1010,74 @@ app.post("/scan", async (req, res) => {
       return res.status(404).json({ error: "Event not found" });
     }
 
-    let rawScans = 0;
-    let uniqueScans = 0;
+let rawScans = 0;
+let uniqueScans = 0;
+let scanRank = null;
+let tier = "standard";
 
-    if (process.env.REDIS_URL) {
-      rawScans = await redis.incr(`event:${eventId}:rawScans`);
+if (process.env.REDIS_URL) {
+  rawScans = await redis.incr(`event:${eventId}:rawScans`);
 
-      if (scanId) {
-        await redis.sadd(`event:${eventId}:uniqueScanIds`, scanId);
-        uniqueScans = await redis.scard(`event:${eventId}:uniqueScanIds`);
-        await redis.set(`event:${eventId}:uniqueScans`, uniqueScans);
-      } else {
-        uniqueScans = Number(await redis.get(`event:${eventId}:uniqueScans`) || 0);
-      }
+  if (scanId) {
+    const isNewScan = await redis.sadd(`event:${eventId}:uniqueScanIds`, scanId);
+    uniqueScans = await redis.scard(`event:${eventId}:uniqueScanIds`);
+    await redis.set(`event:${eventId}:uniqueScans`, uniqueScans);
+
+    if (isNewScan === 1) {
+      scanRank = await redis.incr(`event:${eventId}:scanRankCounter`);
+      await redis.set(`event:${eventId}:scanRank:${scanId}`, scanRank);
     } else {
-      event.rawScans = Number(event.rawScans || 0) + 1;
-      rawScans = event.rawScans;
-      event.uniqueScans = Number(event.uniqueScans || 0) + 1;
-      uniqueScans = event.uniqueScans;
+      scanRank = Number(await redis.get(`event:${eventId}:scanRank:${scanId}`) || uniqueScans);
+    }
+  } else {
+    uniqueScans = Number(await redis.get(`event:${eventId}:uniqueScans`) || 0);
+  }
+} else {
+  if (!event.scanRanks) event.scanRanks = {};
+  if (!event.scanRankCounter) event.scanRankCounter = 0;
+
+  event.rawScans = Number(event.rawScans || 0) + 1;
+  rawScans = event.rawScans;
+
+  if (scanId) {
+    if (!event.scanRanks[scanId]) {
+      event.scanRankCounter += 1;
+      event.scanRanks[scanId] = event.scanRankCounter;
     }
 
-    return res.json({
-      success: true,
-      eventCode,
-      eventId,
-      rawScans: Number(rawScans || 0),
-      uniqueScans: Number(uniqueScans || 0),
-    });
+    scanRank = event.scanRanks[scanId];
+    uniqueScans = Object.keys(event.scanRanks).length;
+    event.uniqueScans = uniqueScans;
+  } else {
+    event.uniqueScans = Number(event.uniqueScans || 0) + 1;
+    uniqueScans = event.uniqueScans;
+  }
+}
+
+const audienceSize = Number(event.audienceSize || event.maxClaims || 1000);
+const goldLimit = Math.max(1, Math.round(audienceSize * 0.01));
+const silverLimit = Math.max(goldLimit + 1, Math.round(audienceSize * 0.05));
+
+if (scanRank && scanRank <= goldLimit) {
+  tier = "gold";
+} else if (scanRank && scanRank <= silverLimit) {
+  tier = "silver";
+}
+
+return res.json({
+  success: true,
+  eventCode,
+  eventId,
+  rawScans: Number(rawScans || 0),
+  uniqueScans: Number(uniqueScans || 0),
+  scanRank,
+  tier,
+  tierLimits: {
+    audienceSize,
+    goldLimit,
+    silverLimit,
+  },
+});
   } catch (err) {
     console.error("Scan register failed:", err.message);
     res.status(500).json({ error: "Failed to register scan" });
