@@ -1,23 +1,13 @@
 {
-  "name": "codenxt-backend",
+  "name": "codenxt-video-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1039.0",
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "ioredis": "^5.10.1",
-    "jsonwebtoken": "^9.0.3",
-    "multer": "^2.1.1",
-    "uuid": "^13.0.0"
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
   }
 }
