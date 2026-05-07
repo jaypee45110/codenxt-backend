@@ -26,6 +26,38 @@ const JWT_SECRET = "codenxt-dev-secret-change-later";
 
 let events = {};
 let rewards = {};
+function getRewardForTier(storedReward, tier) {
+  if (!storedReward) {
+    return {
+      title: "codeNXT Reward",
+      type: "text",
+      content: "Reward granted",
+      tier: tier || "standard",
+    };
+  }
+
+  const isTieredReward =
+    storedReward.gold || storedReward.silver || storedReward.standard;
+
+  if (!isTieredReward) {
+    return {
+      ...storedReward,
+      tier: tier || "standard",
+    };
+  }
+
+  return (
+    storedReward[tier] ||
+    storedReward.standard ||
+    storedReward.silver ||
+    storedReward.gold || {
+      title: "codeNXT Reward",
+      type: "text",
+      content: "Reward granted",
+      tier: tier || "standard",
+    }
+  );
+}
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
 const VIDEO_DIR = path.join(__dirname, "public", "screen-videos");
@@ -639,12 +671,9 @@ const now = Date.now();
 
 const maxClaims = Number(meta.maxClaims || 0);
 const claimNumber = 1;
+const tier = req.body?.tier || "standard";
 
-let reward = rewards[eventId] || {
-  title: "codeNXT Reward",
-  type: "text",
-  content: "Reward granted"
-};
+let reward = getRewardForTier(rewards[eventId], tier);
 
     return res.json({
       success: true,
