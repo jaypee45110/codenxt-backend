@@ -719,10 +719,13 @@ if (process.env.REDIS_URL) {
 app.get("/reward/:eventId", async (req, res) => {
   try {
     const eventId = req.params.eventId;
+const tier = req.query.tier || "general";
 
-    if (rewards[eventId]) {
-      return res.json(rewards[eventId]);
-    }
+if (rewards[eventId]) {
+  return res.json(
+    getRewardForTier(rewards[eventId], tier)
+  );
+}
 
 let cachedReward = null;
 
@@ -733,7 +736,10 @@ if (process.env.REDIS_URL) {
 if (cachedReward) {
   const parsed = JSON.parse(cachedReward);
   rewards[eventId] = parsed;
-  return res.json(parsed);
+
+  return res.json(
+    getRewardForTier(parsed, tier)
+  );
 }
     return res.status(404).json({ error: "Not found" });
   } catch (err) {
