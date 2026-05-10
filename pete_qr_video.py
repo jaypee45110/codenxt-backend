@@ -62,21 +62,21 @@ badge_center_x = BG_W // 2
 badge_center_y = 320
 
 # QR i badge
-qr_size = 168
+qr_size = 162
 qr_center_x_rel = 280
-qr_center_y_rel = 283
+qr_center_y_rel = 288.4
 
 # Glow / puls
 base_glow_blur = 36
 base_glow_strength = 1.12
 pulse_scale_amount = 0.022
 pulse_speed = 1.0
-unlock_boost_start = 5.2
-unlock_flash_strength = 0.16
+unlock_boost_start = 999
+unlock_flash_strength = 0.0
 
 # Stjerner
 np.random.seed(42)
-num_stars = 260
+num_stars = 420
 stars = []
 
 headline_y = 22
@@ -95,7 +95,7 @@ brand_secondary_color = (200, 205, 214, 255)
 
 # QR-farger
 qr_fill_color = "#000000"
-qr_back_color = "#F4EFE6"
+qr_back_color = "#FFFFFF"
 
 # -----------------------------
 # FONTS
@@ -189,7 +189,11 @@ qr.add_data(qr_data)
 qr.make(fit=True)
 
 qr_img = qr.make_image(fill_color=qr_fill_color, back_color=qr_back_color).convert("RGBA")
-qr_img = qr_img.resize((qr_size, qr_size), Image.Resampling.LANCZOS)
+qr_img = qr_img.resize((int(qr_size * 0.98), int(qr_size * 0.98)), Image.Resampling.LANCZOS)
+
+lure_img = Image.open("assets/qr-lure/innercircle-lure.png").convert("RGBA")
+lure_size = int(qr_size * 1.418)
+lure_img = lure_img.resize((lure_size, lure_size), Image.Resampling.LANCZOS)
 
 # -----------------------------
 # LAST RAMME
@@ -208,7 +212,7 @@ frame_base_x = badge_center_x - FW // 2
 frame_base_y = badge_center_y - FH // 2
 
 paste_x = frame_base_x + qr_center_x_rel - (qr_size // 2)
-paste_y = frame_base_y + qr_center_y_rel - (qr_size // 2)
+paste_y = int(frame_base_y + qr_center_y_rel - (qr_size // 2) - 1)
 
 # -----------------------------
 # GLOW-FORARBEID
@@ -251,19 +255,50 @@ def make_background(t: float) -> Image.Image:
     depth = depth.filter(ImageFilter.GaussianBlur(120))
     canvas.alpha_composite(depth)
 
-    # Stjerner
+    # Living star field
     star_layer = Image.new("RGBA", (BG_W, BG_H), (0, 0, 0, 0))
+    star_draw = ImageDraw.Draw(star_layer, "RGBA")
+
     for s in stars:
-        brightness = int(105 + 120 * (0.5 + 0.5 * math.sin(t * s["speed"] + s["phase"])))
-        y = int((s["y"] + t * 3.2) % BG_H)
+        twinkle = 0.45 + 0.55 * math.sin(t * s["speed"] * 2.1 + s["phase"])
+        brightness = int(65 + 165 * twinkle)
+        y = int((s["y"] + t * 4.2) % BG_H)
 
-        for dx in range(s["size"]):
-            for dy in range(s["size"]):
-                px = s["x"] + dx
-                py = y + dy
-                if 0 <= px < BG_W and 0 <= py < BG_H:
-                    star_layer.putpixel((px, py), (brightness, brightness, brightness, 255))
+        alpha = int(90 + 130 * twinkle)
+        radius = max(1, s["size"])
 
+        star_draw.ellipse(
+            (s["x"] - radius, y - radius, s["x"] + radius, y + radius),
+            fill=(brightness, brightness, brightness, alpha),
+        )
+
+    # One or two subtle shooting stars, behind badge/text
+    shooting_specs = [
+        {"start": 1.15, "duration": 0.95, "x": 545, "y": 105, "dx": -245, "dy": 145},
+        {"start": 5.35, "duration": 0.85, "x": 610, "y": 265, "dx": -210, "dy": 120},
+    ]
+
+    for spec in shooting_specs:
+        progress = (t - spec["start"]) / spec["duration"]
+        if 0 <= progress <= 1:
+            fade = math.sin(progress * math.pi)
+            head_x = spec["x"] + spec["dx"] * progress
+            head_y = spec["y"] + spec["dy"] * progress
+            tail_x = head_x - spec["dx"] * 0.22
+            tail_y = head_y - spec["dy"] * 0.22
+
+            alpha = int(165 * fade)
+            star_draw.line(
+                (tail_x, tail_y, head_x, head_y),
+                fill=(210, 238, 255, alpha),
+                width=2,
+            )
+            star_draw.ellipse(
+                (head_x - 2, head_y - 2, head_x + 2, head_y + 2),
+                fill=(255, 255, 255, int(210 * fade)),
+            )
+
+    star_layer = star_layer.filter(ImageFilter.GaussianBlur(0.25))
     canvas.alpha_composite(star_layer)
     return canvas
 
@@ -342,8 +377,11 @@ def make_frame(t: float):
 
     canvas = make_background(t)
 
-    # QR rent
+    # QR + lurefelt PNG
     qr_layer = Image.new("RGBA", (BG_W, BG_H), (0, 0, 0, 0))
+    lure_paste_x = int(paste_x - (lure_size - qr_size) / 2)
+    lure_paste_y = int(paste_y - (lure_size - qr_size) / 2)
+    qr_layer.alpha_composite(lure_img, (lure_paste_x, lure_paste_y))
     qr_layer.alpha_composite(qr_img, (paste_x, paste_y))
 
     # Glow
