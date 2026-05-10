@@ -6,9 +6,13 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
+    "@aws-sdk/client-s3": "^3.1045.0",
+    "cors": "^2.8.6",
     "dotenv": "^17.4.2",
-    "express": "^4.21.2",
+    "express": "^4.22.1",
+    "ioredis": "^5.10.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
     "uuid": "^14.0.0"
   }
 }
