@@ -941,7 +941,7 @@ if (phone && process.env.REDIS_URL) {
   await redis.rpush(`event:${eventId}:phones`, JSON.stringify(entry));
 }
 
-if (phone && shouldSendWelcomeMessage) {
+if (phone) {
   try {
     await sendSentInnerCircleMessage(phone, "123456");
   } catch (sentErr) {
