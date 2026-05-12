@@ -901,12 +901,14 @@ app.post("/inner-circle", async (req, res) => {
 const phone = req.body.phone || "";
 
 let joins = 0;
+let shouldSendWelcomeMessage = false;
 
 if (process.env.REDIS_URL) {
   if (phone) {
     const added = await redis.sadd(`event:${eventId}:uniquePhones`, phone);
     if (added === 1) {
       joins = await redis.incr(`event:${eventId}:innerCircleJoinCount`);
+      shouldSendWelcomeMessage = true;
     } else {
       joins = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
     }
@@ -920,6 +922,7 @@ if (process.env.REDIS_URL) {
   if (phone && !event._uniquePhones.has(phone)) {
     event._uniquePhones.add(phone);
     event.innerCircleJoinCount = Number(event.innerCircleJoinCount || 0) + 1;
+    shouldSendWelcomeMessage = true;
   }
 
   joins = event.innerCircleJoinCount || 0;
@@ -936,6 +939,14 @@ if (phone && process.env.REDIS_URL) {
   };
 
   await redis.rpush(`event:${eventId}:phones`, JSON.stringify(entry));
+}
+
+if (phone && shouldSendWelcomeMessage) {
+  try {
+    await sendSentInnerCircleMessage(phone, "123456");
+  } catch (sentErr) {
+    console.error("InnerCircle welcome message failed:", sentErr.message);
+  }
 }
     return res.json({
       success: true,
