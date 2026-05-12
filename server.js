@@ -948,6 +948,64 @@ if (phone && process.env.REDIS_URL) {
     res.status(500).json({ error: "Failed to increment InnerCircle count" });
   }
 });
+
+async function sendSentInnerCircleMessage(to, code) {
+  if (!process.env.SENT_API_KEY) {
+    throw new Error("SENT_API_KEY is missing");
+  }
+
+  const response = await fetch("https://api.sent.dm/v3/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.SENT_API_KEY,
+    },
+    body: JSON.stringify({
+      channels: ["sent"],
+      to: [to],
+      template: {
+        id: "f6acfd25-c0b3-4047-bbf9-030bf1fc3edb",
+        parameters: {
+          var_1: code || "codeTone",
+        },
+      },
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(`Sent failed ${response.status}: ${JSON.stringify(data)}`);
+  }
+
+  return data;
+}
+
+app.post("/test-sent-message", async (req, res) => {
+  try {
+    const to = req.body.to || "";
+    const code = req.body.code || "codeTone";
+
+    if (!to) {
+      return res.status(400).json({ error: "to is required" });
+    }
+
+    const sent = await sendSentInnerCircleMessage(to, code);
+
+    return res.json({
+      ok: true,
+      to,
+      sent,
+    });
+  } catch (err) {
+    console.error("Sent test message failed:", err.message);
+    return res.status(500).json({
+      ok: false,
+      error: err.message,
+    });
+  }
+});
+
 app.post("/sms-inbound", async (req, res) => {
   try {
     const phone = req.body.From || req.body.from || req.body.phone || "";
