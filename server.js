@@ -957,7 +957,7 @@ if (phone) {
 });
 
 function scheduleInnerCircleFollowUp(phone, eventCode) {
-  const delayMs = 30 * 60 * 1000;
+  const delayMs = 1 * 60 * 1000;
 
   setTimeout(async () => {
     try {
