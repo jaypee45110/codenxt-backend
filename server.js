@@ -956,6 +956,24 @@ if (phone) {
   }
 });
 
+function normalizePhoneForSent(phone) {
+  const raw = String(phone || "").trim().replace(/\s+/g, "");
+
+  if (!raw) return "";
+
+  if (raw.startsWith("+")) return raw;
+
+  if (raw.startsWith("00")) {
+    return `+${raw.slice(2)}`;
+  }
+
+  if (raw.startsWith("0")) {
+    return `+66${raw}`;
+  }
+
+  return raw;
+}
+
 function scheduleInnerCircleFollowUp(phone, eventCode) {
   const delayMs = 20 * 1000;
 
@@ -966,8 +984,10 @@ function scheduleInnerCircleFollowUp(phone, eventCode) {
         return;
       }
 
-      await sendSentTemplateMessage(phone, process.env.SENT_INNERCIRCLE_TEMPLATE_ID, {});
-      console.log("InnerCircle follow-up sent", { phone, eventCode });
+      const normalizedPhone = normalizePhoneForSent(phone);
+
+      await sendSentTemplateMessage(normalizedPhone, process.env.SENT_INNERCIRCLE_TEMPLATE_ID, {});
+      console.log("InnerCircle follow-up sent", { phone, normalizedPhone, eventCode });
     } catch (err) {
       console.error("InnerCircle follow-up failed:", err.message);
     }
