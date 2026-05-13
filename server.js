@@ -975,7 +975,7 @@ function normalizePhoneForSent(phone) {
 }
 
 function scheduleInnerCircleFollowUp(phone, eventCode) {
-  const delayMs = 20 * 1000;
+  const delayMs = 15 * 60 * 1000;
 
   setTimeout(async () => {
     try {
