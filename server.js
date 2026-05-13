@@ -1017,6 +1017,108 @@ app.post("/test-sent-message", async (req, res) => {
   }
 });
 
+
+app.post("/send-innercircle-sms", async (req, res) => {
+  try {
+    const eventCode = String(req.body.eventCode || "").trim().toUpperCase();
+    const code = String(req.body.code || eventCode || "codeTone").trim();
+
+    if (!eventCode) {
+      return res.status(400).json({
+        ok: false,
+        error: "eventCode is required",
+      });
+    }
+
+    let event = Object.values(events).find((item) => item.code === eventCode);
+    let eventId = event ? event.id : null;
+
+    if (!eventId && process.env.REDIS_URL) {
+      eventId = await redis.get(`eventcode:${eventCode}`);
+    }
+
+    if (!eventId) {
+      return res.status(404).json({
+        ok: false,
+        error: "Event not found",
+      });
+    }
+
+    let innerCircle = [];
+
+    if (process.env.REDIS_URL) {
+      const storedPhones = await redis.lrange(`event:${eventId}:phones`, 0, -1);
+      innerCircle = storedPhones
+        .map((item) => {
+          try {
+            return JSON.parse(item);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+    } else {
+      innerCircle = event?.innerCircle || [];
+    }
+
+    const phones = [
+      ...new Set(
+        innerCircle
+          .map((entry) => String(entry.phone || "").trim())
+          .filter(Boolean)
+      ),
+    ];
+
+    if (!phones.length) {
+      return res.json({
+        ok: true,
+        eventCode,
+        sentCount: 0,
+        failedCount: 0,
+        message: "No phone numbers found",
+        results: [],
+      });
+    }
+
+    const results = [];
+
+    for (const phone of phones) {
+      try {
+        const sent = await sendSentInnerCircleMessage(phone, code);
+        results.push({
+          phone,
+          ok: true,
+          sent,
+        });
+      } catch (err) {
+        results.push({
+          phone,
+          ok: false,
+          error: err.message,
+        });
+      }
+    }
+
+    const sentCount = results.filter((item) => item.ok).length;
+    const failedCount = results.length - sentCount;
+
+    return res.json({
+      ok: failedCount === 0,
+      eventCode,
+      total: results.length,
+      sentCount,
+      failedCount,
+      results,
+    });
+  } catch (err) {
+    console.error("Send InnerCircle SMS failed:", err.message);
+    return res.status(500).json({
+      ok: false,
+      error: err.message,
+    });
+  }
+});
+
 app.post("/sms-inbound", async (req, res) => {
   try {
     const phone = req.body.From || req.body.from || req.body.phone || "";
