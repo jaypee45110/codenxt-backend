@@ -986,9 +986,11 @@ function scheduleInnerCircleFollowUp(phone, eventCode) {
 
       const normalizedPhone = normalizePhoneForSent(phone);
 
-      await sendSentTemplateMessage(normalizedPhone, process.env.SENT_INNERCIRCLE_TEMPLATE_ID, {
-        var_1: "123456",
-      });
+      await sendSentTemplateMessage(
+        normalizedPhone,
+        process.env.SENT_INNERCIRCLE_TEMPLATE_ID,
+        {}
+      );
       console.log("InnerCircle follow-up sent", { phone, normalizedPhone, eventCode });
     } catch (err) {
       console.error("InnerCircle follow-up failed:", err.message);
