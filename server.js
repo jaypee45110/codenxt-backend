@@ -968,7 +968,7 @@ function normalizePhoneForSent(phone) {
   }
 
   if (raw.startsWith("0")) {
-    return `+66${raw}`;
+    return `+66${raw.slice(1)}`;
   }
 
   return raw;
