@@ -975,7 +975,7 @@ async function sendSentInnerCircleMessage(to, code) {
 channels: ["sms"],
       to: [to],
       template: {
-        id: "a40e02ee-e7dd-4a95-8729-3c7a9770705a",
+        id: "f6acfd25-c0b3-4047-bbf9-030bfffc3ecb",
         parameters: {
           var_1: code || "codeTone",
         },
