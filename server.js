@@ -942,11 +942,7 @@ if (phone && process.env.REDIS_URL) {
 }
 
 if (phone) {
-  try {
-    await sendSentInnerCircleMessage(phone, "123456");
-  } catch (sentErr) {
-    console.error("InnerCircle welcome message failed:", sentErr.message);
-  }
+  scheduleInnerCircleFollowUp(phone, eventCode);
 }
     return res.json({
       success: true,
@@ -959,6 +955,54 @@ if (phone) {
     res.status(500).json({ error: "Failed to increment InnerCircle count" });
   }
 });
+
+function scheduleInnerCircleFollowUp(phone, eventCode) {
+  const delayMs = 30 * 60 * 1000;
+
+  setTimeout(async () => {
+    try {
+      if (!process.env.SENT_INNERCIRCLE_TEMPLATE_ID) {
+        console.log("Skipped InnerCircle follow-up: SENT_INNERCIRCLE_TEMPLATE_ID is missing");
+        return;
+      }
+
+      await sendSentTemplateMessage(phone, process.env.SENT_INNERCIRCLE_TEMPLATE_ID, {});
+      console.log("InnerCircle follow-up sent", { phone, eventCode });
+    } catch (err) {
+      console.error("InnerCircle follow-up failed:", err.message);
+    }
+  }, delayMs);
+}
+
+async function sendSentTemplateMessage(to, templateId, parameters = {}) {
+  if (!process.env.SENT_API_KEY) {
+    throw new Error("SENT_API_KEY is missing");
+  }
+
+  const response = await fetch("https://api.sent.dm/v3/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.SENT_API_KEY,
+    },
+    body: JSON.stringify({
+      channels: ["sms"],
+      to: [to],
+      template: {
+        id: templateId,
+        parameters,
+      },
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(`Sent failed ${response.status}: ${JSON.stringify(data)}`);
+  }
+
+  return data;
+}
 
 async function sendSentInnerCircleMessage(to, code) {
   if (!process.env.SENT_API_KEY) {
