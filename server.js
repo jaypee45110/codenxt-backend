@@ -972,7 +972,7 @@ async function sendSentInnerCircleMessage(to, code) {
       "x-api-key": process.env.SENT_API_KEY,
     },
     body: JSON.stringify({
-      channels: ["sent"],
+channels: ["sms"],
       to: [to],
       template: {
         id: "a40e02ee-e7dd-4a95-8729-3c7a9770705a",
