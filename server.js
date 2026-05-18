@@ -323,6 +323,25 @@ artistLogo: artistLogo || "",
   await redis.set(`eventcode:${normalizedVertical}:${code || id}`, id);
   await redis.set(`event:${id}:claims`, "0");
 }
+    try {
+      await sendMail({
+        to: "jaypee101@gmail.com",
+        subject: `New ${event.vertical || "codenxt"} event created: ${event.code}`,
+        text:
+`A new event has been created.
+
+Vertical: ${event.vertical || "codenxt"}
+Event Code: ${event.code}
+Name: ${event.name}
+Venue: ${event.venue || ""}
+City: ${event.city || ""}
+Start: ${event.startAt}
+Created: ${new Date().toISOString()}`
+      });
+    } catch (mailErr) {
+      console.error("Event notification email failed:", mailErr.message);
+    }
+
     res.json({
       success: true,
       eventId: id,
