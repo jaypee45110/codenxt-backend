@@ -259,6 +259,7 @@ const videoPath = `/screen-video/${safeEventCode}`;      const videoUrl = PUBLIC
 app.post("/event", async (req, res) => {
   try {
 const {
+  vertical,
   code,
   name,
   artistLogo,
@@ -272,6 +273,8 @@ const {
   status
 } = req.body;
 
+const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
+
     if (!name || !startAt || !unlockAt || !endAt) {
       return res.status(400).json({
         error: "name, startAt, unlockAt and endAt are required",
@@ -282,6 +285,7 @@ const {
 
 const event = {
   id,
+  vertical: normalizedVertical,
   code: code || id,
   name,
   artistLogo,
@@ -300,6 +304,7 @@ maxClaims,
 if (process.env.REDIS_URL) {
 await redis.hset(`event:${id}:meta`, {
   id,
+  vertical: normalizedVertical,
   code: code || id,
   name,
 artistLogo: artistLogo || "",
@@ -315,6 +320,7 @@ artistLogo: artistLogo || "",
 });
 
   await redis.set(`eventcode:${code || id}`, id);
+  await redis.set(`eventcode:${normalizedVertical}:${code || id}`, id);
   await redis.set(`event:${id}:claims`, "0");
 }
     res.json({
@@ -334,7 +340,11 @@ app.get("/event/:eventId", async (req, res) => {
 
 // Try Redis lookup if available
 if (process.env.REDIS_URL) {
-  const resolvedId = await redis.get(`eventcode:${eventId}`);
+  const vertical = String(req.query?.vertical || "codetone").trim().toLowerCase();
+  let resolvedId = await redis.get(`eventcode:${vertical}:${eventId}`);
+  if (!resolvedId) {
+    resolvedId = await redis.get(`eventcode:${eventId}`);
+  }
   if (resolvedId) {
     eventId = resolvedId;
   }
@@ -765,7 +775,11 @@ app.get("/report/:eventCode", async (req, res) => {
 
     // 2) Fallback til Redis hvis tilgjengelig
 if (!event && process.env.REDIS_URL) {
-        const resolvedId = await redis.get(`eventcode:${eventCode}`);
+        const vertical = String(req.query?.vertical || "codetone").trim().toLowerCase();
+        let resolvedId = await redis.get(`eventcode:${vertical}:${eventCode}`);
+        if (!resolvedId) {
+          resolvedId = await redis.get(`eventcode:${eventCode}`);
+        }
       if (resolvedId) {
         eventId = resolvedId;
 
@@ -871,7 +885,11 @@ app.post("/inner-circle", async (req, res) => {
     }
 
     if (!eventId && process.env.REDIS_URL) {
-      const resolvedId = await redis.get(`eventcode:${eventCode}`);
+      const vertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
+      let resolvedId = await redis.get(`eventcode:${vertical}:${eventCode}`);
+      if (!resolvedId) {
+        resolvedId = await redis.get(`eventcode:${eventCode}`);
+      }
       if (resolvedId) {
         eventId = resolvedId;
 
@@ -1276,7 +1294,11 @@ app.post("/scan", async (req, res) => {
     }
 
     if (!eventId && process.env.REDIS_URL) {
-      const resolvedId = await redis.get(`eventcode:${eventCode}`);
+      const vertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
+      let resolvedId = await redis.get(`eventcode:${vertical}:${eventCode}`);
+      if (!resolvedId) {
+        resolvedId = await redis.get(`eventcode:${eventCode}`);
+      }
       if (resolvedId) {
         eventId = resolvedId;
         const meta = await redis.hgetall(`event:${eventId}:meta`);
