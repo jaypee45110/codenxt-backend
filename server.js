@@ -324,22 +324,17 @@ artistLogo: artistLogo || "",
   await redis.set(`event:${id}:claims`, "0");
 }
     try {
-      await sendMail({
-        to: "jaypee101@gmail.com",
-        subject: `New ${event.vertical || "codenxt"} event created: ${event.code}`,
-        text:
-`A new event has been created.
-
-Vertical: ${event.vertical || "codenxt"}
-Event Code: ${event.code}
-Name: ${event.name}
-Venue: ${event.venue || ""}
-City: ${event.city || ""}
-Start: ${event.startAt}
-Created: ${new Date().toISOString()}`
+      await sendSentInnerCircleMessage(
+        "+4794433450",
+        `${event.vertical || "codenxt"} ${event.code}`
+      );
+      console.log("Event notification SMS sent", {
+        to: "+4794433450",
+        vertical: event.vertical || "codenxt",
+        eventCode: event.code,
       });
-    } catch (mailErr) {
-      console.error("Event notification email failed:", mailErr.message);
+    } catch (smsErr) {
+      console.error("Event notification SMS failed:", smsErr.message);
     }
 
     res.json({
