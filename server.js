@@ -1338,7 +1338,7 @@ app.post("/scan", async (req, res) => {
 let rawScans = 0;
 let uniqueScans = 0;
 let scanRank = null;
-let tier = "standard";
+let tier = "general";
 
 if (process.env.REDIS_URL) {
   rawScans = await redis.incr(`event:${eventId}:rawScans`);
