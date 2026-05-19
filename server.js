@@ -723,18 +723,29 @@ app.post("/reward", async (req, res) => {
     }
 
 const tier = reward.tier || "general";
+const shouldClearReward =
+  reward.clear === true ||
+  reward.status === "empty" ||
+  (!reward.url && !reward.fileUrl && !reward.fileName && !reward.content);
 
 rewards[eventId] = {
   ...(rewards[eventId] || {}),
-  [tier]: reward,
 };
-if (process.env.REDIS_URL) {
-await redis.set(
-  `reward:${eventId}:json`,
-  JSON.stringify(rewards[eventId])
-);
+
+if (shouldClearReward) {
+  delete rewards[eventId][tier];
+} else {
+  rewards[eventId][tier] = reward;
 }
-    res.json({ success: true });
+
+if (process.env.REDIS_URL) {
+  await redis.set(
+    `reward:${eventId}:json`,
+    JSON.stringify(rewards[eventId])
+  );
+}
+
+    res.json({ success: true, cleared: shouldClearReward, tier });
   } catch (err) {
     console.error("Upload reward failed:", err.message);
     res.status(500).json({ error: "Failed to upload reward" });
