@@ -1828,69 +1828,6 @@ if (events[eventId]) {
   }
 });
 
-
-function getClientIp(req) {
-  return String(
-    req.headers["cf-connecting-ip"] ||
-    req.headers["x-forwarded-for"] ||
-    req.socket?.remoteAddress ||
-    "unknown"
-  ).split(",")[0].trim();
-}
-
-function createRedisRateLimiter({ namespace, limit = 30, windowSeconds = 60 }) {
-  return async function redisRateLimiter(req, res, next) {
-    try {
-      if (!process.env.REDIS_URL) return next();
-
-      const ip = getClientIp(req);
-      const key = `ratelimit:${namespace}:${ip}`;
-      const hits = await redis.incr(key);
-
-      if (hits === 1) {
-        await redis.expire(key, windowSeconds);
-      }
-
-      if (hits > limit) {
-        return res.status(429).json({
-          ok: false,
-          error: "Too many requests. Please try again shortly.",
-          rateLimited: true,
-        });
-      }
-
-      return next();
-    } catch (error) {
-      console.warn("Rate limiter failed open:", error.message);
-      return next();
-    }
-  };
-}
-
-const limitRewardClaim = createRedisRateLimiter({
-  namespace: "reward-claim",
-  limit: 5,
-  windowSeconds: 60,
-});
-
-const limitCertificateValidate = createRedisRateLimiter({
-  namespace: "certificate-validate",
-  limit: 30,
-  windowSeconds: 60,
-});
-
-const limitClaimStatus = createRedisRateLimiter({
-  namespace: "claim-status",
-  limit: 20,
-  windowSeconds: 60,
-});
-
-const limitRewardClaimsRead = createRedisRateLimiter({
-  namespace: "reward-claims-read",
-  limit: 30,
-  windowSeconds: 60,
-});
-
 function requireCodePerksAdmin(req, res, next) {
   const configuredKey = process.env.CODEPERKS_ADMIN_KEY;
 
@@ -1911,7 +1848,7 @@ function requireCodePerksAdmin(req, res, next) {
 }
 
 
-app.get("/certificate/validate/:eventCode/:certificateId", limitCertificateValidate, async (req, res) => {
+app.get("/certificate/validate/:eventCode/:certificateId", async (req, res) => {
   try {
     const eventCode = String(req.params.eventCode || "").trim();
     const certificateId = String(req.params.certificateId || "").trim();
@@ -2049,7 +1986,7 @@ function validateCodePerksRewardClaim(claim) {
   );
 }
 
-app.post("/reward-claim", limitRewardClaim, async (req, res) => {
+app.post("/reward-claim", async (req, res) => {
   try {
     const claim = buildCodePerksRewardClaim(req.body || {});
 
@@ -2121,7 +2058,7 @@ app.post("/reward-claim", limitRewardClaim, async (req, res) => {
 });
 
 
-app.post("/reward-claim/:claimId/status", requireCodePerksAdmin, limitClaimStatus, async (req, res) => {
+app.post("/reward-claim/:claimId/status", requireCodePerksAdmin, async (req, res) => {
   try {
     const claimId = String(req.params.claimId || "").trim();
     const status = String(req.body?.status || "").trim().toLowerCase();
@@ -2185,7 +2122,7 @@ app.post("/reward-claim/:claimId/status", requireCodePerksAdmin, limitClaimStatu
   }
 });
 
-app.get("/reward-claims/:eventCode", requireCodePerksAdmin, limitRewardClaimsRead, async (req, res) => {
+app.get("/reward-claims/:eventCode", requireCodePerksAdmin, async (req, res) => {
   const eventCode = String(req.params.eventCode || "").trim();
 
   try {
