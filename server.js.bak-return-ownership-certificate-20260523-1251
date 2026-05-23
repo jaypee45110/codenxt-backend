@@ -909,219 +909,6 @@ return res.json({
     res.status(500).json({ error: "Failed to get report" });
   }
 });
-
-app.get("/verify/:certificateId", async (req, res) => {
-  try {
-    const certificateId = String(req.params.certificateId || "").trim();
-
-    const match = certificateId.match(/^CP-DOC-(.+)-(\d{6})$/);
-    if (!match) {
-      return res.status(400).send("Invalid certificate format");
-    }
-
-    const eventCode = match[1];
-    let eventId = null;
-    let event = null;
-
-    if (process.env.REDIS_URL) {
-      eventId =
-        await redis.get(`eventcode:codeperks:${eventCode}`) ||
-        await redis.get(`eventcode:${eventCode}`);
-
-      if (eventId) {
-        const meta = await redis.hgetall(`event:${eventId}:meta`);
-        if (meta && meta.id) {
-          event = {
-            id: meta.id,
-            code: meta.code,
-            name: meta.name || meta.pageName || "codePerks campaign",
-            startAt: meta.startAt || "",
-            vertical: meta.vertical || "codeperks",
-          };
-        }
-      }
-    }
-
-    if (!eventId) {
-      event = Object.values(events).find((item) => item.code === eventCode);
-      eventId = event?.id || null;
-    }
-
-    if (!eventId) {
-      return res.status(404).send("Certificate not found");
-    }
-
-    let ownershipCertificates = [];
-
-    if (process.env.REDIS_URL) {
-      const storedOwnership = await redis.lrange(`event:${eventId}:ownership`, 0, -1);
-      ownershipCertificates = storedOwnership
-        .map((item) => {
-          try {
-            return JSON.parse(item);
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean);
-    }
-
-    const certificate = ownershipCertificates.find(
-      (item) => item.certificateId === certificateId
-    );
-
-    if (!certificate) {
-      return res.status(404).send("Certificate not found");
-    }
-
-    const phone = String(certificate.phone || "");
-    const maskedPhone = phone.length > 4
-      ? `${"*".repeat(Math.max(0, phone.length - 4))}${phone.slice(-4)}`
-      : "";
-
-    const payload = {
-      valid: true,
-      certificateId: certificate.certificateId,
-      status: certificate.status || "active",
-      eventCode: certificate.eventCode,
-      campaignName: event?.name || certificate.campaignName || "codePerks campaign",
-      tier: certificate.tier || "general",
-      issuedAt: certificate.issuedAt,
-      issuedBy: certificate.issuedBy || "codePerks by codeNXT",
-      owner: maskedPhone,
-      verification: "server-verified",
-    };
-
-    if (req.query.format === "json" || String(req.headers.accept || "").includes("application/json")) {
-      return res.json(payload);
-    }
-
-    const esc = (value) => String(value || "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;");
-
-    return res.send(`<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Verified Member Benefit — codePerks</title>
-<style>
-  body {
-    margin: 0;
-    min-height: 100vh;
-    display: grid;
-    place-items: center;
-    padding: 28px;
-    background:
-      radial-gradient(circle at 50% 0%, rgba(226,196,122,.16), transparent 34rem),
-      linear-gradient(180deg,#050505 0%,#0b0906 55%,#050505 100%);
-    color: #e2c47a;
-    font-family: Arial, Helvetica, sans-serif;
-  }
-  .card {
-    width: min(680px, 100%);
-    border: 1px solid rgba(226,196,122,.34);
-    border-radius: 28px;
-    padding: 30px;
-    text-align: center;
-    background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.018));
-    box-shadow: 0 28px 70px rgba(0,0,0,.52), inset 0 1px 0 rgba(255,255,255,.07);
-  }
-  img {
-    width: 220px;
-    max-width: 72%;
-    margin-bottom: 20px;
-    filter: drop-shadow(0 0 18px rgba(226,196,122,.18));
-  }
-  .verified {
-    display: inline-block;
-    margin: 0 auto 18px;
-    padding: 8px 14px;
-    border-radius: 999px;
-    background: linear-gradient(135deg,#f3e4bf 0%,#d8bd78 52%,#b88d43 100%);
-    color: #2f1f13;
-    font-weight: 900;
-    font-size: 12px;
-    letter-spacing: .14em;
-  }
-  h1 {
-    margin: 0 0 14px;
-    font-size: clamp(28px, 7vw, 48px);
-    line-height: 1.05;
-  }
-  .id {
-    margin: 18px auto;
-    padding: 14px;
-    border-radius: 16px;
-    background: rgba(0,0,0,.28);
-    border: 1px solid rgba(226,196,122,.24);
-    font-weight: 900;
-    word-break: break-word;
-  }
-  .grid {
-    display: grid;
-    gap: 10px;
-    margin-top: 20px;
-    text-align: left;
-  }
-  .row {
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    border-bottom: 1px solid rgba(226,196,122,.16);
-    padding: 10px 0;
-  }
-  .label {
-    color: rgba(243,228,191,.72);
-    font-size: 12px;
-    font-weight: 800;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-  }
-  .value {
-    color: #f3e4bf;
-    font-weight: 800;
-    text-align: right;
-  }
-  .footer {
-    margin-top: 24px;
-    font-size: 12px;
-    color: rgba(243,228,191,.70);
-  }
-</style>
-</head>
-<body>
-  <main class="card">
-    <img src="https://codeperks.codenxt.global/codePerks-logo.png?v=3" alt="codePerks" />
-    <div class="verified">SERVER VERIFIED</div>
-    <h1>Verified Member Benefit</h1>
-    <div class="id">${esc(payload.certificateId)}</div>
-
-    <div class="grid">
-      <div class="row"><div class="label">Status</div><div class="value">${esc(payload.status)}</div></div>
-      <div class="row"><div class="label">Campaign</div><div class="value">${esc(payload.campaignName)}</div></div>
-      <div class="row"><div class="label">Event code</div><div class="value">${esc(payload.eventCode)}</div></div>
-      <div class="row"><div class="label">Tier</div><div class="value">${esc(payload.tier)}</div></div>
-      <div class="row"><div class="label">Owner</div><div class="value">${esc(payload.owner)}</div></div>
-      <div class="row"><div class="label">Issued</div><div class="value">${esc(String(payload.issuedAt || "").slice(0,10))}</div></div>
-      <div class="row"><div class="label">Issued by</div><div class="value">${esc(payload.issuedBy)}</div></div>
-    </div>
-
-    <div class="footer">
-      This certificate is verified directly against the codePerks ownership registry.
-    </div>
-  </main>
-</body>
-</html>`);
-  } catch (err) {
-    console.error("Verify certificate failed:", err.message);
-    return res.status(500).send("Verification failed");
-  }
-});
-
 app.post("/inner-circle", async (req, res) => {
   try {
     const { eventCode } = req.body || {};
@@ -1177,7 +964,6 @@ const phone = req.body.phone || "";
 
 let joins = 0;
 let shouldSendWelcomeMessage = false;
-let ownershipCertificate = null;
 
 if (process.env.REDIS_URL) {
   if (phone) {
@@ -1190,7 +976,7 @@ if (process.env.REDIS_URL) {
       const certificateId =
         `CP-DOC-${eventCode}-${String(joins).padStart(6, "0")}`;
 
-      ownershipCertificate = {
+      const ownershipCertificate = {
         certificateId,
         phone,
         eventCode,
@@ -1208,18 +994,6 @@ if (process.env.REDIS_URL) {
       );
     } else {
       joins = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
-
-      const storedOwnership = await redis.lrange(`event:${eventId}:ownership`, 0, -1);
-      ownershipCertificate = storedOwnership
-        .map((item) => {
-          try {
-            return JSON.parse(item);
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean)
-        .find((item) => item.phone === phone) || null;
     }
   } else {
     joins = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
@@ -1258,7 +1032,6 @@ if (phone) {
       eventCode,
       eventId,
       innerCircleJoinCount: Number(joins || 0),
-      ownershipCertificate,
     });
   } catch (err) {
     console.error("InnerCircle increment failed:", err.message);
@@ -1816,79 +1589,6 @@ if (events[eventId]) {
 app.get("/health", (req, res) => {
   res.json({ ok: true, port: PORT });
 });
-
-
-// codePerks reward claim registration
-globalThis.__CODEPERKS_REWARD_CLAIMS = globalThis.__CODEPERKS_REWARD_CLAIMS || [];
-
-app.post("/reward-claim", async (req, res) => {
-  try {
-    const body = req.body || {};
-
-    const claim = {
-      id: `RC-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
-      type: body.type === "post" ? "post" : "email",
-      eventCode: String(body.eventCode || "").trim(),
-      certificateId: String(body.certificateId || "").trim(),
-      claimant: {
-        fullName: String(body.claimant?.fullName || "").trim(),
-        address: String(body.claimant?.address || "").trim(),
-        postalCode: String(body.claimant?.postalCode || "").trim(),
-        country: String(body.claimant?.country || "").trim(),
-        phone: String(body.claimant?.phone || "").trim(),
-        email: String(body.claimant?.email || "").trim(),
-      },
-      createdAt: new Date().toISOString(),
-      source: "codePerks certificate",
-    };
-
-    if (
-      !claim.eventCode ||
-      !claim.certificateId ||
-      !claim.claimant.fullName ||
-      !claim.claimant.address ||
-      !claim.claimant.postalCode ||
-      !claim.claimant.country ||
-      !claim.claimant.phone ||
-      !claim.claimant.email
-    ) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing required reward claim fields",
-      });
-    }
-
-    globalThis.__CODEPERKS_REWARD_CLAIMS.push(claim);
-
-    console.log("CODEPERKS_REWARD_CLAIM", claim);
-
-    return res.json({
-      ok: true,
-      claim,
-    });
-  } catch (error) {
-    console.error("reward-claim error", error);
-    return res.status(500).json({
-      ok: false,
-      error: "Could not register reward claim",
-    });
-  }
-});
-
-app.get("/reward-claims/:eventCode", async (req, res) => {
-  const eventCode = String(req.params.eventCode || "").trim();
-  const claims = (globalThis.__CODEPERKS_REWARD_CLAIMS || []).filter(
-    (claim) => claim.eventCode === eventCode
-  );
-
-  return res.json({
-    ok: true,
-    eventCode,
-    claims,
-    count: claims.length,
-  });
-});
-
 
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
