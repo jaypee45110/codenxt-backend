@@ -12,20 +12,6 @@ const { spawn } = require("child_process");
 const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const app = express();
-
-function normalizeRewardDelivery(input = {}) {
-  return {
-    company: String(input.company || "").trim(),
-    responsiblePerson: String(input.responsiblePerson || "").trim(),
-    address1: String(input.address1 || "").trim(),
-    address2: String(input.address2 || "").trim(),
-    postalCode: String(input.postalCode || "").trim(),
-    country: String(input.country || "").trim(),
-    phone: String(input.phone || "").trim(),
-    email: String(input.email || "").trim(),
-  };
-}
-
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
