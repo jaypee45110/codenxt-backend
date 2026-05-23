@@ -1835,97 +1835,46 @@ app.get("/health", (req, res) => {
 // codePerks reward claim registration
 globalThis.__CODEPERKS_REWARD_CLAIMS = globalThis.__CODEPERKS_REWARD_CLAIMS || [];
 
-function buildCodePerksRewardClaim(body = {}) {
-  return {
-    id: `RC-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
-    type: body.type === "post" ? "post" : "email",
-    status: "pending",
-    eventCode: String(body.eventCode || "").trim(),
-    certificateId: String(body.certificateId || "").trim(),
-    claimant: {
-      fullName: String(body.claimant?.fullName || "").trim(),
-      address: String(body.claimant?.address || "").trim(),
-      postalCode: String(body.claimant?.postalCode || "").trim(),
-      country: String(body.claimant?.country || "").trim(),
-      phone: String(body.claimant?.phone || "").trim(),
-      email: String(body.claimant?.email || "").trim(),
-    },
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    source: "codePerks certificate",
-  };
-}
-
-function validateCodePerksRewardClaim(claim) {
-  return Boolean(
-    claim.eventCode &&
-    claim.certificateId &&
-    claim.claimant.fullName &&
-    claim.claimant.address &&
-    claim.claimant.postalCode &&
-    claim.claimant.country &&
-    claim.claimant.phone &&
-    claim.claimant.email
-  );
-}
-
 app.post("/reward-claim", async (req, res) => {
   try {
-    const claim = buildCodePerksRewardClaim(req.body || {});
+    const body = req.body || {};
 
-    if (!validateCodePerksRewardClaim(claim)) {
+    const claim = {
+      id: `RC-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+      type: body.type === "post" ? "post" : "email",
+      eventCode: String(body.eventCode || "").trim(),
+      certificateId: String(body.certificateId || "").trim(),
+      claimant: {
+        fullName: String(body.claimant?.fullName || "").trim(),
+        address: String(body.claimant?.address || "").trim(),
+        postalCode: String(body.claimant?.postalCode || "").trim(),
+        country: String(body.claimant?.country || "").trim(),
+        phone: String(body.claimant?.phone || "").trim(),
+        email: String(body.claimant?.email || "").trim(),
+      },
+      createdAt: new Date().toISOString(),
+      source: "codePerks certificate",
+    };
+
+    if (
+      !claim.eventCode ||
+      !claim.certificateId ||
+      !claim.claimant.fullName ||
+      !claim.claimant.address ||
+      !claim.claimant.postalCode ||
+      !claim.claimant.country ||
+      !claim.claimant.phone ||
+      !claim.claimant.email
+    ) {
       return res.status(400).json({
         ok: false,
         error: "Missing required reward claim fields",
       });
     }
 
-    if (process.env.REDIS_URL) {
-      const duplicateKey = `codeperks:claim:certificate:${claim.certificateId}`;
-      const eventClaimsKey = `codeperks:claims:event:${claim.eventCode}`;
-      const claimKey = `codeperks:claim:${claim.id}`;
-
-      const firstClaim = await redis.set(duplicateKey, claim.id, "NX");
-      if (!firstClaim) {
-        const existingClaimId = await redis.get(duplicateKey);
-        const existingRaw = existingClaimId ? await redis.get(`codeperks:claim:${existingClaimId}`) : null;
-        const existingClaim = existingRaw ? JSON.parse(existingRaw) : null;
-
-        return res.status(409).json({
-          ok: false,
-          duplicate: true,
-          error: "A claim has already been registered for this certificate.",
-          claim: existingClaim,
-        });
-      }
-
-      await redis.set(claimKey, JSON.stringify(claim));
-      await redis.rpush(eventClaimsKey, claim.id);
-
-      console.log("CODEPERKS_REWARD_CLAIM_REDIS", claim);
-
-      return res.json({
-        ok: true,
-        claim,
-      });
-    }
-
-    const duplicate = (globalThis.__CODEPERKS_REWARD_CLAIMS || []).find(
-      (existing) => existing.certificateId === claim.certificateId
-    );
-
-    if (duplicate) {
-      return res.status(409).json({
-        ok: false,
-        duplicate: true,
-        error: "A claim has already been registered for this certificate.",
-        claim: duplicate,
-      });
-    }
-
     globalThis.__CODEPERKS_REWARD_CLAIMS.push(claim);
 
-    console.log("CODEPERKS_REWARD_CLAIM_MEMORY", claim);
+    console.log("CODEPERKS_REWARD_CLAIM", claim);
 
     return res.json({
       ok: true,
@@ -1942,45 +1891,16 @@ app.post("/reward-claim", async (req, res) => {
 
 app.get("/reward-claims/:eventCode", async (req, res) => {
   const eventCode = String(req.params.eventCode || "").trim();
+  const claims = (globalThis.__CODEPERKS_REWARD_CLAIMS || []).filter(
+    (claim) => claim.eventCode === eventCode
+  );
 
-  try {
-    if (process.env.REDIS_URL) {
-      const eventClaimsKey = `codeperks:claims:event:${eventCode}`;
-      const claimIds = await redis.lrange(eventClaimsKey, 0, -1);
-      const claims = [];
-
-      for (const claimId of claimIds) {
-        const raw = await redis.get(`codeperks:claim:${claimId}`);
-        if (raw) claims.push(JSON.parse(raw));
-      }
-
-      return res.json({
-        ok: true,
-        storage: "redis",
-        eventCode,
-        claims,
-        count: claims.length,
-      });
-    }
-
-    const claims = (globalThis.__CODEPERKS_REWARD_CLAIMS || []).filter(
-      (claim) => claim.eventCode === eventCode
-    );
-
-    return res.json({
-      ok: true,
-      storage: "memory",
-      eventCode,
-      claims,
-      count: claims.length,
-    });
-  } catch (error) {
-    console.error("reward-claims error", error);
-    return res.status(500).json({
-      ok: false,
-      error: "Could not load reward claims",
-    });
-  }
+  return res.json({
+    ok: true,
+    eventCode,
+    claims,
+    count: claims.length,
+  });
 });
 
 
