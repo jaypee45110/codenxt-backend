@@ -799,7 +799,7 @@ if (cachedReward) {
   }
 });
 // GET REPORT
-app.get("/report/:eventCode", requireCodePerksAdmin, async (req, res) => {
+app.get("/report/:eventCode", async (req, res) => {
   try {
     let { eventCode } = req.params;
     let event = null;
@@ -1827,26 +1827,6 @@ if (events[eventId]) {
     });
   }
 });
-
-function requireCodePerksAdmin(req, res, next) {
-  const configuredKey = process.env.CODEPERKS_ADMIN_KEY;
-
-  if (!configuredKey) {
-    return next();
-  }
-
-  const providedKey = String(req.headers["x-admin-key"] || "").trim();
-
-  if (providedKey && providedKey === configuredKey) {
-    return next();
-  }
-
-  return res.status(401).json({
-    ok: false,
-    error: "Unauthorized",
-  });
-}
-
 app.get("/health", (req, res) => {
   res.json({ ok: true, port: PORT });
 });
@@ -1961,7 +1941,7 @@ app.post("/reward-claim", async (req, res) => {
 });
 
 
-app.post("/reward-claim/:claimId/status", requireCodePerksAdmin, async (req, res) => {
+app.post("/reward-claim/:claimId/status", async (req, res) => {
   try {
     const claimId = String(req.params.claimId || "").trim();
     const status = String(req.body?.status || "").trim().toLowerCase();
@@ -2025,7 +2005,7 @@ app.post("/reward-claim/:claimId/status", requireCodePerksAdmin, async (req, res
   }
 });
 
-app.get("/reward-claims/:eventCode", requireCodePerksAdmin, async (req, res) => {
+app.get("/reward-claims/:eventCode", async (req, res) => {
   const eventCode = String(req.params.eventCode || "").trim();
 
   try {
