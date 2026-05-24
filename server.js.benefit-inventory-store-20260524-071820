@@ -269,21 +269,6 @@ const videoPath = `/screen-video/${safeEventCode}`;      const videoUrl = PUBLIC
     });
   });
 }
-
-function normalizeBenefitInventory(input = {}) {
-  const goldTotal = Math.max(0, Number(input.goldTotal || input.gold || 0));
-  const silverTotal = Math.max(0, Number(input.silverTotal || input.silver || 0));
-
-  return {
-    mode: "progressive_scarcity",
-    goldTotal,
-    silverTotal,
-    standardUnlimited: true,
-    campaignStart: String(input.campaignStart || "").trim(),
-    campaignEnd: String(input.campaignEnd || "").trim(),
-  };
-}
-
 // CREATE EVENT
 app.post("/event", async (req, res) => {
   try {
@@ -299,12 +284,10 @@ const {
   unlockAt,
   endAt,
   maxClaims,
-  status,
-  benefitInventory
+  status
 } = req.body;
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
-const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory || {});
 
     if (!name || !startAt || !unlockAt || !endAt) {
       return res.status(400).json({
@@ -328,7 +311,6 @@ const event = {
   endAt,
 maxClaims,
   status,
-  benefitInventory: normalizedBenefitInventory,
   momentOpen: false,
 };
     events[id] = event;
@@ -348,7 +330,6 @@ artistLogo: artistLogo || "",
   endAt,
   maxClaims: String(maxClaims),
   status,
-  benefitInventory: JSON.stringify(normalizedBenefitInventory),
   momentOpen: "false",
 });
 
@@ -419,18 +400,6 @@ const inMemoryEvent = Object.values(events).find(
     meta.badgeConfig = JSON.parse(meta.badgeConfig);
   } catch {
     meta.badgeConfig = { template: "americana" };
-  }
-}
-if (meta && meta.benefitInventory) {
-  try {
-    meta.benefitInventory = JSON.parse(meta.benefitInventory);
-  } catch {
-    meta.benefitInventory = {
-      mode: "progressive_scarcity",
-      goldTotal: 0,
-      silverTotal: 0,
-      standardUnlimited: true,
-    };
   }
 }
     if ((!meta || !meta.id) && events[eventId]) {
