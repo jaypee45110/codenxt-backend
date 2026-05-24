@@ -2509,14 +2509,18 @@ app.post("/send-fulfillment-list/:eventCode", requireCodePerksAdmin, limitReward
       ? rows.map((row) => `${row.name}, ${row.email}`).join("\n")
       : "No claims registered yet.";
 
-    const subject = `codePerks fulfillment list - ${eventCode}`;
+    const generatedAt = new Date().toISOString();
+    const issuedCount = rows.length;
+    const claimedCount = rows.length;
+    const subject = `codePerks Fulfillment List • ${eventCode} • ${rows.length} Claim${rows.length === 1 ? "" : "s"}`;
 
     const html = `
       <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111;">
         <h2>codePerks fulfillment list</h2>
         <p>Campaign: <strong>${eventCode}</strong></p>
         ${recipientName ? `<p>Fulfillment contact: <strong>${recipientName}</strong></p>` : ""}
-        <p>Total claims: <strong>${rows.length}</strong></p>
+        <p>Issued: <strong>${issuedCount}</strong><br/>Claimed: <strong>${claimedCount}</strong></p>
+        <p style="color:#666;font-size:13px;">Generated: ${generatedAt}</p>
 
         <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;width:100%;max-width:720px;margin-top:18px;">
           <thead>
@@ -2538,7 +2542,9 @@ app.post("/send-fulfillment-list/:eventCode", requireCodePerksAdmin, limitReward
       "codePerks fulfillment list",
       `Campaign: ${eventCode}`,
       recipientName ? `Fulfillment contact: ${recipientName}` : "",
-      `Total claims: ${rows.length}`,
+      `Issued: ${issuedCount}`,
+      `Claimed: ${claimedCount}`,
+      `Generated: ${generatedAt}`,
       "",
       "name,email",
       textRows,
@@ -2556,7 +2562,9 @@ app.post("/send-fulfillment-list/:eventCode", requireCodePerksAdmin, limitReward
       eventCode,
       sentTo: recipientEmail,
       totalClaims: rows.length,
-      sentAt: new Date().toISOString(),
+      issued: issuedCount,
+      claimed: claimedCount,
+      sentAt: generatedAt,
     });
   } catch (error) {
     console.error("send fulfillment list error", error);
