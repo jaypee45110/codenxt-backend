@@ -2276,6 +2276,10 @@ function buildCodePerksRewardClaim(body = {}) {
       phone: String(body.claimant?.phone || "").trim(),
       email: String(body.claimant?.email || "").trim(),
     },
+    redemptionToken: crypto.randomBytes(24).toString("hex"),
+    redeemed: false,
+    redeemedAt: null,
+    redeemedBy: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     source: "codePerks certificate",
@@ -2326,6 +2330,7 @@ app.post("/reward-claim", limitRewardClaim, async (req, res) => {
       }
 
       await redis.set(claimKey, JSON.stringify(claim));
+      await redis.set(`codeperks:redemption:${claim.redemptionToken}`, claim.id);
       await redis.rpush(eventClaimsKey, claim.id);
 
       console.log("CODEPERKS_REWARD_CLAIM_REDIS", claim);
@@ -2388,6 +2393,164 @@ app.get("/postgres-campaign/:eventCode", requireCodePerksAdmin, async (req, res)
     return res.status(500).json({
       ok: false,
       error: "Could not load campaign from Postgres",
+    });
+  }
+});
+
+app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
+  try {
+    const token = String(req.params.token || "").trim();
+
+    if (!token) {
+      return res.status(400).json({
+        ok: false,
+        valid: false,
+        error: "Missing redemption token",
+      });
+    }
+
+    if (process.env.REDIS_URL) {
+      const claimId = await redis.get(`codeperks:redemption:${token}`);
+      const raw = claimId ? await redis.get(`codeperks:claim:${claimId}`) : null;
+      const claim = raw ? JSON.parse(raw) : null;
+
+      if (!claim) {
+        return res.status(404).json({
+          ok: false,
+          valid: false,
+          error: "Redemption code not found",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        valid: true,
+        redeemed: Boolean(claim.redeemed),
+        redeemedAt: claim.redeemedAt || null,
+        eventCode: claim.eventCode,
+        certificateId: claim.certificateId,
+        claimId: claim.id,
+        status: claim.status || "pending",
+      });
+    }
+
+    const claim = (globalThis.__CODEPERKS_REWARD_CLAIMS || []).find(
+      (entry) => entry.redemptionToken === token
+    );
+
+    if (!claim) {
+      return res.status(404).json({
+        ok: false,
+        valid: false,
+        error: "Redemption code not found",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      valid: true,
+      redeemed: Boolean(claim.redeemed),
+      redeemedAt: claim.redeemedAt || null,
+      eventCode: claim.eventCode,
+      certificateId: claim.certificateId,
+      claimId: claim.id,
+      status: claim.status || "pending",
+    });
+  } catch (error) {
+    console.error("redemption lookup error", error);
+    return res.status(500).json({
+      ok: false,
+      valid: false,
+      error: "Could not validate redemption code",
+    });
+  }
+});
+
+app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
+  try {
+    const token = String(req.params.token || "").trim();
+    const redeemedBy = String(req.body?.redeemedBy || "redemption-scan").trim();
+
+    if (!token) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing redemption token",
+      });
+    }
+
+    if (process.env.REDIS_URL) {
+      const claimId = await redis.get(`codeperks:redemption:${token}`);
+      const claimKey = claimId ? `codeperks:claim:${claimId}` : "";
+      const raw = claimKey ? await redis.get(claimKey) : null;
+      const claim = raw ? JSON.parse(raw) : null;
+
+      if (!claim) {
+        return res.status(404).json({
+          ok: false,
+          error: "Redemption code not found",
+        });
+      }
+
+      if (claim.redeemed) {
+        return res.status(409).json({
+          ok: false,
+          alreadyRedeemed: true,
+          redeemedAt: claim.redeemedAt || null,
+          error: "Already redeemed",
+        });
+      }
+
+      claim.redeemed = true;
+      claim.redeemedAt = new Date().toISOString();
+      claim.redeemedBy = redeemedBy;
+      claim.status = "fulfilled";
+      claim.updatedAt = claim.redeemedAt;
+
+      await redis.set(claimKey, JSON.stringify(claim));
+
+      return res.json({
+        ok: true,
+        redeemed: true,
+        claim,
+      });
+    }
+
+    const claim = (globalThis.__CODEPERKS_REWARD_CLAIMS || []).find(
+      (entry) => entry.redemptionToken === token
+    );
+
+    if (!claim) {
+      return res.status(404).json({
+        ok: false,
+        error: "Redemption code not found",
+      });
+    }
+
+    if (claim.redeemed) {
+      return res.status(409).json({
+        ok: false,
+        alreadyRedeemed: true,
+        redeemedAt: claim.redeemedAt || null,
+        error: "Already redeemed",
+      });
+    }
+
+    claim.redeemed = true;
+    claim.redeemedAt = new Date().toISOString();
+    claim.redeemedBy = redeemedBy;
+    claim.status = "fulfilled";
+    claim.updatedAt = claim.redeemedAt;
+
+    return res.json({
+      ok: true,
+      redeemed: true,
+      claim,
+    });
+  } catch (error) {
+    console.error("redemption redeem error", error);
+    return res.status(500).json({
+      ok: false,
+      error: "Could not redeem reward",
     });
   }
 });
