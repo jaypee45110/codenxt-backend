@@ -977,14 +977,6 @@ app.get("/verify/:certificateId", async (req, res) => {
 
       if (eventId) {
         const meta = await redis.hgetall(`event:${eventId}:meta`);
-        if (meta && meta.benefitInventory && typeof meta.benefitInventory === "string") {
-          try {
-            meta.benefitInventory = JSON.parse(meta.benefitInventory);
-          } catch {
-            meta.benefitInventory = null;
-          }
-        }
-
         if (meta && meta.id) {
           event = {
             id: meta.id,
