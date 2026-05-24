@@ -13,6 +13,7 @@ const { spawn } = require("child_process");
 const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { testDbConnection, saveCampaign, getCampaignByCode } = require("./db");
+const { sendEmail } = require("./mailer");
 const app = express();
 
 testDbConnection().catch((error) => {
@@ -2451,6 +2452,117 @@ app.post("/reward-claim/:claimId/status", requireCodePerksAdmin, limitClaimStatu
     return res.status(500).json({
       ok: false,
       error: "Could not update reward claim status",
+    });
+  }
+});
+
+app.post("/send-fulfillment-list/:eventCode", requireCodePerksAdmin, limitRewardClaimsRead, async (req, res) => {
+  const eventCode = String(req.params.eventCode || "").trim();
+
+  try {
+    const campaign = await getCampaignByCode(eventCode);
+    const rawEvent = campaign?.raw_event || {};
+    const rewardDelivery = rawEvent.rewardDelivery || {};
+    const recipientName = String(rewardDelivery.responsiblePerson || "").trim();
+    const recipientEmail = String(rewardDelivery.email || "").trim();
+
+    if (!recipientEmail) {
+      return res.status(400).json({
+        ok: false,
+        error: "No fulfillment contact email found for this campaign",
+      });
+    }
+
+    let claims = [];
+
+    if (process.env.REDIS_URL) {
+      const eventClaimsKey = `codeperks:claims:event:${eventCode}`;
+      const claimIds = await redis.lrange(eventClaimsKey, 0, -1);
+
+      for (const claimId of claimIds) {
+        const raw = await redis.get(`codeperks:claim:${claimId}`);
+        if (raw) claims.push(JSON.parse(raw));
+      }
+    } else {
+      claims = (globalThis.__CODEPERKS_REWARD_CLAIMS || []).filter(
+        (claim) => claim.eventCode === eventCode
+      );
+    }
+
+    const rows = claims
+      .map((claim) => ({
+        name: String(claim.claimant?.fullName || "").trim(),
+        email: String(claim.claimant?.email || "").trim(),
+      }))
+      .filter((row) => row.name || row.email);
+
+    const htmlRows = rows.length
+      ? rows.map((row) => `
+          <tr>
+            <td style="padding:8px 10px;border-bottom:1px solid #eee;">${row.name}</td>
+            <td style="padding:8px 10px;border-bottom:1px solid #eee;">${row.email}</td>
+          </tr>
+        `).join("")
+      : `<tr><td colspan="2" style="padding:12px;">No claims registered yet.</td></tr>`;
+
+    const textRows = rows.length
+      ? rows.map((row) => `${row.name}, ${row.email}`).join("\n")
+      : "No claims registered yet.";
+
+    const subject = `codePerks fulfillment list - ${eventCode}`;
+
+    const html = `
+      <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111;">
+        <h2>codePerks fulfillment list</h2>
+        <p>Campaign: <strong>${eventCode}</strong></p>
+        ${recipientName ? `<p>Fulfillment contact: <strong>${recipientName}</strong></p>` : ""}
+        <p>Total claims: <strong>${rows.length}</strong></p>
+
+        <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;width:100%;max-width:720px;margin-top:18px;">
+          <thead>
+            <tr>
+              <th align="left" style="padding:8px 10px;border-bottom:2px solid #111;">Name</th>
+              <th align="left" style="padding:8px 10px;border-bottom:2px solid #111;">Email</th>
+            </tr>
+          </thead>
+          <tbody>${htmlRows}</tbody>
+        </table>
+
+        <p style="margin-top:24px;color:#666;font-size:12px;">
+          Sent automatically by codePerks.
+        </p>
+      </div>
+    `;
+
+    const text = [
+      "codePerks fulfillment list",
+      `Campaign: ${eventCode}`,
+      recipientName ? `Fulfillment contact: ${recipientName}` : "",
+      `Total claims: ${rows.length}`,
+      "",
+      "name,email",
+      textRows,
+    ].filter(Boolean).join("\n");
+
+    await sendEmail({
+      to: recipientEmail,
+      subject,
+      html,
+      text,
+    });
+
+    return res.json({
+      ok: true,
+      eventCode,
+      sentTo: recipientEmail,
+      totalClaims: rows.length,
+      sentAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("send fulfillment list error", error);
+    return res.status(500).json({
+      ok: false,
+      error: "Could not send fulfillment list",
     });
   }
 });
