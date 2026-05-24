@@ -468,7 +468,6 @@ const normalizedMeta = {
   endAt: meta?.endAt,
   maxClaims: Number(meta?.maxClaims || 0),
   status: meta?.status,
-  benefitInventory: meta?.benefitInventory || null,
 screenVideoUrl: meta?.screenVideoUrl || "",
 momentOpen: meta?.momentOpen === true || meta?.momentOpen === "true",
 rawScans,
