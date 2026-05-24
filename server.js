@@ -12,7 +12,12 @@ const path = require("path");
 const { spawn } = require("child_process");
 const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { testDbConnection } = require("./db");
 const app = express();
+
+testDbConnection().catch((error) => {
+  console.error("POSTGRES STARTUP CHECK FAILED:", error.message);
+});
 
 function normalizeRewardDelivery(input = {}) {
   return {
