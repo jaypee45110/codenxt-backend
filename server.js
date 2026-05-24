@@ -376,6 +376,13 @@ try {
 } catch (dbError) {
   console.error("POSTGRES CAMPAIGN SAVE FAILED:", dbError.message);
 }
+
+try {
+  await saveCampaign(event);
+  console.log("POSTGRES CAMPAIGN SAVED:", event.code);
+} catch (dbError) {
+  console.error("POSTGRES CAMPAIGN SAVE FAILED:", dbError.message);
+}
     try {
       await sendSentInnerCircleMessage(
         "+4794433450",
