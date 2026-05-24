@@ -4,6 +4,7 @@ const REDIS_ENABLED = !!process.env.REDIS_URL;
 const express = require("express");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
+const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const redis = require("./redis");
 const fs = require("fs");
@@ -284,6 +285,10 @@ function normalizeBenefitInventory(input = {}) {
   };
 }
 
+function generateDashboardAccessKey() {
+  return `KP-${crypto.randomBytes(3).toString("hex").toUpperCase()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+}
+
 // CREATE EVENT
 app.post("/event", async (req, res) => {
   try {
@@ -305,6 +310,7 @@ const {
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
 const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory || {});
+const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 
     if (!name || !startAt || !unlockAt || !endAt) {
       return res.status(400).json({
@@ -329,6 +335,7 @@ const event = {
 maxClaims,
   status,
   benefitInventory: normalizedBenefitInventory,
+  dashboardAccessKey,
   momentOpen: false,
 };
     events[id] = event;
@@ -349,6 +356,7 @@ artistLogo: artistLogo || "",
   maxClaims: String(maxClaims),
   status,
   benefitInventory: JSON.stringify(normalizedBenefitInventory),
+  dashboardAccessKey,
   momentOpen: "false",
 });
 
@@ -1937,17 +1945,38 @@ const limitRewardClaimsRead = createRedisRateLimiter({
   windowSeconds: 60,
 });
 
-function requireCodePerksAdmin(req, res, next) {
+async function requireCodePerksAdmin(req, res, next) {
   const configuredKey = process.env.CODEPERKS_ADMIN_KEY;
+  const providedKey = String(req.headers["x-admin-key"] || "").trim();
 
-  if (!configuredKey) {
+  if (!configuredKey && !providedKey) {
     return next();
   }
 
-  const providedKey = String(req.headers["x-admin-key"] || "").trim();
-
-  if (providedKey && providedKey === configuredKey) {
+  if (configuredKey && providedKey && providedKey === configuredKey) {
     return next();
+  }
+
+  const eventCode = String(req.params?.eventCode || req.query?.eventCode || req.body?.eventCode || "").trim();
+  const vertical = String(req.query?.vertical || req.body?.vertical || "codeperks").trim().toLowerCase();
+
+  if (providedKey && eventCode && process.env.REDIS_URL) {
+    try {
+      const eventId =
+        await redis.get(`eventcode:${vertical}:${eventCode}`) ||
+        await redis.get(`eventcode:${eventCode}`);
+
+      if (eventId) {
+        const meta = await redis.hgetall(`event:${eventId}:meta`);
+        const campaignKey = String(meta?.dashboardAccessKey || "").trim();
+
+        if (campaignKey && providedKey === campaignKey) {
+          return next();
+        }
+      }
+    } catch (error) {
+      console.warn("Campaign dashboard key check failed:", error.message);
+    }
   }
 
   return res.status(401).json({
