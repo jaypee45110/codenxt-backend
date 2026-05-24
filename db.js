@@ -97,9 +97,23 @@ async function saveCampaign(event) {
   );
 }
 
+async function getCampaignByCode(eventCode) {
+  if (!pool || !eventCode) return null;
+
+  await ensureCampaignsTable();
+
+  const result = await pool.query(
+    'SELECT * FROM campaigns WHERE event_code = $1 LIMIT 1',
+    [eventCode]
+  );
+
+  return result.rows[0] || null;
+}
+
 module.exports = {
   pool,
   testDbConnection,
   ensureCampaignsTable,
   saveCampaign,
+  getCampaignByCode,
 };

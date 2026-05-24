@@ -12,7 +12,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const { testDbConnection, saveCampaign } = require("./db");
+const { testDbConnection, saveCampaign, getCampaignByCode } = require("./db");
 const app = express();
 
 testDbConnection().catch((error) => {
@@ -2361,6 +2361,31 @@ app.post("/reward-claim", limitRewardClaim, async (req, res) => {
   }
 });
 
+
+app.get("/postgres-campaign/:eventCode", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    const campaign = await getCampaignByCode(eventCode);
+
+    if (!campaign) {
+      return res.status(404).json({
+        ok: false,
+        error: "Campaign not found in Postgres",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      campaign,
+    });
+  } catch (error) {
+    console.error("postgres campaign lookup error", error);
+    return res.status(500).json({
+      ok: false,
+      error: "Could not load campaign from Postgres",
+    });
+  }
+});
 
 app.post("/reward-claim/:claimId/status", requireCodePerksAdmin, limitClaimStatus, async (req, res) => {
   try {
