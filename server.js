@@ -12,7 +12,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const { testDbConnection } = require("./db");
+const { testDbConnection, saveCampaign } = require("./db");
 const app = express();
 
 testDbConnection().catch((error) => {
@@ -368,6 +368,13 @@ artistLogo: artistLogo || "",
   await redis.set(`eventcode:${code || id}`, id);
   await redis.set(`eventcode:${normalizedVertical}:${code || id}`, id);
   await redis.set(`event:${id}:claims`, "0");
+}
+
+try {
+  await saveCampaign(event);
+  console.log("POSTGRES CAMPAIGN SAVED:", event.code);
+} catch (dbError) {
+  console.error("POSTGRES CAMPAIGN SAVE FAILED:", dbError.message);
 }
     try {
       await sendSentInnerCircleMessage(
