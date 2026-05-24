@@ -310,11 +310,13 @@ const {
   endAt,
   maxClaims,
   status,
-  benefitInventory
+  benefitInventory,
+  rewardDelivery
 } = req.body;
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
 const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory || {});
+const normalizedRewardDelivery = normalizeRewardDelivery(rewardDelivery || {});
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 
     if (!name || !startAt || !unlockAt || !endAt) {
@@ -340,6 +342,7 @@ const event = {
 maxClaims,
   status,
   benefitInventory: normalizedBenefitInventory,
+  rewardDelivery: normalizedRewardDelivery,
   dashboardAccessKey,
   momentOpen: false,
 };
@@ -361,6 +364,7 @@ artistLogo: artistLogo || "",
   maxClaims: String(maxClaims),
   status,
   benefitInventory: JSON.stringify(normalizedBenefitInventory),
+  rewardDelivery: JSON.stringify(normalizedRewardDelivery),
   dashboardAccessKey,
   momentOpen: "false",
 });
