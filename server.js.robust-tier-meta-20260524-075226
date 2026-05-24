@@ -2005,20 +2005,7 @@ async function getCodePerksBenefitInventoryStatus(eventId, meta = {}) {
 }
 
 async function assignCodePerksBenefitTier(eventId, meta = {}) {
-  let freshMeta = meta || {};
-
-  if (process.env.REDIS_URL && eventId) {
-    try {
-      const redisMeta = await redis.hgetall(`event:${eventId}:meta`);
-      if (redisMeta && redisMeta.id) {
-        freshMeta = redisMeta;
-      }
-    } catch (error) {
-      console.warn("Could not refresh benefit inventory meta:", error.message);
-    }
-  }
-
-  const inventory = parseBenefitInventoryFromMeta(freshMeta);
+  const inventory = parseBenefitInventoryFromMeta(meta);
 
   if (!process.env.REDIS_URL) {
     return {
@@ -2038,7 +2025,7 @@ async function assignCodePerksBenefitTier(eventId, meta = {}) {
     const goldAssigned = await redis.incr(`event:${eventId}:benefit:goldAssigned`);
 
     if (goldAssigned <= inventory.goldTotal) {
-      const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, freshMeta);
+      const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, meta);
       return { tier: "gold", inventoryStatus };
     }
 
@@ -2049,7 +2036,7 @@ async function assignCodePerksBenefitTier(eventId, meta = {}) {
     const silverAssigned = await redis.incr(`event:${eventId}:benefit:silverAssigned`);
 
     if (silverAssigned <= inventory.silverTotal) {
-      const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, freshMeta);
+      const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, meta);
       return { tier: "silver", inventoryStatus };
     }
 
@@ -2057,7 +2044,7 @@ async function assignCodePerksBenefitTier(eventId, meta = {}) {
   }
 
   await redis.incr(`event:${eventId}:benefit:standardAssigned`);
-  const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, freshMeta);
+  const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, meta);
 
   return { tier: "standard", inventoryStatus };
 }
