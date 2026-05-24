@@ -1236,16 +1236,12 @@ if (process.env.REDIS_URL) {
       const certificateId =
         `CP-DOC-${eventCode}-${String(joins).padStart(6, "0")}`;
 
-      const benefitAssignment = await assignCodePerksBenefitTier(eventId, meta || {});
-
       ownershipCertificate = {
         certificateId,
         phone,
         eventCode,
         eventId,
-        tier: benefitAssignment.tier,
-        benefitTier: benefitAssignment.tier,
-        benefitInventory: benefitAssignment.inventoryStatus,
+        tier: req.body.tier || "general",
         status: "active",
         issuedAt: new Date().toISOString(),
         issuedBy: "codePerks by codeNXT",
@@ -1946,147 +1942,6 @@ function requireCodePerksAdmin(req, res, next) {
   });
 }
 
-
-
-function parseBenefitInventoryFromMeta(meta = {}) {
-  let benefitInventory = meta.benefitInventory || null;
-
-  if (typeof benefitInventory === "string") {
-    try {
-      benefitInventory = JSON.parse(benefitInventory);
-    } catch {
-      benefitInventory = null;
-    }
-  }
-
-  return {
-    mode: "progressive_scarcity",
-    goldTotal: Math.max(0, Number(benefitInventory?.goldTotal || 0)),
-    silverTotal: Math.max(0, Number(benefitInventory?.silverTotal || 0)),
-    standardUnlimited: true,
-    campaignStart: String(benefitInventory?.campaignStart || meta.startAt || "").trim(),
-    campaignEnd: String(benefitInventory?.campaignEnd || meta.endAt || "").trim(),
-  };
-}
-
-async function getCodePerksBenefitInventoryStatus(eventId, meta = {}) {
-  const inventory = parseBenefitInventoryFromMeta(meta);
-
-  const goldAssigned = process.env.REDIS_URL
-    ? Number(await redis.get(`event:${eventId}:benefit:goldAssigned`) || 0)
-    : 0;
-
-  const silverAssigned = process.env.REDIS_URL
-    ? Number(await redis.get(`event:${eventId}:benefit:silverAssigned`) || 0)
-    : 0;
-
-  const standardAssigned = process.env.REDIS_URL
-    ? Number(await redis.get(`event:${eventId}:benefit:standardAssigned`) || 0)
-    : 0;
-
-  return {
-    ...inventory,
-    goldAssigned,
-    silverAssigned,
-    standardAssigned,
-    goldRemaining: Math.max(0, inventory.goldTotal - goldAssigned),
-    silverRemaining: Math.max(0, inventory.silverTotal - silverAssigned),
-  };
-}
-
-async function assignCodePerksBenefitTier(eventId, meta = {}) {
-  const inventory = parseBenefitInventoryFromMeta(meta);
-
-  if (!process.env.REDIS_URL) {
-    return {
-      tier: "standard",
-      inventoryStatus: {
-        ...inventory,
-        goldAssigned: 0,
-        silverAssigned: 0,
-        standardAssigned: 1,
-        goldRemaining: inventory.goldTotal,
-        silverRemaining: inventory.silverTotal,
-      },
-    };
-  }
-
-  if (inventory.goldTotal > 0) {
-    const goldAssigned = await redis.incr(`event:${eventId}:benefit:goldAssigned`);
-
-    if (goldAssigned <= inventory.goldTotal) {
-      const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, meta);
-      return { tier: "gold", inventoryStatus };
-    }
-
-    await redis.decr(`event:${eventId}:benefit:goldAssigned`);
-  }
-
-  if (inventory.silverTotal > 0) {
-    const silverAssigned = await redis.incr(`event:${eventId}:benefit:silverAssigned`);
-
-    if (silverAssigned <= inventory.silverTotal) {
-      const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, meta);
-      return { tier: "silver", inventoryStatus };
-    }
-
-    await redis.decr(`event:${eventId}:benefit:silverAssigned`);
-  }
-
-  await redis.incr(`event:${eventId}:benefit:standardAssigned`);
-  const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, meta);
-
-  return { tier: "standard", inventoryStatus };
-}
-
-
-app.get("/benefit-inventory/:eventCode", limitCertificateValidate, async (req, res) => {
-  try {
-    const eventCode = String(req.params.eventCode || "").trim();
-    const vertical = String(req.query?.vertical || "codeperks").trim().toLowerCase();
-
-    if (!eventCode) {
-      return res.status(400).json({
-        ok: false,
-        error: "eventCode is required",
-      });
-    }
-
-    if (!process.env.REDIS_URL) {
-      return res.json({
-        ok: false,
-        error: "Redis unavailable",
-      });
-    }
-
-    let eventId =
-      await redis.get(`eventcode:${vertical}:${eventCode}`) ||
-      await redis.get(`eventcode:${eventCode}`);
-
-    if (!eventId) {
-      return res.status(404).json({
-        ok: false,
-        error: "Event not found",
-      });
-    }
-
-    const meta = await redis.hgetall(`event:${eventId}:meta`);
-    const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, meta || {});
-
-    return res.json({
-      ok: true,
-      eventCode,
-      eventId,
-      benefitInventory: inventoryStatus,
-    });
-  } catch (error) {
-    console.error("benefit inventory error", error);
-    return res.status(500).json({
-      ok: false,
-      error: "Could not load benefit inventory",
-    });
-  }
-});
 
 app.get("/certificate/validate/:eventCode/:certificateId", limitCertificateValidate, async (req, res) => {
   try {
