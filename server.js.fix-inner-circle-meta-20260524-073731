@@ -854,7 +854,7 @@ if (!event && process.env.REDIS_URL) {
       if (resolvedId) {
         eventId = resolvedId;
 
-        meta = await redis.hgetall(`event:${eventId}:meta`);
+        const meta = await redis.hgetall(`event:${eventId}:meta`);
         if (meta && meta.id) {
 event = {
   id: meta.id,
@@ -968,7 +968,6 @@ app.get("/verify/:certificateId", async (req, res) => {
     const eventCode = match[1];
     let eventId = null;
     let event = null;
-    let meta = null;
 
     if (process.env.REDIS_URL) {
       eventId =
