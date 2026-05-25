@@ -464,6 +464,14 @@ if (meta && meta.benefitInventory) {
     };
   }
 }
+
+if (meta && meta.rewardDelivery) {
+  try {
+    meta.rewardDelivery = JSON.parse(meta.rewardDelivery);
+  } catch {
+    meta.rewardDelivery = null;
+  }
+}
     if ((!meta || !meta.id) && events[eventId]) {
   meta = events[eventId];
 }
@@ -503,6 +511,7 @@ const normalizedMeta = {
   lang: meta?.defaultLang || meta?.lang || meta?.language || "en",
   language: meta?.defaultLang || meta?.lang || meta?.language || "en",
   benefitInventory: meta?.benefitInventory || null,
+  rewardDelivery: meta?.rewardDelivery || null,
 screenVideoUrl: meta?.screenVideoUrl || "",
 momentOpen: meta?.momentOpen === true || meta?.momentOpen === "true",
 rawScans,
