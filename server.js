@@ -1245,6 +1245,7 @@ app.post("/inner-circle", async (req, res) => {
             status: meta.status,
             screenVideoUrl: meta.screenVideoUrl || "",
             innerCircleJoinCount: Number(meta.innerCircleJoinCount || 0),
+            benefitInventory: meta.benefitInventory || null,
           };
         }
       }
@@ -1262,7 +1263,7 @@ let ownershipCertificate = null;
 
 if (process.env.REDIS_URL) {
   if (phone) {
-    const benefitWindow = getCodePerksBenefitWindowStatus(meta || {});
+    const benefitWindow = getCodePerksBenefitWindowStatus(event || meta || {});
     const alreadyRegistered = await redis.sismember(`event:${eventId}:uniquePhones`, phone);
 
     if (!alreadyRegistered && benefitWindow.status !== "open") {
@@ -1298,7 +1299,7 @@ if (process.env.REDIS_URL) {
         tier: benefitAssignment.tier,
         benefitTier: benefitAssignment.tier,
         benefitInventory: benefitAssignment.inventoryStatus,
-        benefitWindow: getCodePerksBenefitWindowStatus(meta || {}),
+        benefitWindow: getCodePerksBenefitWindowStatus(event || meta || {}),
         status: "active",
         issuedAt: new Date().toISOString(),
         issuedBy: "codePerks by codeNXT",
@@ -1375,7 +1376,7 @@ if (phone) {
       innerCircleJoinCount: Number(joins || 0),
       ownershipCertificate,
       benefitWindowStatus: ownershipCertificate?.benefitWindow?.status || "open",
-      benefitWindow: ownershipCertificate?.benefitWindow || getCodePerksBenefitWindowStatus(meta || event || {}),
+      benefitWindow: ownershipCertificate?.benefitWindow || getCodePerksBenefitWindowStatus(event || meta || {}),
     });
   } catch (err) {
     console.error("InnerCircle increment failed:", err.message);
