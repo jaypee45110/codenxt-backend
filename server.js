@@ -280,6 +280,7 @@ const videoPath = `/screen-video/${safeEventCode}`;      const videoUrl = PUBLIC
 function normalizeBenefitInventory(input = {}) {
   const goldTotal = Math.max(0, Number(input.goldTotal || input.gold || 0));
   const silverTotal = Math.max(0, Number(input.silverTotal || input.silver || 0));
+  const claimWindowHours = Math.max(0, Number(input.claimWindowHours || 24));
 
   return {
     mode: "progressive_scarcity",
@@ -288,6 +289,7 @@ function normalizeBenefitInventory(input = {}) {
     standardUnlimited: true,
     campaignStart: String(input.campaignStart || "").trim(),
     campaignEnd: String(input.campaignEnd || "").trim(),
+    claimWindowHours,
   };
 }
 
