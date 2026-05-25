@@ -22,13 +22,7 @@ testDbConnection().catch((error) => {
 
 function normalizeRewardDelivery(input = {}) {
   return {
-    company: String(input.company || "").trim(),
-    responsiblePerson: String(input.responsiblePerson || "").trim(),
-    address1: String(input.address1 || "").trim(),
-    address2: String(input.address2 || "").trim(),
-    postalCode: String(input.postalCode || "").trim(),
-    country: String(input.country || "").trim(),
-    phone: String(input.phone || "").trim(),
+    responsiblePerson: String(input.responsiblePerson || input.name || "").trim(),
     email: String(input.email || "").trim(),
   };
 }
