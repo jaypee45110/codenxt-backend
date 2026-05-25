@@ -2387,11 +2387,8 @@ function validateCodePerksRewardClaim(claim) {
   return Boolean(
     claim.eventCode &&
     claim.certificateId &&
+    claim.claimant &&
     claim.claimant.fullName &&
-    claim.claimant.address &&
-    claim.claimant.postalCode &&
-    claim.claimant.country &&
-    claim.claimant.phone &&
     claim.claimant.email
   );
 }
