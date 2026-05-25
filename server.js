@@ -312,13 +312,17 @@ const {
   maxClaims,
   status,
   benefitInventory,
-  rewardDelivery
+  rewardDelivery,
+  defaultLang,
+  lang,
+  language
 } = req.body;
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
 const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory || {});
 const normalizedRewardDelivery = normalizeRewardDelivery(rewardDelivery || {});
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
+const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
 
     if (!name || !startAt || !unlockAt || !endAt) {
       return res.status(400).json({
@@ -344,6 +348,9 @@ maxClaims,
   status,
   benefitInventory: normalizedBenefitInventory,
   rewardDelivery: normalizedRewardDelivery,
+  defaultLang: normalizedDefaultLang,
+  lang: normalizedDefaultLang,
+  language: normalizedDefaultLang,
   dashboardAccessKey,
   momentOpen: false,
 };
@@ -366,6 +373,9 @@ artistLogo: artistLogo || "",
   status,
   benefitInventory: JSON.stringify(normalizedBenefitInventory),
   rewardDelivery: JSON.stringify(normalizedRewardDelivery),
+  defaultLang: normalizedDefaultLang,
+  lang: normalizedDefaultLang,
+  language: normalizedDefaultLang,
   dashboardAccessKey,
   momentOpen: "false",
 });
@@ -493,6 +503,9 @@ const normalizedMeta = {
   endAt: meta?.endAt,
   maxClaims: Number(meta?.maxClaims || 0),
   status: meta?.status,
+  defaultLang: meta?.defaultLang || meta?.lang || meta?.language || "en",
+  lang: meta?.defaultLang || meta?.lang || meta?.language || "en",
+  language: meta?.defaultLang || meta?.lang || meta?.language || "en",
   benefitInventory: meta?.benefitInventory || null,
 screenVideoUrl: meta?.screenVideoUrl || "",
 momentOpen: meta?.momentOpen === true || meta?.momentOpen === "true",
@@ -1243,6 +1256,9 @@ app.post("/inner-circle", async (req, res) => {
             endAt: meta.endAt,
             maxClaims: Number(meta.maxClaims || 0),
             status: meta.status,
+            defaultLang: meta.defaultLang || meta.lang || meta.language || "en",
+            lang: meta.defaultLang || meta.lang || meta.language || "en",
+            language: meta.defaultLang || meta.lang || meta.language || "en",
             screenVideoUrl: meta.screenVideoUrl || "",
             innerCircleJoinCount: Number(meta.innerCircleJoinCount || 0),
             benefitInventory: meta.benefitInventory || null,
