@@ -2071,6 +2071,7 @@ function parseBenefitInventoryFromMeta(meta = {}) {
     standardUnlimited: true,
     campaignStart: String(benefitInventory?.campaignStart || meta.startAt || "").trim(),
     campaignEnd: String(benefitInventory?.campaignEnd || meta.endAt || "").trim(),
+    claimWindowHours: Math.max(0, Number(benefitInventory?.claimWindowHours || 24)),
   };
 }
 
@@ -2109,7 +2110,10 @@ function getCodePerksBenefitWindowStatus(meta = {}) {
     campaignStart: inventory.campaignStart,
     campaignEnd: inventory.campaignEnd,
     now: new Date(nowMs).toISOString(),
-    claimUntil: Number.isFinite(endMs) ? new Date(endMs + 24 * 60 * 60 * 1000).toISOString() : "",
+    claimUntil: Number.isFinite(endMs)
+      ? new Date(endMs + inventory.claimWindowHours * 60 * 60 * 1000).toISOString()
+      : "",
+    claimWindowHours: inventory.claimWindowHours,
   };
 }
 
