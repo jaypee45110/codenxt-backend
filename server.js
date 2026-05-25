@@ -1262,6 +1262,23 @@ let ownershipCertificate = null;
 
 if (process.env.REDIS_URL) {
   if (phone) {
+    const benefitWindow = getCodePerksBenefitWindowStatus(meta || {});
+    const alreadyRegistered = await redis.sismember(`event:${eventId}:uniquePhones`, phone);
+
+    if (!alreadyRegistered && benefitWindow.status !== "open") {
+      joins = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
+
+      return res.json({
+        success: true,
+        eventCode,
+        eventId,
+        innerCircleJoinCount: Number(joins || 0),
+        ownershipCertificate: null,
+        benefitWindowStatus: benefitWindow.status,
+        benefitWindow,
+      });
+    }
+
     const added = await redis.sadd(`event:${eventId}:uniquePhones`, phone);
 
     if (added === 1) {
@@ -1281,6 +1298,7 @@ if (process.env.REDIS_URL) {
         tier: benefitAssignment.tier,
         benefitTier: benefitAssignment.tier,
         benefitInventory: benefitAssignment.inventoryStatus,
+        benefitWindow: getCodePerksBenefitWindowStatus(meta || {}),
         status: "active",
         issuedAt: new Date().toISOString(),
         issuedBy: "codePerks by codeNXT",
@@ -1314,6 +1332,18 @@ if (process.env.REDIS_URL) {
   event._uniquePhones = event._uniquePhones || new Set();
 
   if (phone && !event._uniquePhones.has(phone)) {
+    const benefitWindow = getCodePerksBenefitWindowStatus(event || {});
+    if (benefitWindow.status !== "open") {
+      return res.json({
+        success: true,
+        eventCode,
+        eventId,
+        innerCircleJoinCount: Number(event.innerCircleJoinCount || 0),
+        ownershipCertificate: null,
+        benefitWindowStatus: benefitWindow.status,
+        benefitWindow,
+      });
+    }
     event._uniquePhones.add(phone);
     event.innerCircleJoinCount = Number(event.innerCircleJoinCount || 0) + 1;
     shouldSendWelcomeMessage = true;
@@ -1344,6 +1374,8 @@ if (phone) {
       eventId,
       innerCircleJoinCount: Number(joins || 0),
       ownershipCertificate,
+      benefitWindowStatus: ownershipCertificate?.benefitWindow?.status || "open",
+      benefitWindow: ownershipCertificate?.benefitWindow || getCodePerksBenefitWindowStatus(meta || event || {}),
     });
   } catch (err) {
     console.error("InnerCircle increment failed:", err.message);
@@ -2022,6 +2054,45 @@ function parseBenefitInventoryFromMeta(meta = {}) {
     standardUnlimited: true,
     campaignStart: String(benefitInventory?.campaignStart || meta.startAt || "").trim(),
     campaignEnd: String(benefitInventory?.campaignEnd || meta.endAt || "").trim(),
+  };
+}
+
+function parseBenefitWindowTime(value, { endOfDay = false } = {}) {
+  const raw = String(value || "").trim();
+  if (!raw) return NaN;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return Date.parse(`${raw}${endOfDay ? "T23:59:59.999Z" : "T00:00:00.000Z"}`);
+  }
+
+  return Date.parse(raw);
+}
+
+function getCodePerksBenefitWindowStatus(meta = {}) {
+  const inventory = parseBenefitInventoryFromMeta(meta);
+  const startMs = parseBenefitWindowTime(inventory.campaignStart);
+  const endMs = parseBenefitWindowTime(inventory.campaignEnd, { endOfDay: true });
+  const nowMs = Date.now();
+
+  const status =
+    Number.isFinite(startMs) && nowMs < startMs
+      ? "not_open"
+      : Number.isFinite(endMs) && nowMs > endMs
+        ? "closed"
+        : "open";
+
+  return {
+    status,
+    messageKey:
+      status === "not_open"
+        ? "benefit_not_open"
+        : status === "closed"
+          ? "benefit_closed"
+          : "benefit_open",
+    campaignStart: inventory.campaignStart,
+    campaignEnd: inventory.campaignEnd,
+    now: new Date(nowMs).toISOString(),
+    claimUntil: Number.isFinite(endMs) ? new Date(endMs + 24 * 60 * 60 * 1000).toISOString() : "",
   };
 }
 
