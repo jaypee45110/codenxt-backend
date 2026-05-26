@@ -56,34 +56,31 @@ const JWT_SECRET = "codenxt-dev-secret-change-later";
 let events = {};
 let rewards = {};
 function getRewardForTier(storedReward, tier) {
+  const requestedTier = tier || "general";
+
   if (!storedReward) {
-    return {
-      title: "codeNXT Reward",
-      type: "text",
-      content: "Reward granted",
-      tier: tier || "general",
-    };
+    return null;
   }
 
   const isTieredReward =
-storedReward.gold || storedReward.silver || storedReward.general;
+    storedReward.gold || storedReward.silver || storedReward.general || storedReward.standard;
+
   if (!isTieredReward) {
     return {
       ...storedReward,
-      tier: tier || "general",
+      tier: requestedTier,
     };
   }
 
-  return (
-    storedReward[tier] ||
-storedReward.general ||
-    storedReward.gold || {
-      title: "codeNXT Reward",
-      type: "text",
-      content: "Reward granted",
-      tier: tier || "general",
-    }
-  );
+  if (requestedTier === "standard" && storedReward.standard) {
+    return { ...storedReward.standard, tier: "standard" };
+  }
+
+  if (storedReward[requestedTier]) {
+    return { ...storedReward[requestedTier], tier: requestedTier };
+  }
+
+  return null;
 }
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
