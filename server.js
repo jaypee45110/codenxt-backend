@@ -309,6 +309,7 @@ const {
   status,
   benefitInventory,
   rewardDelivery,
+  redemptionLocation,
   defaultLang,
   lang,
   language
@@ -317,6 +318,7 @@ const {
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
 const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory || {});
 const normalizedRewardDelivery = normalizeRewardDelivery(rewardDelivery || {});
+const normalizedRedemptionLocation = String(redemptionLocation || "").trim();
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
 
@@ -344,6 +346,7 @@ maxClaims,
   status,
   benefitInventory: normalizedBenefitInventory,
   rewardDelivery: normalizedRewardDelivery,
+  redemptionLocation: normalizedRedemptionLocation,
   defaultLang: normalizedDefaultLang,
   lang: normalizedDefaultLang,
   language: normalizedDefaultLang,
@@ -369,6 +372,7 @@ artistLogo: artistLogo || "",
   status,
   benefitInventory: JSON.stringify(normalizedBenefitInventory),
   rewardDelivery: JSON.stringify(normalizedRewardDelivery),
+  redemptionLocation: normalizedRedemptionLocation,
   defaultLang: normalizedDefaultLang,
   lang: normalizedDefaultLang,
   language: normalizedDefaultLang,
@@ -512,6 +516,7 @@ const normalizedMeta = {
   language: meta?.defaultLang || meta?.lang || meta?.language || "en",
   benefitInventory: meta?.benefitInventory || null,
   rewardDelivery: meta?.rewardDelivery || null,
+  redemptionLocation: meta?.redemptionLocation || "",
 screenVideoUrl: meta?.screenVideoUrl || "",
 momentOpen: meta?.momentOpen === true || meta?.momentOpen === "true",
 rawScans,
