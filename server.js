@@ -844,7 +844,13 @@ const tier = reward.tier || "general";
 const shouldClearReward =
   reward.clear === true ||
   reward.status === "empty" ||
-  (!reward.url && !reward.fileUrl && !reward.fileName && !reward.content);
+  (
+    !reward.url &&
+    !reward.fileUrl &&
+    !reward.fileName &&
+    !reward.content &&
+    !String(reward.title || "").trim()
+  );
 
 rewards[eventId] = {
   ...(rewards[eventId] || {}),
