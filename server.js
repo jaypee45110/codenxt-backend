@@ -2368,22 +2368,7 @@ app.get("/certificate/validate/:eventCode/:certificateId", limitCertificateValid
     }
 
     if (!process.env.REDIS_URL) {
-      let matchedOwnershipCertificate = null;
-
-    if (process.env.REDIS_URL && eventId) {
-      const ownershipItems = await redis.lrange(`event:${eventId}:ownership`, 0, -1);
-      for (const item of ownershipItems) {
-        try {
-          const parsed = JSON.parse(item);
-          if (parsed?.certificateId === certificateId) {
-            matchedOwnershipCertificate = parsed;
-            break;
-          }
-        } catch {}
-      }
-    }
-
-    return res.json({
+      return res.json({
         ok: true,
         valid: false,
         status: "unverified",
@@ -2393,7 +2378,7 @@ app.get("/certificate/validate/:eventCode/:certificateId", limitCertificateValid
       });
     }
 
-    let eventId =
+    const eventId =
       await redis.get(`eventcode:codeperks:${eventCode}`) ||
       await redis.get(`eventcode:${eventCode}`);
 
@@ -2437,29 +2422,33 @@ app.get("/certificate/validate/:eventCode/:certificateId", limitCertificateValid
         eventCode,
         certificateId,
         eventId,
-        reason: "Certificate not found for this event",
+        reason: "Certificate not found",
       });
     }
+
+    const tier = certificate.tier || certificate.benefitTier || "general";
+    const benefitTier = certificate.benefitTier || certificate.tier || tier;
 
     return res.json({
       ok: true,
       valid: true,
-      status: "active",
+      status: certificate.status || "active",
       eventCode,
       certificateId,
       eventId,
-      tier: matchedOwnershipCertificate?.tier || matchedOwnershipCertificate?.benefitTier || "",
-      benefitTier: matchedOwnershipCertificate?.benefitTier || matchedOwnershipCertificate?.tier || "",
-      ownershipCertificate: matchedOwnershipCertificate || null,
-      issuedAt: certificate.issuedAt || certificate.createdAt || "",
+      tier,
+      benefitTier,
+      issuedAt: certificate.issuedAt || "",
+      issuedBy: certificate.issuedBy || "codePerks by codeNXT",
+      ownershipCertificate: certificate,
       event: {
         id: eventId,
-        code: meta.code || eventCode,
-        name: meta.name || meta.pageName || meta.releaseTitle || "",
+        code: meta?.code || eventCode,
+        name: meta?.name || meta?.pageName || "codePerks campaign",
       },
     });
   } catch (error) {
-    console.error("certificate validation error", error);
+    console.error("certificate validate error", error);
     return res.status(500).json({
       ok: false,
       valid: false,
