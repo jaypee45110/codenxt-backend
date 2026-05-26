@@ -1110,7 +1110,7 @@ app.get("/verify/:certificateId", async (req, res) => {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Verified Member Benefit — codePerks</title>
+<title>Verified Reward — codePerks</title>
 <style>
   body {
     margin: 0;
@@ -1200,7 +1200,7 @@ app.get("/verify/:certificateId", async (req, res) => {
   <main class="card">
     <img src="https://codeperks.codenxt.global/codePerks-logo.png?v=3" alt="codePerks" />
     <div class="verified">SERVER VERIFIED</div>
-    <h1>Verified Member Benefit</h1>
+    <h1>Verified Reward</h1>
     <div class="id">${esc(payload.certificateId)}</div>
 
     <div class="grid">
