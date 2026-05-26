@@ -27,6 +27,20 @@ function normalizeRewardDelivery(input = {}) {
   };
 }
 
+function normalizeBonusDetails(input = {}) {
+  const normalizeTier = (tier = {}) => ({
+    reward: String(tier.reward || tier.title || "").trim(),
+    redemptionLocation: String(tier.redemptionLocation || tier.location || "").trim(),
+    instructions: String(tier.instructions || "").trim(),
+  });
+
+  return {
+    gold: normalizeTier(input.gold || {}),
+    silver: normalizeTier(input.silver || {}),
+    standard: normalizeTier(input.standard || input.general || {}),
+  };
+}
+
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -310,6 +324,7 @@ const {
   benefitInventory,
   rewardDelivery,
   redemptionLocation,
+  bonusDetails,
   defaultLang,
   lang,
   language
@@ -319,6 +334,7 @@ const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
 const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory || {});
 const normalizedRewardDelivery = normalizeRewardDelivery(rewardDelivery || {});
 const normalizedRedemptionLocation = String(redemptionLocation || "").trim();
+const normalizedBonusDetails = normalizeBonusDetails(bonusDetails || {});
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
 
@@ -347,6 +363,7 @@ maxClaims,
   benefitInventory: normalizedBenefitInventory,
   rewardDelivery: normalizedRewardDelivery,
   redemptionLocation: normalizedRedemptionLocation,
+  bonusDetails: normalizedBonusDetails,
   defaultLang: normalizedDefaultLang,
   lang: normalizedDefaultLang,
   language: normalizedDefaultLang,
@@ -373,6 +390,7 @@ artistLogo: artistLogo || "",
   benefitInventory: JSON.stringify(normalizedBenefitInventory),
   rewardDelivery: JSON.stringify(normalizedRewardDelivery),
   redemptionLocation: normalizedRedemptionLocation,
+  bonusDetails: normalizedBonusDetails,
   defaultLang: normalizedDefaultLang,
   lang: normalizedDefaultLang,
   language: normalizedDefaultLang,
@@ -476,6 +494,14 @@ if (meta && meta.rewardDelivery) {
     meta.rewardDelivery = null;
   }
 }
+
+if (meta && meta.bonusDetails) {
+  try {
+    meta.bonusDetails = JSON.parse(meta.bonusDetails);
+  } catch {
+    meta.bonusDetails = normalizeBonusDetails({});
+  }
+}
     if ((!meta || !meta.id) && events[eventId]) {
   meta = events[eventId];
 }
@@ -517,6 +543,7 @@ const normalizedMeta = {
   benefitInventory: meta?.benefitInventory || null,
   rewardDelivery: meta?.rewardDelivery || null,
   redemptionLocation: meta?.redemptionLocation || "",
+  bonusDetails: meta?.bonusDetails || null,
 screenVideoUrl: meta?.screenVideoUrl || "",
 momentOpen: meta?.momentOpen === true || meta?.momentOpen === "true",
 rawScans,
