@@ -72,8 +72,14 @@ function getRewardForTier(storedReward, tier) {
     };
   }
 
-  if (requestedTier === "standard" && storedReward.standard) {
-    return { ...storedReward.standard, tier: "standard" };
+  if (requestedTier === "standard") {
+    if (storedReward.standard) return { ...storedReward.standard, tier: "standard" };
+    if (storedReward.general) return { ...storedReward.general, tier: "standard" };
+  }
+
+  if (requestedTier === "general") {
+    if (storedReward.general) return { ...storedReward.general, tier: "general" };
+    if (storedReward.standard) return { ...storedReward.standard, tier: "general" };
   }
 
   if (storedReward[requestedTier]) {
