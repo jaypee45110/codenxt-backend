@@ -2368,7 +2368,22 @@ app.get("/certificate/validate/:eventCode/:certificateId", limitCertificateValid
     }
 
     if (!process.env.REDIS_URL) {
-      return res.json({
+      let matchedOwnershipCertificate = null;
+
+    if (process.env.REDIS_URL && eventId) {
+      const ownershipItems = await redis.lrange(`event:${eventId}:ownership`, 0, -1);
+      for (const item of ownershipItems) {
+        try {
+          const parsed = JSON.parse(item);
+          if (parsed?.certificateId === certificateId) {
+            matchedOwnershipCertificate = parsed;
+            break;
+          }
+        } catch {}
+      }
+    }
+
+    return res.json({
         ok: true,
         valid: false,
         status: "unverified",
@@ -2433,6 +2448,9 @@ app.get("/certificate/validate/:eventCode/:certificateId", limitCertificateValid
       eventCode,
       certificateId,
       eventId,
+      tier: matchedOwnershipCertificate?.tier || matchedOwnershipCertificate?.benefitTier || "",
+      benefitTier: matchedOwnershipCertificate?.benefitTier || matchedOwnershipCertificate?.tier || "",
+      ownershipCertificate: matchedOwnershipCertificate || null,
       issuedAt: certificate.issuedAt || certificate.createdAt || "",
       event: {
         id: eventId,
