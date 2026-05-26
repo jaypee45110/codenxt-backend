@@ -1277,6 +1277,7 @@ app.post("/inner-circle", async (req, res) => {
     }
 
 const phone = req.body.phone || "";
+  const scanId = String(req.body.scanId || "").trim();
 
 let joins = 0;
 let shouldSendWelcomeMessage = false;
@@ -1310,13 +1311,31 @@ if (process.env.REDIS_URL) {
       const certificateId =
         `CP-DOC-${eventCode}-${String(joins).padStart(6, "0")}`;
 
-      const benefitAssignment = await assignCodePerksBenefitTier(eventId, meta || {});
+      let benefitAssignment = null;
+
+      if (scanId && process.env.REDIS_URL) {
+        const assignmentKey = `event:${eventId}:benefitAssignment:${scanId}`;
+        const storedAssignment = await redis.get(assignmentKey);
+
+        if (storedAssignment) {
+          try {
+            benefitAssignment = JSON.parse(storedAssignment);
+          } catch {
+            benefitAssignment = null;
+          }
+        }
+      }
+
+      if (!benefitAssignment) {
+        benefitAssignment = await assignCodePerksBenefitTier(eventId, meta || {});
+      }
 
       ownershipCertificate = {
         certificateId,
         phone,
         eventCode,
         eventId,
+        scanId,
         tier: benefitAssignment.tier,
         benefitTier: benefitAssignment.tier,
         benefitInventory: benefitAssignment.inventoryStatus,
@@ -1783,6 +1802,46 @@ if (process.env.REDIS_URL) {
     event.uniqueScans = Number(event.uniqueScans || 0) + 1;
     uniqueScans = event.uniqueScans;
   }
+}
+
+const vertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
+
+if (vertical === "codeperks" && process.env.REDIS_URL && scanId) {
+  const benefitWindow = getCodePerksBenefitWindowStatus(event || {});
+  const assignmentKey = `event:${eventId}:benefitAssignment:${scanId}`;
+
+  let benefitAssignment = null;
+  const storedAssignment = await redis.get(assignmentKey);
+
+  if (storedAssignment) {
+    try {
+      benefitAssignment = JSON.parse(storedAssignment);
+    } catch {
+      benefitAssignment = null;
+    }
+  }
+
+  if (!benefitAssignment && benefitWindow.status === "open") {
+    benefitAssignment = await assignCodePerksBenefitTier(eventId, event || {});
+    await redis.set(assignmentKey, JSON.stringify(benefitAssignment));
+  }
+
+  if (benefitAssignment?.tier) {
+    tier = benefitAssignment.tier;
+  }
+
+  return res.json({
+    success: true,
+    eventCode,
+    eventId,
+    rawScans: Number(rawScans || 0),
+    uniqueScans: Number(uniqueScans || 0),
+    scanRank,
+    tier,
+    benefitTier: tier,
+    benefitInventory: benefitAssignment?.inventoryStatus || null,
+    benefitWindow,
+  });
 }
 
 const audienceSize = Number(event.audienceSize || event.maxClaims || 1000);
