@@ -2496,6 +2496,7 @@ function buildCodePerksRewardClaim(body = {}) {
     redemptionDeadline: String(body.redemptionDeadline || "").trim(),
     redemptionDeadlineTime: String(body.redemptionDeadlineTime || "23:59").trim(),
     redemptionInstructions: String(body.redemptionInstructions || body.instructions || "Vis tilsendt QR-kode").trim(),
+    participantLang: String(body.participantLang || body.lang || "no").trim().toLowerCase(),
     redemptionToken: crypto.randomBytes(24).toString("hex"),
     redeemUrl: "",
     redeemed: false,
@@ -2554,8 +2555,88 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
 
   const companyName = claim.companyName || "codePerks";
   const campaignName = claim.campaignName || claim.eventCode || "kampanjen";
-  const subject = `Din fordel er klar • ${campaignName}`;
-  const rewardTitle = claim.rewardTitle || "Din fordel";
+
+  const participantLang = ["no", "en", "de", "fr", "es"].includes(
+    String(claim.participantLang || "").toLowerCase()
+  )
+    ? String(claim.participantLang || "").toLowerCase()
+    : "no";
+
+  const localized = {
+    no: {
+      subject: `Din fordel er klar • ${campaignName}`,
+      heading: `Takk for at du deltok i ${campaignName} hos ${companyName}.`,
+      hello: "Hei",
+      intro: "Din fordel er registrert og klar til innløsning. Vis QR-koden nedenfor ved utlevering.",
+      benefit: "Fordel",
+      category: "Kategori",
+      pickup: "Hentested",
+      validUntil: "Gyldig til",
+      instructions: "Instruksjoner",
+      certificate: "Sertifikat-ID",
+      oneUse: "Denne QR-koden kan kun brukes én gang.",
+      defaultReward: "Din fordel",
+    },
+    en: {
+      subject: `Your benefit is ready • ${campaignName}`,
+      heading: `Thank you for participating in ${campaignName} at ${companyName}.`,
+      hello: "Hello",
+      intro: "Your benefit is registered and ready for redemption. Show the QR code below when collecting it.",
+      benefit: "Benefit",
+      category: "Category",
+      pickup: "Pickup location",
+      validUntil: "Valid until",
+      instructions: "Instructions",
+      certificate: "Certificate ID",
+      oneUse: "${localized.oneUse}",
+      defaultReward: "Your benefit",
+    },
+    fr: {
+      subject: `Votre avantage est prêt • ${campaignName}`,
+      heading: `Merci d’avoir participé à ${campaignName} chez ${companyName}.`,
+      hello: "Bonjour",
+      intro: "Votre avantage est enregistré et prêt à être utilisé.",
+      benefit: "Avantage",
+      category: "Catégorie",
+      pickup: "Lieu de retrait",
+      validUntil: "Valable jusqu’au",
+      instructions: "Instructions",
+      certificate: "ID du certificat",
+      oneUse: "Ce QR code ne peut être utilisé qu’une seule fois.",
+      defaultReward: "Votre avantage",
+    },
+    de: {
+      subject: `Ihr Vorteil ist bereit • ${campaignName}`,
+      heading: `Vielen Dank für Ihre Teilnahme an ${campaignName} bei ${companyName}.`,
+      hello: "Hallo",
+      intro: "Ihr Vorteil wurde registriert und ist bereit zur Einlösung.",
+      benefit: "Vorteil",
+      category: "Kategorie",
+      pickup: "Abholort",
+      validUntil: "Gültig bis",
+      instructions: "Anweisungen",
+      certificate: "Zertifikat-ID",
+      oneUse: "Dieser QR-Code kann nur einmal verwendet werden.",
+      defaultReward: "Ihr Vorteil",
+    },
+    es: {
+      subject: `Tu beneficio está listo • ${campaignName}`,
+      heading: `Gracias por participar en ${campaignName} en ${companyName}.`,
+      hello: "Hola",
+      intro: "Tu beneficio ha sido registrado y está listo para ser utilizado.",
+      benefit: "Beneficio",
+      category: "Categoría",
+      pickup: "Lugar de recogida",
+      validUntil: "Válido hasta",
+      instructions: "Instrucciones",
+      certificate: "ID del certificado",
+      oneUse: "Este código QR solo puede utilizarse una vez.",
+      defaultReward: "Tu beneficio",
+    },
+  }[participantLang];
+
+  const subject = localized.subject;
+  const rewardTitle = claim.rewardTitle || localized.defaultReward;
   const redemptionLocation = claim.redemptionLocation || "Not specified";
   const redemptionDeadline = claim.redemptionDeadline || "Not specified";
   const redemptionDeadlineTime = claim.redemptionDeadlineTime || "23:59";
@@ -2566,22 +2647,22 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
 
   const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#111;max-width:640px;">
-      <h2>Takk for at du deltok i ${escapeHtml(campaignName)} hos ${escapeHtml(companyName)}.</h2>
-      <p>Hei ${escapeHtml(claim.claimant?.fullName || "")},</p>
-      <p>Din fordel er registrert og klar til innløsning. Vis QR-koden nedenfor ved utlevering.</p>
+      <h2>${escapeHtml(localized.heading)}</h2>
+      <p>${escapeHtml(localized.hello)} ${escapeHtml(claim.claimant?.fullName || "")},</p>
+      <p>${escapeHtml(localized.intro)}</p>
 
       <div style="padding:16px;border:1px solid #ddd;border-radius:12px;margin:18px 0;">
-        <p><strong>Benefit:</strong><br/>${escapeHtml(rewardTitle)}</p>
-        <p><strong>Category:</strong><br/>${escapeHtml(claim.tier || claim.benefitTier || "")}</p>
-        <p><strong>Pickup location:</strong><br/>${escapeHtml(redemptionLocation)}</p>
-        <p><strong>Gyldig til:</strong><br/>${escapeHtml(redemptionDeadlineDisplay)}</p>
-        <p><strong>Instructions:</strong><br/>${escapeHtml(redemptionInstructions)}</p>
+        <p><strong>${localized.benefit}:</strong><br/>${escapeHtml(rewardTitle)}</p>
+        <p><strong>${localized.category}:</strong><br/>${escapeHtml(claim.tier || claim.benefitTier || "")}</p>
+        <p><strong>${localized.pickup}:</strong><br/>${escapeHtml(redemptionLocation)}</p>
+        <p><strong>${localized.validUntil}:</strong><br/>${escapeHtml(redemptionDeadlineDisplay)}</p>
+        <p><strong>${localized.instructions}:</strong><br/>${escapeHtml(redemptionInstructions)}</p>
         <p><strong>Certificate ID:</strong><br/>${escapeHtml(claim.certificateId)}</p>
       </div>
 
       <div style="text-align:center;margin:24px 0;">
         <img src="${qrDataUrl}" alt="codePerks redemption QR code" width="260" height="260" style="display:block;margin:0 auto;border:1px solid #ddd;border-radius:12px;padding:12px;background:#fff;" />
-        <p style="font-size:13px;color:#666;margin-top:10px;">This QR code can only be used once.</p>
+        <p style="font-size:13px;color:#666;margin-top:10px;">${localized.oneUse}</p>
       </div>
 
       <p style="font-size:12px;color:#666;">Sent automatically by codePerks.</p>
@@ -2589,18 +2670,18 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
   `;
 
   const text = [
-    `Takk for at du deltok i ${campaignName} hos ${companyName}.`,
+    localized.heading,
     "",
     `Fordel: ${rewardTitle}`,
     `Kategori: ${claim.tier || claim.benefitTier || ""}`,
     `Hentested: ${redemptionLocation}`,
-    `Gyldig til: ${redemptionDeadlineDisplay}`,
+    `${localized.validUntil}: ${redemptionDeadlineDisplay}`,
     `Instruksjoner: ${redemptionInstructions}`,
     `Sertifikat-ID: ${claim.certificateId}`,
     "",
     `QR / redemption link: ${redeemUrl}`,
     "",
-    "This QR code can only be used once.",
+    "${localized.oneUse}",
   ].join("\n");
 
   await sendEmail({
