@@ -32,6 +32,7 @@ function normalizeBonusDetails(input = {}) {
     reward: String(tier.reward || tier.title || "").trim(),
     redemptionLocation: String(tier.redemptionLocation || tier.location || "").trim(),
     instructions: String(tier.instructions || "Vis tilsendt QR-kode").trim(),
+    redemptionDeadline: String(tier.redemptionDeadline || "").trim(),
   });
 
   return {
