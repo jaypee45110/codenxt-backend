@@ -2484,6 +2484,10 @@ function buildCodePerksRewardClaim(body = {}) {
     benefitTier: String(body.benefitTier || body.tier || "").trim(),
     tier: String(body.tier || body.benefitTier || "").trim(),
     eventId: String(body.eventId || "").trim(),
+    rewardTitle: String(body.rewardTitle || body.reward || body.benefit || "").trim(),
+    redemptionLocation: String(body.redemptionLocation || "").trim(),
+    redemptionDeadline: String(body.redemptionDeadline || "").trim(),
+    redemptionInstructions: String(body.redemptionInstructions || body.instructions || "Vis tilsendt QR-kode").trim(),
     redemptionToken: crypto.randomBytes(24).toString("hex"),
     redeemed: false,
     redeemedAt: null,
@@ -2502,6 +2506,16 @@ function validateCodePerksRewardClaim(claim) {
     claim.claimant.fullName &&
     claim.claimant.email
   );
+}
+
+function isCodePerksClaimExpired(claim = {}) {
+  const deadline = String(claim.redemptionDeadline || "").trim();
+  if (!deadline) return false;
+
+  const deadlineDate = new Date(`${deadline}T23:59:59.999Z`);
+  if (Number.isNaN(deadlineDate.getTime())) return false;
+
+  return Date.now() > deadlineDate.getTime();
 }
 
 app.post("/reward-claim", limitRewardClaim, async (req, res) => {
@@ -2632,9 +2646,15 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
         valid: true,
         redeemed: Boolean(claim.redeemed),
         redeemedAt: claim.redeemedAt || null,
+        expired: isCodePerksClaimExpired(claim),
         eventCode: claim.eventCode,
         certificateId: claim.certificateId,
         claimId: claim.id,
+        tier: claim.tier || claim.benefitTier || "",
+        rewardTitle: claim.rewardTitle || "",
+        redemptionLocation: claim.redemptionLocation || "",
+        redemptionDeadline: claim.redemptionDeadline || "",
+        redemptionInstructions: claim.redemptionInstructions || "",
         status: claim.status || "pending",
       });
     }
@@ -2702,6 +2722,14 @@ app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
           alreadyRedeemed: true,
           redeemedAt: claim.redeemedAt || null,
           error: "Already redeemed",
+        });
+      }
+
+      if (isCodePerksClaimExpired(claim)) {
+        return res.status(410).json({
+          ok: false,
+          expired: true,
+          error: "Redemption code expired",
         });
       }
 
