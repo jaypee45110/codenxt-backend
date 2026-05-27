@@ -2480,6 +2480,8 @@ function buildCodePerksRewardClaim(body = {}) {
     status: "pending",
     eventCode: String(body.eventCode || "").trim(),
     certificateId: String(body.certificateId || "").trim(),
+    campaignName: String(body.campaignName || body.eventName || "").trim(),
+    companyName: String(body.companyName || "").trim(),
     claimant: {
       fullName: String(body.claimant?.fullName || "").trim(),
       address: String(body.claimant?.address || "").trim(),
