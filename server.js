@@ -34,6 +34,7 @@ function normalizeBonusDetails(input = {}) {
     redemptionLocation: String(tier.redemptionLocation || tier.location || "").trim(),
     instructions: String(tier.instructions || "Vis tilsendt QR-kode").trim(),
     redemptionDeadline: String(tier.redemptionDeadline || "").trim(),
+    redemptionDeadlineTime: String(tier.redemptionDeadlineTime || "23:59").trim(),
   });
 
   return {
@@ -2493,6 +2494,7 @@ function buildCodePerksRewardClaim(body = {}) {
     rewardTitle: String(body.rewardTitle || body.reward || body.benefit || "").trim(),
     redemptionLocation: String(body.redemptionLocation || "").trim(),
     redemptionDeadline: String(body.redemptionDeadline || "").trim(),
+    redemptionDeadlineTime: String(body.redemptionDeadlineTime || "23:59").trim(),
     redemptionInstructions: String(body.redemptionInstructions || body.instructions || "Vis tilsendt QR-kode").trim(),
     redemptionToken: crypto.randomBytes(24).toString("hex"),
     redeemUrl: "",
@@ -2519,7 +2521,9 @@ function isCodePerksClaimExpired(claim = {}) {
   const deadline = String(claim.redemptionDeadline || "").trim();
   if (!deadline) return false;
 
-  const deadlineDate = new Date(`${deadline}T23:59:59.999Z`);
+  const deadlineTime = String(claim.redemptionDeadlineTime || "23:59").trim() || "23:59";
+  const safeTime = /^\d{2}:\d{2}$/.test(deadlineTime) ? deadlineTime : "23:59";
+  const deadlineDate = new Date(`${deadline}T${safeTime}:59.999Z`);
   if (Number.isNaN(deadlineDate.getTime())) return false;
 
   return Date.now() > deadlineDate.getTime();
@@ -2554,6 +2558,10 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
   const rewardTitle = claim.rewardTitle || "Din fordel";
   const redemptionLocation = claim.redemptionLocation || "Not specified";
   const redemptionDeadline = claim.redemptionDeadline || "Not specified";
+  const redemptionDeadlineTime = claim.redemptionDeadlineTime || "23:59";
+  const redemptionDeadlineDisplay = claim.redemptionDeadline
+    ? `${redemptionDeadline} innen kl. ${redemptionDeadlineTime}`
+    : "Not specified";
   const redemptionInstructions = claim.redemptionInstructions || "Show the attached QR code.";
 
   const html = `
@@ -2566,7 +2574,7 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
         <p><strong>Benefit:</strong><br/>${escapeHtml(rewardTitle)}</p>
         <p><strong>Category:</strong><br/>${escapeHtml(claim.tier || claim.benefitTier || "")}</p>
         <p><strong>Pickup location:</strong><br/>${escapeHtml(redemptionLocation)}</p>
-        <p><strong>Valid until:</strong><br/>${escapeHtml(redemptionDeadline)}</p>
+        <p><strong>Gyldig til:</strong><br/>${escapeHtml(redemptionDeadlineDisplay)}</p>
         <p><strong>Instructions:</strong><br/>${escapeHtml(redemptionInstructions)}</p>
         <p><strong>Certificate ID:</strong><br/>${escapeHtml(claim.certificateId)}</p>
       </div>
@@ -2586,7 +2594,7 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
     `Fordel: ${rewardTitle}`,
     `Kategori: ${claim.tier || claim.benefitTier || ""}`,
     `Hentested: ${redemptionLocation}`,
-    `Gyldig til: ${redemptionDeadline}`,
+    `Gyldig til: ${redemptionDeadlineDisplay}`,
     `Instruksjoner: ${redemptionInstructions}`,
     `Sertifikat-ID: ${claim.certificateId}`,
     "",
@@ -2777,6 +2785,7 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
         rewardTitle: claim.rewardTitle || "",
         redemptionLocation: claim.redemptionLocation || "",
         redemptionDeadline: claim.redemptionDeadline || "",
+        redemptionDeadlineTime: claim.redemptionDeadlineTime || "",
         redemptionInstructions: claim.redemptionInstructions || "",
         status: claim.status || "pending",
       });
