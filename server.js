@@ -14,6 +14,7 @@ const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { testDbConnection, saveCampaign, getCampaignByCode } = require("./db");
 const { sendEmail } = require("./mailer");
+const QRCode = require("qrcode");
 const app = express();
 
 testDbConnection().catch((error) => {
@@ -2489,6 +2490,7 @@ function buildCodePerksRewardClaim(body = {}) {
     redemptionDeadline: String(body.redemptionDeadline || "").trim(),
     redemptionInstructions: String(body.redemptionInstructions || body.instructions || "Vis tilsendt QR-kode").trim(),
     redemptionToken: crypto.randomBytes(24).toString("hex"),
+    redeemUrl: "",
     redeemed: false,
     redeemedAt: null,
     redeemedBy: null,
@@ -2516,6 +2518,84 @@ function isCodePerksClaimExpired(claim = {}) {
   if (Number.isNaN(deadlineDate.getTime())) return false;
 
   return Date.now() > deadlineDate.getTime();
+}
+
+function escapeHtml(value = "") {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+async function sendCodePerksRedemptionEmail(claim = {}) {
+  const recipientEmail = String(claim.claimant?.email || "").trim();
+  if (!recipientEmail) return { ok: false, skipped: true, reason: "missing_recipient" };
+
+  const redeemBaseUrl = process.env.CODEPERKS_REDEEM_BASE_URL || "https://codeperks.codenxt.global/redeem";
+  const redeemUrl = `${redeemBaseUrl}/${encodeURIComponent(claim.redemptionToken)}`;
+  claim.redeemUrl = redeemUrl;
+
+  const qrDataUrl = await QRCode.toDataURL(redeemUrl, {
+    errorCorrectionLevel: "M",
+    margin: 2,
+    width: 360,
+  });
+
+  const subject = `Your codePerks benefit • ${claim.eventCode}`;
+  const rewardTitle = claim.rewardTitle || "codePerks benefit";
+  const redemptionLocation = claim.redemptionLocation || "Not specified";
+  const redemptionDeadline = claim.redemptionDeadline || "Not specified";
+  const redemptionInstructions = claim.redemptionInstructions || "Show the attached QR code.";
+
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#111;max-width:640px;">
+      <h2>Your codePerks benefit is ready</h2>
+      <p>Hello ${escapeHtml(claim.claimant?.fullName || "")},</p>
+      <p>Your claim has been registered. Show this QR code at the pickup location.</p>
+
+      <div style="padding:16px;border:1px solid #ddd;border-radius:12px;margin:18px 0;">
+        <p><strong>Benefit:</strong><br/>${escapeHtml(rewardTitle)}</p>
+        <p><strong>Category:</strong><br/>${escapeHtml(claim.tier || claim.benefitTier || "")}</p>
+        <p><strong>Pickup location:</strong><br/>${escapeHtml(redemptionLocation)}</p>
+        <p><strong>Valid until:</strong><br/>${escapeHtml(redemptionDeadline)}</p>
+        <p><strong>Instructions:</strong><br/>${escapeHtml(redemptionInstructions)}</p>
+        <p><strong>Certificate ID:</strong><br/>${escapeHtml(claim.certificateId)}</p>
+      </div>
+
+      <div style="text-align:center;margin:24px 0;">
+        <img src="${qrDataUrl}" alt="codePerks redemption QR code" width="260" height="260" style="display:block;margin:0 auto;border:1px solid #ddd;border-radius:12px;padding:12px;background:#fff;" />
+        <p style="font-size:13px;color:#666;margin-top:10px;">This QR code can only be used once.</p>
+      </div>
+
+      <p style="font-size:12px;color:#666;">Sent automatically by codePerks.</p>
+    </div>
+  `;
+
+  const text = [
+    "Your codePerks benefit is ready",
+    "",
+    `Benefit: ${rewardTitle}`,
+    `Category: ${claim.tier || claim.benefitTier || ""}`,
+    `Pickup location: ${redemptionLocation}`,
+    `Valid until: ${redemptionDeadline}`,
+    `Instructions: ${redemptionInstructions}`,
+    `Certificate ID: ${claim.certificateId}`,
+    "",
+    `QR / redemption link: ${redeemUrl}`,
+    "",
+    "This QR code can only be used once.",
+  ].join("\n");
+
+  await sendEmail({
+    to: recipientEmail,
+    subject,
+    html,
+    text,
+  });
+
+  return { ok: true, redeemUrl };
 }
 
 app.post("/reward-claim", limitRewardClaim, async (req, res) => {
@@ -2552,11 +2632,21 @@ app.post("/reward-claim", limitRewardClaim, async (req, res) => {
       await redis.set(`codeperks:redemption:${claim.redemptionToken}`, claim.id);
       await redis.rpush(eventClaimsKey, claim.id);
 
+      let emailResult = null;
+      try {
+        emailResult = await sendCodePerksRedemptionEmail(claim);
+        await redis.set(claimKey, JSON.stringify(claim));
+      } catch (emailError) {
+        console.error("codePerks redemption email error", emailError);
+        emailResult = { ok: false, error: emailError.message };
+      }
+
       console.log("CODEPERKS_REWARD_CLAIM_REDIS", claim);
 
       return res.json({
         ok: true,
         claim,
+        email: emailResult,
       });
     }
 
@@ -2573,6 +2663,14 @@ app.post("/reward-claim", limitRewardClaim, async (req, res) => {
       });
     }
 
+    let emailResult = null;
+    try {
+      emailResult = await sendCodePerksRedemptionEmail(claim);
+    } catch (emailError) {
+      console.error("codePerks redemption email error", emailError);
+      emailResult = { ok: false, error: emailError.message };
+    }
+
     globalThis.__CODEPERKS_REWARD_CLAIMS.push(claim);
 
     console.log("CODEPERKS_REWARD_CLAIM_MEMORY", claim);
@@ -2580,6 +2678,7 @@ app.post("/reward-claim", limitRewardClaim, async (req, res) => {
     return res.json({
       ok: true,
       claim,
+      email: emailResult,
     });
   } catch (error) {
     console.error("reward-claim error", error);
