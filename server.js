@@ -2610,6 +2610,22 @@ app.post("/reward-claim", limitRewardClaim, async (req, res) => {
   try {
     const claim = buildCodePerksRewardClaim(req.body || {});
 
+    if (process.env.REDIS_URL && claim.eventCode) {
+      try {
+        const eventId =
+          await redis.get(`eventcode:codeperks:${claim.eventCode}`) ||
+          await redis.get(`eventcode:${claim.eventCode}`);
+
+        if (eventId) {
+          const meta = await redis.hgetall(`event:${eventId}:meta`);
+          claim.companyName = claim.companyName || String(meta?.companyName || "").trim();
+          claim.campaignName = claim.campaignName || String(meta?.name || claim.eventCode || "").trim();
+        }
+      } catch (metaError) {
+        console.warn("Could not enrich reward claim with event meta:", metaError.message);
+      }
+    }
+
     if (!validateCodePerksRewardClaim(claim)) {
       return res.status(400).json({
         ok: false,
