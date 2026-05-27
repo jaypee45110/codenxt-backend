@@ -317,6 +317,7 @@ const {
   vertical,
   code,
   name,
+  companyName,
   artistLogo,
   badgeConfig,
   venue,
@@ -336,6 +337,7 @@ const {
 } = req.body;
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
+const normalizedCompanyName = String(companyName || req.body.companyName || "").trim();
 const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory || {});
 const normalizedRewardDelivery = normalizeRewardDelivery(rewardDelivery || {});
 const normalizedRedemptionLocation = String(redemptionLocation || "").trim();
@@ -356,6 +358,7 @@ const event = {
   vertical: normalizedVertical,
   code: code || id,
   name,
+  companyName: normalizedCompanyName,
   artistLogo,
   badgeConfig,
   venue,
@@ -533,6 +536,7 @@ const normalizedMeta = {
   id: meta?.id,
   code: meta?.code,
   name: meta?.name,
+  companyName: meta?.companyName || "",
   artistLogo: meta?.artistLogo || "",
   badgeConfig: meta?.badgeConfig,
   venue: meta?.venue || "",
