@@ -2547,17 +2547,19 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
     width: 360,
   });
 
-  const subject = `Your codePerks benefit • ${claim.eventCode}`;
-  const rewardTitle = claim.rewardTitle || "codePerks benefit";
+  const companyName = claim.companyName || "codePerks";
+  const campaignName = claim.campaignName || claim.eventCode || "kampanjen";
+  const subject = `Din fordel er klar • ${campaignName}`;
+  const rewardTitle = claim.rewardTitle || "Din fordel";
   const redemptionLocation = claim.redemptionLocation || "Not specified";
   const redemptionDeadline = claim.redemptionDeadline || "Not specified";
   const redemptionInstructions = claim.redemptionInstructions || "Show the attached QR code.";
 
   const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#111;max-width:640px;">
-      <h2>Your codePerks benefit is ready</h2>
-      <p>Hello ${escapeHtml(claim.claimant?.fullName || "")},</p>
-      <p>Your claim has been registered. Show this QR code at the pickup location.</p>
+      <h2>Takk for at du deltok i ${escapeHtml(campaignName)} hos ${escapeHtml(companyName)}.</h2>
+      <p>Hei ${escapeHtml(claim.claimant?.fullName || "")},</p>
+      <p>Din fordel er registrert og klar til innløsning. Vis QR-koden nedenfor ved utlevering.</p>
 
       <div style="padding:16px;border:1px solid #ddd;border-radius:12px;margin:18px 0;">
         <p><strong>Benefit:</strong><br/>${escapeHtml(rewardTitle)}</p>
@@ -2578,14 +2580,14 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
   `;
 
   const text = [
-    "Your codePerks benefit is ready",
+    `Takk for at du deltok i ${campaignName} hos ${companyName}.`,
     "",
-    `Benefit: ${rewardTitle}`,
-    `Category: ${claim.tier || claim.benefitTier || ""}`,
-    `Pickup location: ${redemptionLocation}`,
-    `Valid until: ${redemptionDeadline}`,
-    `Instructions: ${redemptionInstructions}`,
-    `Certificate ID: ${claim.certificateId}`,
+    `Fordel: ${rewardTitle}`,
+    `Kategori: ${claim.tier || claim.benefitTier || ""}`,
+    `Hentested: ${redemptionLocation}`,
+    `Gyldig til: ${redemptionDeadline}`,
+    `Instruksjoner: ${redemptionInstructions}`,
+    `Sertifikat-ID: ${claim.certificateId}`,
     "",
     `QR / redemption link: ${redeemUrl}`,
     "",
@@ -2597,6 +2599,7 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
     subject,
     html,
     text,
+    fromName: companyName,
   });
 
   return { ok: true, redeemUrl };
