@@ -2583,6 +2583,8 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
       instructions: "Instruksjoner",
       certificate: "Sertifikat-ID",
       oneUse: "Denne QR-koden kan kun brukes én gang.",
+      deadlineTimePrefix: "innen kl.",
+      footer: "Sendt automatisk av codePerks.",
       defaultReward: "Din fordel",
     },
     en: {
@@ -2596,7 +2598,9 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
       validUntil: "Valid until",
       instructions: "Instructions",
       certificate: "Certificate ID",
-      oneUse: "${localized.oneUse}",
+      oneUse: "This QR code can only be used once.",
+      deadlineTimePrefix: "by",
+      footer: "Sent automatically by codePerks.",
       defaultReward: "Your benefit",
     },
     fr: {
@@ -2611,6 +2615,8 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
       instructions: "Instructions",
       certificate: "ID du certificat",
       oneUse: "Ce QR code ne peut être utilisé qu’une seule fois.",
+      deadlineTimePrefix: "avant",
+      footer: "Envoyé automatiquement par codePerks.",
       defaultReward: "Votre avantage",
     },
     de: {
@@ -2625,6 +2631,8 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
       instructions: "Anweisungen",
       certificate: "Zertifikat-ID",
       oneUse: "Dieser QR-Code kann nur einmal verwendet werden.",
+      deadlineTimePrefix: "bis",
+      footer: "Automatisch gesendet von codePerks.",
       defaultReward: "Ihr Vorteil",
     },
     es: {
@@ -2639,6 +2647,8 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
       instructions: "Instrucciones",
       certificate: "ID del certificado",
       oneUse: "Este código QR solo puede utilizarse una vez.",
+      deadlineTimePrefix: "antes de las",
+      footer: "Enviado automáticamente por codePerks.",
       defaultReward: "Tu beneficio",
     },
   }[participantLang];
@@ -2649,7 +2659,7 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
   const redemptionDeadline = claim.redemptionDeadline || "Not specified";
   const redemptionDeadlineTime = claim.redemptionDeadlineTime || "23:59";
   const redemptionDeadlineDisplay = claim.redemptionDeadline
-    ? `${redemptionDeadline} innen kl. ${redemptionDeadlineTime}`
+    ? `${redemptionDeadline} ${localized.deadlineTimePrefix} ${redemptionDeadlineTime}`
     : "Not specified";
   const redemptionInstructions = claim.redemptionInstructions || "Show the attached QR code.";
 
@@ -2665,7 +2675,7 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
         <p><strong>${localized.pickup}:</strong><br/>${escapeHtml(redemptionLocation)}</p>
         <p><strong>${localized.validUntil}:</strong><br/>${escapeHtml(redemptionDeadlineDisplay)}</p>
         <p><strong>${localized.instructions}:</strong><br/>${escapeHtml(redemptionInstructions)}</p>
-        <p><strong>Certificate ID:</strong><br/>${escapeHtml(claim.certificateId)}</p>
+        <p><strong>${localized.certificate}:</strong><br/>${escapeHtml(claim.certificateId)}</p>
       </div>
 
       <div style="text-align:center;margin:24px 0;">
@@ -2673,23 +2683,23 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
         <p style="font-size:13px;color:#666;margin-top:10px;">${localized.oneUse}</p>
       </div>
 
-      <p style="font-size:12px;color:#666;">Sent automatically by codePerks.</p>
+      <p style="font-size:12px;color:#666;">${escapeHtml(localized.footer)}</p>
     </div>
   `;
 
   const text = [
     localized.heading,
     "",
-    `Fordel: ${rewardTitle}`,
-    `Kategori: ${claim.tier || claim.benefitTier || ""}`,
-    `Hentested: ${redemptionLocation}`,
+    `${localized.benefit}: ${rewardTitle}`,
+    `${localized.category}: ${claim.tier || claim.benefitTier || ""}`,
+    `${localized.pickup}: ${redemptionLocation}`,
     `${localized.validUntil}: ${redemptionDeadlineDisplay}`,
-    `Instruksjoner: ${redemptionInstructions}`,
-    `Sertifikat-ID: ${claim.certificateId}`,
+    `${localized.instructions}: ${redemptionInstructions}`,
+    `${localized.certificate}: ${claim.certificateId}`,
     "",
     `QR / redemption link: ${redeemUrl}`,
     "",
-    "${localized.oneUse}",
+    localized.oneUse,
   ].join("\n");
 
   await sendEmail({
@@ -2756,6 +2766,7 @@ app.post("/reward-claim", limitRewardClaim, async (req, res) => {
       let emailResult = null;
       try {
         emailResult = await sendCodePerksRedemptionEmail(claim);
+        console.log("CODEPERKS_REDEMPTION_EMAIL_RESULT", emailResult);
         await redis.set(claimKey, JSON.stringify(claim));
       } catch (emailError) {
         console.error("codePerks redemption email error", emailError);
