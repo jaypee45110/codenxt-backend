@@ -2541,6 +2541,31 @@ function escapeHtml(value = "") {
     .replaceAll("'", "&#039;");
 }
 
+
+function formatCodePerksDeadlineDisplay(dateValue = "", timeValue = "", lang = "no") {
+  const rawDate = String(dateValue || "").trim();
+  const rawTime = String(timeValue || "").trim();
+
+  if (!rawDate) return "Not specified";
+
+  const match = rawDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const displayDate = match ? `${match[3]}/${match[2]}/${match[1]}` : rawDate;
+
+  const prefixes = {
+    no: "innen kl.",
+    en: "by",
+    de: "bis",
+    fr: "avant",
+    es: "antes de las",
+  };
+
+  const prefix = prefixes[lang] || prefixes.no;
+
+  if (!rawTime) return displayDate;
+
+  return `${displayDate} ${prefix} ${rawTime}`;
+}
+
 async function sendCodePerksRedemptionEmail(claim = {}) {
   const recipientEmail = String(claim.claimant?.email || "").trim();
   if (!recipientEmail) return { ok: false, skipped: true, reason: "missing_recipient" };
@@ -2658,9 +2683,11 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
   const redemptionLocation = claim.redemptionLocation || "Not specified";
   const redemptionDeadline = claim.redemptionDeadline || "Not specified";
   const redemptionDeadlineTime = claim.redemptionDeadlineTime || "23:59";
-  const redemptionDeadlineDisplay = claim.redemptionDeadline
-    ? `${redemptionDeadline} ${localized.deadlineTimePrefix} ${redemptionDeadlineTime}`
-    : "Not specified";
+  const redemptionDeadlineDisplay = formatCodePerksDeadlineDisplay(
+    claim.redemptionDeadline,
+    redemptionDeadlineTime,
+    participantLang
+  );
   const redemptionInstructions = claim.redemptionInstructions || "Show the attached QR code.";
 
   const html = `
