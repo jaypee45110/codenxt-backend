@@ -2555,7 +2555,13 @@ async function sendCodePerksRedemptionEmail(claim = {}) {
     width: 360,
   });
 
-  const companyName = claim.companyName || "codePerks";
+  const fallbackCompanyName =
+    claim.companyName ||
+    claim.company ||
+    claim.meta?.companyName ||
+    "codePerks";
+
+  const companyName = fallbackCompanyName;
   const campaignName = claim.campaignName || claim.eventCode || "kampanjen";
 
   const participantLang = ["no", "en", "de", "fr", "es"].includes(
