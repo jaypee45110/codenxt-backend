@@ -3146,30 +3146,22 @@ app.post("/send-fulfillment-list/:eventCode", requireCodePerksAdmin, limitReward
 
     const rows = claims
       .map((claim) => ({
-        certificateId: String(claim.certificateId || "").trim(),
-        name: String(claim.claimant?.fullName || claim.fullName || "").trim(),
-        phone: String(claim.claimant?.phone || claim.phone || "").trim(),
-        tier: String(claim.tier || claim.benefitTier || "").trim(),
-        status: String(claim.status || "").trim(),
+        name: String(claim.claimant?.fullName || "").trim(),
+        email: String(claim.claimant?.email || "").trim(),
       }))
-      .filter((row) => row.name || row.phone);
+      .filter((row) => row.name || row.email);
 
     const htmlRows = rows.length
       ? rows.map((row) => `
           <tr>
             <td style="padding:8px 10px;border-bottom:1px solid #eee;">${row.name}</td>
-            <td style="padding:8px 10px;border-bottom:1px solid #eee;">${row.phone}</td>
-            <td style="padding:8px 10px;border-bottom:1px solid #eee;">${row.tier}</td>
-            <td style="padding:8px 10px;border-bottom:1px solid #eee;">${row.status}</td>
-            <td style="padding:8px 10px;border-bottom:1px solid #eee;">${row.certificateId}</td>
+            <td style="padding:8px 10px;border-bottom:1px solid #eee;">${row.email}</td>
           </tr>
         `).join("")
-      : `<tr><td colspan="5" style="padding:12px;">No claims registered yet.</td></tr>`;
+      : `<tr><td colspan="2" style="padding:12px;">No claims registered yet.</td></tr>`;
 
     const textRows = rows.length
-      ? rows.map((row) =>
-          `${row.name}, ${row.phone}, ${row.tier}, ${row.status}, ${row.certificateId}`
-        ).join("\n")
+      ? rows.map((row) => `${row.name}, ${row.email}`).join("\n")
       : "No claims registered yet.";
 
     const generatedAt = new Date().toISOString();
@@ -3189,10 +3181,7 @@ app.post("/send-fulfillment-list/:eventCode", requireCodePerksAdmin, limitReward
           <thead>
             <tr>
               <th align="left" style="padding:8px 10px;border-bottom:2px solid #111;">Name</th>
-              <th align="left" style="padding:8px 10px;border-bottom:2px solid #111;">Phone</th>
-              <th align="left" style="padding:8px 10px;border-bottom:2px solid #111;">Tier</th>
-              <th align="left" style="padding:8px 10px;border-bottom:2px solid #111;">Status</th>
-              <th align="left" style="padding:8px 10px;border-bottom:2px solid #111;">Certificate ID</th>
+              <th align="left" style="padding:8px 10px;border-bottom:2px solid #111;">Email</th>
             </tr>
           </thead>
           <tbody>${htmlRows}</tbody>
@@ -3212,7 +3201,7 @@ app.post("/send-fulfillment-list/:eventCode", requireCodePerksAdmin, limitReward
       `Claimed: ${claimedCount}`,
       `Generated: ${generatedAt}`,
       "",
-      "name,phone,tier,status,certificate_id",
+      "name,email",
       textRows,
     ].filter(Boolean).join("\n");
 
