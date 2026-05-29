@@ -3144,32 +3144,14 @@ app.post("/send-fulfillment-list/:eventCode", requireCodePerksAdmin, limitReward
       );
     }
 
-    let phoneRows = [];
-
-    if (process.env.REDIS_URL) {
-      const storedPhones = await redis.lrange(`event:${campaign.id}:phones`, 0, -1);
-      phoneRows = storedPhones
-        .map((raw) => {
-          try {
-            return JSON.parse(raw);
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean);
-    }
-
     const rows = claims
-      .map((claim, index) => {
-        const phoneFallback = phoneRows[index] || {};
-        return {
-          certificateId: String(claim.certificateId || "").trim(),
-          name: String(claim.claimant?.fullName || claim.fullName || "").trim(),
-          phone: String(claim.claimant?.phone || claim.phone || phoneFallback.phone || "").trim(),
-          tier: String(claim.tier || claim.benefitTier || "").trim(),
-          status: String(claim.status || "").trim(),
-        };
-      })
+      .map((claim) => ({
+        certificateId: String(claim.certificateId || "").trim(),
+        name: String(claim.claimant?.fullName || claim.fullName || "").trim(),
+        phone: String(claim.claimant?.phone || claim.phone || "").trim(),
+        tier: String(claim.tier || claim.benefitTier || "").trim(),
+        status: String(claim.status || "").trim(),
+      }))
       .filter((row) => row.name || row.phone);
 
     const htmlRows = rows.length
