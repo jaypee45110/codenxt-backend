@@ -3190,33 +3190,7 @@ app.post("/send-fulfillment-list/:eventCode", requireCodePerksAdmin, limitReward
         ).join("\n")
       : "No claims registered yet.";
 
-    const eventTimeZone = String(
-      rawEvent.timeZone ||
-      rawEvent.timezone ||
-      rawEvent.metadata?.timeZone ||
-      rawEvent.metadata?.timezone ||
-      "UTC"
-    ).trim() || "UTC";
-
-    const formatGeneratedAt = (date, timeZone) => {
-      const parts = new Intl.DateTimeFormat("nb-NO", {
-        timeZone,
-        day: "2-digit",
-        month: "2-digit",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      }).formatToParts(date).reduce((acc, part) => {
-        acc[part.type] = part.value;
-        return acc;
-      }, {});
-
-      return `${parts.day}-${parts.month}-${parts.year} kl. ${parts.hour}:${parts.minute}`;
-    };
-
-    const generatedAt = formatGeneratedAt(new Date(), eventTimeZone);
-
+    const generatedAt = new Date().toISOString();
     const issuedCount = rows.length;
     const claimedCount = rows.length;
     const subject = `codePerks Fulfillment List • ${eventCode} • ${rows.length} Claim${rows.length === 1 ? "" : "s"}`;
