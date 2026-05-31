@@ -311,6 +311,70 @@ function generateDashboardAccessKey() {
   return `KP-${crypto.randomBytes(3).toString("hex").toUpperCase()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
 }
 
+function buildCodeDemoDailyDemoEvents(parentEvent, body = {}) {
+  const locations = Array.isArray(body.demoLocations) ? body.demoLocations : [];
+  const parentCode = String(parentEvent.code || body.code || "").trim();
+
+  if (!parentCode || String(body.locationMode || "").toLowerCase() !== "tour") {
+    return [];
+  }
+
+  return locations
+    .filter((location) => String(location.demoType || "").toLowerCase() === "fullscale")
+    .map((location, index) => {
+      const dayNumber = String(index + 1).padStart(2, "0");
+      const code = `${parentCode}-D${dayNumber}`;
+      const dashboardAccessKey = generateDashboardAccessKey();
+      const demoDate = String(location.date || "").trim();
+      const startTime = String(location.startTime || "").trim();
+      const endTime = String(location.endTime || "").trim();
+
+      return {
+        id: uuidv4(),
+        vertical: parentEvent.vertical || "codedemo",
+        type: "dailyDemo",
+        parentEventId: parentEvent.id,
+        parentEventCode: parentCode,
+        code,
+        name: `${parentEvent.name || parentCode} / ${location.name || `Demo ${dayNumber}`}`,
+        companyName: parentEvent.companyName || "",
+        artistLogo: parentEvent.artistLogo || "",
+        badgeConfig: parentEvent.badgeConfig || { template: "codedemo" },
+        venue: location.name || parentEvent.venue || "",
+        city: location.city || "",
+        startAt: demoDate && startTime ? `${demoDate}T${startTime}:00` : parentEvent.startAt,
+        unlockAt: demoDate && startTime ? `${demoDate}T${startTime}:00` : parentEvent.unlockAt,
+        endAt: demoDate && endTime ? `${demoDate}T${endTime}:00` : parentEvent.endAt,
+        maxClaims: parentEvent.maxClaims,
+        status: "scheduled",
+        benefitInventory: parentEvent.benefitInventory || {},
+        rewardDelivery: parentEvent.rewardDelivery || {},
+        redemptionLocation: location.name || parentEvent.redemptionLocation || "",
+        bonusDetails: parentEvent.bonusDetails || "{}",
+        defaultLang: parentEvent.defaultLang || "en",
+        lang: parentEvent.lang || parentEvent.defaultLang || "en",
+        language: parentEvent.language || parentEvent.defaultLang || "en",
+        dashboardAccessKey,
+        momentOpen: false,
+        dailyDemoIndex: index + 1,
+        dailyDemoCode: code,
+        demoLocation: location,
+        demoDate,
+        demoStartTime: startTime,
+        demoEndTime: endTime,
+        demoTimeZone: body.demoTimeZone || body.timeZone || "Europe/Oslo",
+        dashboardWindow: {
+          opensHoursBeforeStart: 2,
+          closesHoursAfterEnd: 6,
+          handshakeOpensAfterEnd: true,
+        },
+        joinUrl: `/join/${code}`,
+        dashboardUrl: `/dashboard?event=${code}`,
+        qrTarget: `/join/${code}`,
+      };
+    });
+}
+
 // CREATE EVENT
 app.post("/event", async (req, res) => {
   try {
@@ -334,7 +398,11 @@ const {
   bonusDetails,
   defaultLang,
   lang,
-  language
+  language,
+  demoLocations,
+  locationMode,
+  tourCsvImportReady,
+  tourGeoReady
 } = req.body;
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
@@ -378,8 +446,17 @@ maxClaims,
   language: normalizedDefaultLang,
   dashboardAccessKey,
   momentOpen: false,
+  locationMode: String(locationMode || "").trim(),
+  demoLocations: Array.isArray(demoLocations) ? demoLocations : [],
+  tourCsvImportReady: !!tourCsvImportReady,
+  tourGeoReady: !!tourGeoReady,
 };
+    const dailyDemoEvents = buildCodeDemoDailyDemoEvents(event, req.body);
+    event.dailyDemoEvents = dailyDemoEvents;
     events[id] = event;
+    dailyDemoEvents.forEach((dailyEvent) => {
+      events[dailyEvent.id] = dailyEvent;
+    });
 
 if (process.env.REDIS_URL) {
 await redis.hset(`event:${id}:meta`, {
@@ -406,16 +483,70 @@ artistLogo: artistLogo || "",
   language: normalizedDefaultLang,
   dashboardAccessKey,
   momentOpen: "false",
+  locationMode: String(event.locationMode || ""),
+  demoLocations: JSON.stringify(event.demoLocations || []),
+  dailyDemoEvents: JSON.stringify(event.dailyDemoEvents || []),
+  tourCsvImportReady: String(!!event.tourCsvImportReady),
+  tourGeoReady: String(!!event.tourGeoReady),
 });
 
   await redis.set(`eventcode:${code || id}`, id);
   await redis.set(`eventcode:${normalizedVertical}:${code || id}`, id);
   await redis.set(`event:${id}:claims`, "0");
+
+  for (const dailyEvent of dailyDemoEvents) {
+    await redis.hset(`event:${dailyEvent.id}:meta`, {
+      id: dailyEvent.id,
+      vertical: dailyEvent.vertical,
+      type: dailyEvent.type,
+      parentEventId: dailyEvent.parentEventId,
+      parentEventCode: dailyEvent.parentEventCode,
+      code: dailyEvent.code,
+      name: dailyEvent.name,
+      companyName: dailyEvent.companyName || "",
+      artistLogo: dailyEvent.artistLogo || "",
+      badgeConfig: JSON.stringify(dailyEvent.badgeConfig || { template: "codedemo" }),
+      venue: dailyEvent.venue || "",
+      city: dailyEvent.city || "",
+      startAt: dailyEvent.startAt || "",
+      unlockAt: dailyEvent.unlockAt || "",
+      endAt: dailyEvent.endAt || "",
+      maxClaims: String(dailyEvent.maxClaims || ""),
+      status: dailyEvent.status || "scheduled",
+      benefitInventory: JSON.stringify(dailyEvent.benefitInventory || {}),
+      rewardDelivery: JSON.stringify(dailyEvent.rewardDelivery || {}),
+      redemptionLocation: dailyEvent.redemptionLocation || "",
+      bonusDetails: typeof dailyEvent.bonusDetails === "string" ? dailyEvent.bonusDetails : JSON.stringify(dailyEvent.bonusDetails || {}),
+      defaultLang: dailyEvent.defaultLang || "en",
+      lang: dailyEvent.lang || dailyEvent.defaultLang || "en",
+      language: dailyEvent.language || dailyEvent.defaultLang || "en",
+      dashboardAccessKey: dailyEvent.dashboardAccessKey,
+      momentOpen: "false",
+      dailyDemoIndex: String(dailyEvent.dailyDemoIndex),
+      dailyDemoCode: dailyEvent.dailyDemoCode,
+      demoLocation: JSON.stringify(dailyEvent.demoLocation || {}),
+      demoDate: dailyEvent.demoDate || "",
+      demoStartTime: dailyEvent.demoStartTime || "",
+      demoEndTime: dailyEvent.demoEndTime || "",
+      demoTimeZone: dailyEvent.demoTimeZone || "Europe/Oslo",
+      dashboardWindow: JSON.stringify(dailyEvent.dashboardWindow || {}),
+      joinUrl: dailyEvent.joinUrl || "",
+      dashboardUrl: dailyEvent.dashboardUrl || "",
+      qrTarget: dailyEvent.qrTarget || "",
+    });
+
+    await redis.set(`eventcode:${dailyEvent.code}`, dailyEvent.id);
+    await redis.set(`eventcode:${dailyEvent.vertical}:${dailyEvent.code}`, dailyEvent.id);
+    await redis.set(`event:${dailyEvent.id}:claims`, "0");
+  }
 }
 
 try {
   await saveCampaign(event);
-  console.log("POSTGRES CAMPAIGN SAVED:", event.code);
+  for (const dailyEvent of dailyDemoEvents) {
+    await saveCampaign(dailyEvent);
+  }
+  console.log("POSTGRES CAMPAIGN SAVED:", event.code, "dailyDemoEvents:", dailyDemoEvents.length);
 } catch (dbError) {
   console.error("POSTGRES CAMPAIGN SAVE FAILED:", dbError.message);
 }
@@ -437,6 +568,7 @@ try {
       success: true,
       eventId: id,
       event,
+      dailyDemoEvents,
     });
   } catch (err) {
     console.error("Create event failed:", err.message);
