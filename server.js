@@ -644,6 +644,38 @@ if (meta && meta.bonusDetails) {
     meta.bonusDetails = normalizeBonusDetails({});
   }
 }
+
+if (meta && meta.demoLocations) {
+  try {
+    meta.demoLocations = JSON.parse(meta.demoLocations);
+  } catch {
+    meta.demoLocations = [];
+  }
+}
+
+if (meta && meta.dailyDemoEvents) {
+  try {
+    meta.dailyDemoEvents = JSON.parse(meta.dailyDemoEvents);
+  } catch {
+    meta.dailyDemoEvents = [];
+  }
+}
+
+if (meta && meta.demoLocation) {
+  try {
+    meta.demoLocation = JSON.parse(meta.demoLocation);
+  } catch {
+    meta.demoLocation = {};
+  }
+}
+
+if (meta && meta.dashboardWindow) {
+  try {
+    meta.dashboardWindow = JSON.parse(meta.dashboardWindow);
+  } catch {
+    meta.dashboardWindow = {};
+  }
+}
     if ((!meta || !meta.id) && events[eventId]) {
   meta = events[eventId];
 }
@@ -687,6 +719,25 @@ const normalizedMeta = {
   rewardDelivery: meta?.rewardDelivery || null,
   redemptionLocation: meta?.redemptionLocation || "",
   bonusDetails: meta?.bonusDetails || null,
+  type: meta?.type || "",
+  parentEventId: meta?.parentEventId || "",
+  parentEventCode: meta?.parentEventCode || "",
+  locationMode: meta?.locationMode || "",
+  demoLocations: Array.isArray(meta?.demoLocations) ? meta.demoLocations : [],
+  dailyDemoEvents: Array.isArray(meta?.dailyDemoEvents) ? meta.dailyDemoEvents : [],
+  dailyDemoIndex: Number(meta?.dailyDemoIndex || 0),
+  dailyDemoCode: meta?.dailyDemoCode || "",
+  demoLocation: meta?.demoLocation || {},
+  demoDate: meta?.demoDate || "",
+  demoStartTime: meta?.demoStartTime || "",
+  demoEndTime: meta?.demoEndTime || "",
+  demoTimeZone: meta?.demoTimeZone || "Europe/Oslo",
+  dashboardWindow: meta?.dashboardWindow || {},
+  joinUrl: meta?.joinUrl || "",
+  dashboardUrl: meta?.dashboardUrl || "",
+  qrTarget: meta?.qrTarget || "",
+  tourCsvImportReady: meta?.tourCsvImportReady === true || meta?.tourCsvImportReady === "true",
+  tourGeoReady: meta?.tourGeoReady === true || meta?.tourGeoReady === "true",
 screenVideoUrl: meta?.screenVideoUrl || "",
 momentOpen: meta?.momentOpen === true || meta?.momentOpen === "true",
 rawScans,
