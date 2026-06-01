@@ -3137,6 +3137,92 @@ app.post("/reward-claim", limitRewardClaim, async (req, res) => {
 });
 
 
+
+app.get("/admin/redis-codetone-events", async (req, res) => {
+  try {
+    const providedKey = String(req.headers["x-admin-key"] || "").trim();
+    const configuredKey = process.env.CODEPERKS_ADMIN_KEY || "CTONE";
+
+    if (providedKey !== configuredKey) {
+      return res.status(401).json({
+        ok: false,
+        error: "Unauthorized",
+      });
+    }
+
+    if (!redis) {
+      return res.status(500).json({
+        ok: false,
+        error: "Redis not available",
+      });
+    }
+
+    const eventCodeKeys = await redis.keys("eventcode:*");
+
+    const codeToneKeys = eventCodeKeys.filter(
+      (key) =>
+        key.toLowerCase().includes("codetone") ||
+        key.includes("CT-")
+    );
+
+    const events = [];
+
+    for (const key of codeToneKeys) {
+      const eventId = await redis.get(key);
+
+      if (!eventId) continue;
+
+      const meta = await redis.hgetall(`event:${eventId}:meta`);
+
+      const scanCount =
+        Number(await redis.get(`event:${eventId}:scanCount`)) || 0;
+
+      const joinCount =
+        Number(await redis.get(`event:${eventId}:innerCircleJoinCount`)) || 0;
+
+      events.push({
+        redisKey: key,
+        eventId,
+        eventCode:
+          meta?.eventCode ||
+          meta?.code ||
+          key.split(":").pop(),
+        vertical: meta?.vertical || "",
+        name: meta?.name || meta?.title || "",
+        venue: meta?.venue || "",
+        city: meta?.city || "",
+        createdAt:
+          meta?.createdAt ||
+          meta?.created_at ||
+          "",
+        status: meta?.status || "",
+        scanCount,
+        joinCount,
+      });
+    }
+
+    events.sort((a, b) =>
+      String(b.createdAt || "").localeCompare(
+        String(a.createdAt || "")
+      )
+    );
+
+    return res.json({
+      ok: true,
+      count: events.length,
+      events,
+    });
+  } catch (error) {
+    console.error("redis-codetone-events error", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not read codeTone events",
+    });
+  }
+});
+
+
 app.get("/postgres-campaign/:eventCode", requireCodePerksAdmin, async (req, res) => {
   try {
     const eventCode = String(req.params.eventCode || "").trim();
