@@ -12,7 +12,13 @@ const path = require("path");
 const { spawn } = require("child_process");
 const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const { testDbConnection, saveCampaign, getCampaignByCode, saveEventScan } = require("./db");
+const {
+  testDbConnection,
+  saveCampaign,
+  getCampaignByCode,
+  saveEventScan,
+  saveEventRegistration
+} = require("./db");
 const { sendEmail } = require("./mailer");
 const QRCode = require("qrcode");
 const app = express();
@@ -1688,6 +1694,35 @@ if (phone && process.env.REDIS_URL) {
 
 if (phone) {
   scheduleInnerCircleFollowUp(phone, eventCode);
+
+  try {
+    await saveEventRegistration({
+      eventCode,
+      eventId,
+      vertical: event?.vertical || meta?.vertical || "",
+      registrationId: ownershipCertificate?.certificateId || "",
+      scanId,
+      tier: ownershipCertificate?.tier || ownershipCertificate?.benefitTier || "",
+      phone,
+      teamCode: event?.teamCode || meta?.teamCode || "",
+      teamLabel: event?.teamLabel || meta?.teamLabel || "",
+      dailyDemoCode: event?.dailyDemoCode || meta?.dailyDemoCode || "",
+      dailyDemoDayIndex: event?.dailyDemoDayIndex || meta?.dailyDemoDayIndex || null,
+      dailyDemoTeamIndex: event?.dailyDemoTeamIndex || meta?.dailyDemoTeamIndex || null,
+      userAgent: req.headers["user-agent"] || "",
+      ipHash: crypto.createHash("sha256").update(String(req.ip || "")).digest("hex"),
+      rawPayload: {
+        source: "web_join",
+        phone,
+        scanId,
+        eventCode,
+        eventId,
+        ownershipCertificate,
+      },
+    });
+  } catch (registrationError) {
+    console.error("POSTGRES EVENT REGISTRATION SAVE FAILED:", registrationError.message);
+  }
 }
     return res.json({
       success: true,

@@ -198,6 +198,114 @@ async function saveEventScan(scan = {}) {
   return result.rows[0] || null;
 }
 
+async function ensureEventRegistrationsTable() {
+  if (!pool) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS event_registrations (
+      id BIGSERIAL PRIMARY KEY,
+      event_code TEXT NOT NULL,
+      event_id TEXT,
+      vertical TEXT,
+      registration_id TEXT,
+      raw_registration_key TEXT NOT NULL,
+      scan_id TEXT,
+      tier TEXT,
+      name TEXT,
+      email TEXT,
+      phone TEXT,
+      team_code TEXT,
+      team_label TEXT,
+      daily_demo_code TEXT,
+      daily_demo_day_index INTEGER,
+      daily_demo_team_index INTEGER,
+      user_agent TEXT,
+      ip_hash TEXT,
+      raw_payload JSONB,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (event_code, raw_registration_key)
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS event_registrations_event_code_created_at_idx
+    ON event_registrations (event_code, created_at)
+  `);
+}
+
+async function saveEventRegistration(registration = {}) {
+  if (!pool || !registration.eventCode) return null;
+
+  await ensureEventRegistrationsTable();
+
+  const rawRegistrationKey = String(
+    registration.registrationId ||
+    registration.email ||
+    registration.phone ||
+    registration.scanId ||
+    registration.requestId ||
+    `${Date.now()}-${Math.random()}`
+  ).trim().toLowerCase();
+
+  const result = await pool.query(
+    `
+      INSERT INTO event_registrations (
+        event_code,
+        event_id,
+        vertical,
+        registration_id,
+        raw_registration_key,
+        scan_id,
+        tier,
+        name,
+        email,
+        phone,
+        team_code,
+        team_label,
+        daily_demo_code,
+        daily_demo_day_index,
+        daily_demo_team_index,
+        user_agent,
+        ip_hash,
+        raw_payload
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      ON CONFLICT (event_code, raw_registration_key)
+      DO UPDATE SET
+        registration_id = COALESCE(EXCLUDED.registration_id, event_registrations.registration_id),
+        scan_id = COALESCE(EXCLUDED.scan_id, event_registrations.scan_id),
+        tier = COALESCE(EXCLUDED.tier, event_registrations.tier),
+        name = COALESCE(EXCLUDED.name, event_registrations.name),
+        email = COALESCE(EXCLUDED.email, event_registrations.email),
+        phone = COALESCE(EXCLUDED.phone, event_registrations.phone),
+        raw_payload = EXCLUDED.raw_payload
+      RETURNING *
+    `,
+    [
+      registration.eventCode,
+      registration.eventId || '',
+      registration.vertical || '',
+      registration.registrationId || '',
+      rawRegistrationKey,
+      registration.scanId || '',
+      registration.tier || '',
+      registration.name || '',
+      registration.email || '',
+      registration.phone || '',
+      registration.teamCode || '',
+      registration.teamLabel || '',
+      registration.dailyDemoCode || '',
+      registration.dailyDemoDayIndex || null,
+      registration.dailyDemoTeamIndex || null,
+      registration.userAgent || '',
+      registration.ipHash || '',
+      JSON.stringify(registration.rawPayload || {}),
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
 module.exports = {
   pool,
   testDbConnection,
@@ -206,4 +314,6 @@ module.exports = {
   getCampaignByCode,
   ensureEventScansTable,
   saveEventScan,
+  ensureEventRegistrationsTable,
+  saveEventRegistration,
 };
