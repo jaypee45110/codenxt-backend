@@ -314,16 +314,47 @@ function generateDashboardAccessKey() {
 function buildCodeDemoDailyDemoEvents(parentEvent, body = {}) {
   const locations = Array.isArray(body.demoLocations) ? body.demoLocations : [];
   const parentCode = String(parentEvent.code || body.code || "").trim();
+  const maxTeamsPerDay = Math.min(5, Math.max(1, Number(body.maxTeamsPerDay || 5)));
+  const teamCodes = ["A", "B", "C", "D", "E"];
 
   if (!parentCode || String(body.locationMode || "").toLowerCase() !== "tour") {
     return [];
   }
 
-  return locations
-    .filter((location) => String(location.demoType || "").toLowerCase() === "fullscale")
-    .map((location, index) => {
-      const dayNumber = String(index + 1).padStart(2, "0");
-      const code = `${parentCode}-D${dayNumber}`;
+  const fullscaleLocations = locations.filter(
+    (location) => String(location.demoType || "").toLowerCase() === "fullscale"
+  );
+
+  const uniqueDates = [];
+  const dateToDayIndex = new Map();
+
+  fullscaleLocations.forEach((location) => {
+    const dateKey = String(location.date || "").trim() || "undated";
+    if (!dateToDayIndex.has(dateKey)) {
+      const nextDayIndex = uniqueDates.length + 1;
+      uniqueDates.push(dateKey);
+      dateToDayIndex.set(dateKey, nextDayIndex);
+    }
+  });
+
+  const perDayCounts = new Map();
+
+  return fullscaleLocations
+    .map((location) => {
+      const dateKey = String(location.date || "").trim() || "undated";
+      const dayIndex = dateToDayIndex.get(dateKey) || 1;
+      const nextTeamIndex = (perDayCounts.get(dateKey) || 0) + 1;
+      perDayCounts.set(dateKey, nextTeamIndex);
+
+      if (nextTeamIndex > maxTeamsPerDay) {
+        return null;
+      }
+
+      const dayNumber = String(dayIndex).padStart(2, "0");
+      const teamCode = String(location.teamCode || teamCodes[nextTeamIndex - 1] || "A").trim().toUpperCase().slice(0, 1);
+      const safeTeamCode = teamCodes.includes(teamCode) ? teamCode : teamCodes[nextTeamIndex - 1] || "A";
+      const teamLabel = String(location.teamLabel || `Team ${safeTeamCode}`).trim();
+      const code = `${parentCode}-D${dayNumber}-${safeTeamCode}`;
       const dashboardAccessKey = generateDashboardAccessKey();
       const demoDate = String(location.date || "").trim();
       const startTime = String(location.startTime || "").trim();
@@ -336,7 +367,7 @@ function buildCodeDemoDailyDemoEvents(parentEvent, body = {}) {
         parentEventId: parentEvent.id,
         parentEventCode: parentCode,
         code,
-        name: `${parentEvent.name || parentCode} / ${location.name || `Demo ${dayNumber}`}`,
+        name: `${parentEvent.name || parentCode} / D${dayNumber}-${safeTeamCode} / ${location.name || `Demo ${dayNumber}`}`,
         companyName: parentEvent.companyName || "",
         artistLogo: parentEvent.artistLogo || "",
         badgeConfig: parentEvent.badgeConfig || { template: "codedemo" },
@@ -356,9 +387,17 @@ function buildCodeDemoDailyDemoEvents(parentEvent, body = {}) {
         language: parentEvent.language || parentEvent.defaultLang || "en",
         dashboardAccessKey,
         momentOpen: false,
-        dailyDemoIndex: index + 1,
+        dailyDemoIndex: dayIndex,
+        dailyDemoDayIndex: dayIndex,
+        dailyDemoTeamIndex: nextTeamIndex,
+        teamCode: safeTeamCode,
+        teamLabel,
         dailyDemoCode: code,
-        demoLocation: location,
+        demoLocation: {
+          ...location,
+          teamCode: safeTeamCode,
+          teamLabel,
+        },
         demoDate,
         demoStartTime: startTime,
         demoEndTime: endTime,
@@ -372,7 +411,8 @@ function buildCodeDemoDailyDemoEvents(parentEvent, body = {}) {
         dashboardUrl: `/dashboard?event=${code}`,
         qrTarget: `/join/${code}`,
       };
-    });
+    })
+    .filter(Boolean);
 }
 
 // CREATE EVENT
@@ -523,6 +563,10 @@ artistLogo: artistLogo || "",
       dashboardAccessKey: dailyEvent.dashboardAccessKey,
       momentOpen: "false",
       dailyDemoIndex: String(dailyEvent.dailyDemoIndex),
+      dailyDemoDayIndex: String(dailyEvent.dailyDemoDayIndex || dailyEvent.dailyDemoIndex || ""),
+      dailyDemoTeamIndex: String(dailyEvent.dailyDemoTeamIndex || ""),
+      teamCode: dailyEvent.teamCode || "",
+      teamLabel: dailyEvent.teamLabel || "",
       dailyDemoCode: dailyEvent.dailyDemoCode,
       demoLocation: JSON.stringify(dailyEvent.demoLocation || {}),
       demoDate: dailyEvent.demoDate || "",
@@ -726,6 +770,10 @@ const normalizedMeta = {
   demoLocations: Array.isArray(meta?.demoLocations) ? meta.demoLocations : [],
   dailyDemoEvents: Array.isArray(meta?.dailyDemoEvents) ? meta.dailyDemoEvents : [],
   dailyDemoIndex: Number(meta?.dailyDemoIndex || 0),
+  dailyDemoDayIndex: Number(meta?.dailyDemoDayIndex || meta?.dailyDemoIndex || 0),
+  dailyDemoTeamIndex: Number(meta?.dailyDemoTeamIndex || 0),
+  teamCode: meta?.teamCode || "",
+  teamLabel: meta?.teamLabel || "",
   dailyDemoCode: meta?.dailyDemoCode || "",
   demoLocation: meta?.demoLocation || {},
   demoDate: meta?.demoDate || "",
