@@ -12,7 +12,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const { testDbConnection, saveCampaign, getCampaignByCode } = require("./db");
+const { testDbConnection, saveCampaign, getCampaignByCode, saveEventScan } = require("./db");
 const { sendEmail } = require("./mailer");
 const QRCode = require("qrcode");
 const app = express();
@@ -2085,6 +2085,27 @@ if (process.env.REDIS_URL) {
 }
 
 const vertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
+
+try {
+  await saveEventScan({
+    eventCode,
+    eventId,
+    vertical,
+    scanId,
+    scanRank,
+    tier,
+    teamCode: event.teamCode || event.demoLocation?.teamCode || "",
+    teamLabel: event.teamLabel || event.demoLocation?.teamLabel || "",
+    dailyDemoCode: event.dailyDemoCode || event.code || eventCode,
+    dailyDemoDayIndex: event.dailyDemoDayIndex || event.dailyDemoIndex || null,
+    dailyDemoTeamIndex: event.dailyDemoTeamIndex || null,
+    userAgent: req.get("user-agent") || "",
+    ipHash: crypto.createHash("sha256").update(String(req.ip || "")).digest("hex"),
+    rawPayload: req.body || {},
+  });
+} catch (dbScanError) {
+  console.error("POSTGRES SCAN SAVE FAILED:", dbScanError.message);
+}
 
 if (vertical === "codeperks" && process.env.REDIS_URL && scanId) {
   const benefitWindow = getCodePerksBenefitWindowStatus(event || {});
