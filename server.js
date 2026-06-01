@@ -17,7 +17,8 @@ const {
   saveCampaign,
   getCampaignByCode,
   saveEventScan,
-  saveEventRegistration
+  saveEventRegistration,
+  getEventRegistrations
 } = require("./db");
 const { sendEmail } = require("./mailer");
 const QRCode = require("qrcode");
@@ -3160,6 +3161,28 @@ app.get("/postgres-campaign/:eventCode", requireCodePerksAdmin, async (req, res)
     });
   }
 });
+
+app.get("/event-registrations/:eventCode", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    const limit = Number(req.query.limit || 50);
+    const registrations = await getEventRegistrations(eventCode, limit);
+
+    return res.json({
+      ok: true,
+      eventCode,
+      count: registrations.length,
+      registrations,
+    });
+  } catch (error) {
+    console.error("event registrations lookup error", error);
+    return res.status(500).json({
+      ok: false,
+      error: "Could not load event registrations from Postgres",
+    });
+  }
+});
+
 
 app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
   try {

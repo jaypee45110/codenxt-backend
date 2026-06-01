@@ -306,6 +306,27 @@ async function saveEventRegistration(registration = {}) {
   return result.rows[0] || null;
 }
 
+async function getEventRegistrations(eventCode, limit = 50) {
+  if (!pool || !eventCode) return [];
+
+  await ensureEventRegistrationsTable();
+
+  const safeLimit = Math.max(1, Math.min(Number(limit || 50), 200));
+
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM event_registrations
+      WHERE event_code = $1
+      ORDER BY created_at DESC
+      LIMIT $2
+    `,
+    [eventCode, safeLimit]
+  );
+
+  return result.rows || [];
+}
+
 module.exports = {
   pool,
   testDbConnection,
@@ -316,4 +337,5 @@ module.exports = {
   saveEventScan,
   ensureEventRegistrationsTable,
   saveEventRegistration,
+  getEventRegistrations,
 };
