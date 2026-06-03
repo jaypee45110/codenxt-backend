@@ -1282,6 +1282,22 @@ async function resolveCodeDemoEvent(eventCode) {
         dashboardAccessKey: campaign.dashboard_access_key,
         benefitInventory: campaign.benefit_inventory || {},
       };
+
+      if (typeof meta.demoLocations === "string") {
+        try {
+          meta.demoLocations = JSON.parse(meta.demoLocations);
+        } catch {
+          meta.demoLocations = [];
+        }
+      }
+
+      if (!Array.isArray(meta.demoLocations) && Array.isArray(campaign.raw_event?.demoLocations)) {
+        meta.demoLocations = campaign.raw_event.demoLocations;
+      }
+
+      if ((!meta.demoLocation || !Object.keys(meta.demoLocation || {}).length) && Array.isArray(meta.demoLocations) && meta.demoLocations[0]) {
+        meta.demoLocation = meta.demoLocations[0];
+      }
     }
   }
 
