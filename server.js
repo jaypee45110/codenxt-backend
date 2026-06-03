@@ -1169,6 +1169,34 @@ function normalizeCodeDemoScore(value, fallback = 0) {
   return Math.max(0, Math.min(10, Math.round(number)));
 }
 
+function getCodeDemoHandshakeDeadline(meta = {}, input = {}) {
+  const demoDate = String(input.demoDate || meta.demoDate || meta.startAt || "").slice(0, 10);
+  const demoEndTime = String(input.demoEndTime || meta.demoEndTime || "").trim();
+
+  let endAt = "";
+
+  if (demoDate && demoEndTime) {
+    endAt = `${demoDate}T${demoEndTime}:00`;
+  } else {
+    endAt = input.endAt || meta.endAt || "";
+  }
+
+  const endMs = Date.parse(endAt);
+  if (!Number.isFinite(endMs)) {
+    return { ok: true, endAt: "", deadlineAt: "", expired: false };
+  }
+
+  const deadlineMs = endMs + 15 * 60 * 1000;
+  const nowMs = Date.now();
+
+  return {
+    ok: nowMs <= deadlineMs,
+    endAt: new Date(endMs).toISOString(),
+    deadlineAt: new Date(deadlineMs).toISOString(),
+    expired: nowMs > deadlineMs,
+  };
+}
+
 function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
   const scanScore = normalizeCodeDemoScore(input.scanScore, 10);
   const nextStepScore = normalizeCodeDemoScore(input.nextStepScore, 10);
@@ -1318,7 +1346,23 @@ app.post("/codedemo/handshake", async (req, res) => {
       return res.status(404).json({ ok: false, error: "Event not found" });
     }
 
-    const payload = buildCodeDemoHandshakePayload(req.body || {}, meta, eventCode);
+    const deadline = getCodeDemoHandshakeDeadline(meta, req.body || {});
+
+    if (!deadline.ok) {
+      return res.status(403).json({
+        ok: false,
+        error: "Handshake deadline expired",
+        deadlineAt: deadline.deadlineAt,
+        endAt: deadline.endAt,
+      });
+    }
+
+    const payload = {
+      ...buildCodeDemoHandshakePayload(req.body || {}, meta, eventCode),
+      handshakeDeadlineAt: deadline.deadlineAt,
+      handshakeSubmittedWithinDeadline: true,
+    };
+
     const saved = await saveCodeDemoHandshakeReport(payload);
 
     if (process.env.REDIS_URL) {
