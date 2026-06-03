@@ -1244,6 +1244,27 @@ async function resolveCodeDemoEvent(eventCode) {
     }
   }
 
+  if (!meta || !meta.id) {
+    const campaign = await getCampaignByCode(eventCode);
+    if (campaign) {
+      eventId = campaign.id;
+      meta = {
+        ...(campaign.raw_event || {}),
+        id: campaign.id,
+        code: campaign.event_code,
+        name: campaign.name,
+        venue: campaign.venue,
+        city: campaign.city,
+        startAt: campaign.start_at,
+        unlockAt: campaign.unlock_at,
+        endAt: campaign.end_at,
+        status: campaign.status,
+        dashboardAccessKey: campaign.dashboard_access_key,
+        benefitInventory: campaign.benefit_inventory || {},
+      };
+    }
+  }
+
   return { eventId, meta };
 }
 
