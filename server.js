@@ -1247,7 +1247,7 @@ async function resolveCodeDemoEvent(eventCode) {
   return { eventId, meta };
 }
 
-app.post("/codedemo/handshake", requireCodePerksAdmin, async (req, res) => {
+app.post("/codedemo/handshake", async (req, res) => {
   try {
     const eventCode = String(req.body?.eventCode || "").trim();
 
