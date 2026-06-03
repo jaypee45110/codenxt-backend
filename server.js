@@ -18,7 +18,9 @@ const {
   getCampaignByCode,
   saveEventScan,
   saveEventRegistration,
-  getEventRegistrations
+  getEventRegistrations,
+  saveCodeDemoHandshakeReport,
+  getCodeDemoHandshakeReports
 } = require("./db");
 const { sendEmail } = require("./mailer");
 const QRCode = require("qrcode");
@@ -1160,6 +1162,161 @@ if (cachedReward) {
     res.status(500).json({ error: "Failed to get reward" });
   }
 });
+
+function normalizeCodeDemoScore(value, fallback = 0) {
+  const number = Number(value ?? fallback);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(0, Math.min(10, Math.round(number)));
+}
+
+function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
+  const scanScore = normalizeCodeDemoScore(input.scanScore, 10);
+  const nextStepScore = normalizeCodeDemoScore(input.nextStepScore, 10);
+  const interest = normalizeCodeDemoScore(input.interest, 0);
+  const productUnderstanding = normalizeCodeDemoScore(input.productUnderstanding, 0);
+  const relevance = normalizeCodeDemoScore(input.relevance, 0);
+  const purchaseIntent = normalizeCodeDemoScore(input.purchaseIntent, 0);
+  const storeManagerScore = normalizeCodeDemoScore(input.storeManagerScore, 0);
+
+  const totalScore =
+    scanScore +
+    nextStepScore +
+    interest +
+    productUnderstanding +
+    relevance +
+    purchaseIntent +
+    storeManagerScore;
+
+  const demoLocation = input.demoLocation || meta.demoLocation || {};
+
+  return {
+    eventCode,
+    eventId: input.eventId || meta.id || "",
+    parentEventCode: input.parentEventCode || meta.parentEventCode || meta.parentCode || "",
+    vertical: "codedemo",
+    demoDate: String(input.demoDate || meta.demoDate || meta.startAt || "").slice(0, 10),
+    teamCode: String(input.teamCode || meta.teamCode || "").trim().toUpperCase(),
+    teamLabel: String(input.teamLabel || meta.teamLabel || "").trim(),
+    dailyDemoCode: String(input.dailyDemoCode || meta.dailyDemoCode || eventCode).trim(),
+    dailyDemoDayIndex: Number(input.dailyDemoDayIndex || meta.dailyDemoDayIndex || meta.dailyDemoIndex || 0) || null,
+    dailyDemoTeamIndex: Number(input.dailyDemoTeamIndex || meta.dailyDemoTeamIndex || 0) || null,
+    locationName: String(
+      input.locationName ||
+      demoLocation.name ||
+      demoLocation.storeName ||
+      demoLocation.locationName ||
+      meta.venue ||
+      meta.city ||
+      ""
+    ).trim(),
+    scanScore,
+    nextStepScore,
+    interest,
+    productUnderstanding,
+    relevance,
+    purchaseIntent,
+    storeManagerScore,
+    totalScore,
+    reportedBy: String(input.reportedBy || input.teamLeader || "").trim(),
+    rawPayload: input,
+  };
+}
+
+async function resolveCodeDemoEvent(eventCode) {
+  let eventId = null;
+  let meta = null;
+
+  if (process.env.REDIS_URL) {
+    eventId =
+      await redis.get(`eventcode:codedemo:${eventCode}`) ||
+      await redis.get(`eventcode:${eventCode}`);
+
+    if (eventId) {
+      meta = await redis.hgetall(`event:${eventId}:meta`);
+    }
+  }
+
+  if (!meta || !meta.id) {
+    const memoryEvent = Object.values(events).find((item) => item.code === eventCode);
+    if (memoryEvent) {
+      eventId = memoryEvent.id;
+      meta = memoryEvent;
+    }
+  }
+
+  return { eventId, meta };
+}
+
+app.post("/codedemo/handshake", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const eventCode = String(req.body?.eventCode || "").trim();
+
+    if (!eventCode) {
+      return res.status(400).json({ ok: false, error: "eventCode is required" });
+    }
+
+    const { meta } = await resolveCodeDemoEvent(eventCode);
+
+    if (!meta || !meta.id) {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    const payload = buildCodeDemoHandshakePayload(req.body || {}, meta, eventCode);
+    const saved = await saveCodeDemoHandshakeReport(payload);
+
+    if (process.env.REDIS_URL) {
+      await redis.set(`codedemo:handshake:${eventCode}`, JSON.stringify(payload));
+    }
+
+    return res.json({ ok: true, handshake: saved || payload });
+  } catch (error) {
+    console.error("Save codeDemo handshake failed:", error.message);
+    return res.status(500).json({ ok: false, error: "Failed to save handshake" });
+  }
+});
+
+app.get("/codedemo/handshake/:eventCode", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    const demoDate = String(req.query?.date || "").trim();
+
+    const reports = await getCodeDemoHandshakeReports({
+      eventCode,
+      demoDate: demoDate || undefined,
+    });
+
+    return res.json({ ok: true, eventCode, reports });
+  } catch (error) {
+    console.error("Get codeDemo handshake failed:", error.message);
+    return res.status(500).json({ ok: false, error: "Failed to get handshake" });
+  }
+});
+
+app.get("/codedemo/handshake-report/:parentEventCode", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const parentEventCode = String(req.params.parentEventCode || "").trim();
+    const demoDate = String(req.query?.date || "").trim();
+
+    let reports = await getCodeDemoHandshakeReports({
+      parentEventCode,
+      demoDate: demoDate || undefined,
+    });
+
+    if (!reports.length) {
+      reports = await getCodeDemoHandshakeReports({
+        eventCode: parentEventCode,
+        demoDate: demoDate || undefined,
+      });
+    }
+
+    return res.json({ ok: true, parentEventCode, date: demoDate || "", reports });
+  } catch (error) {
+    console.error("Get codeDemo handshake report failed:", error.message);
+    return res.status(500).json({ ok: false, error: "Failed to get handshake report" });
+  }
+});
+
+
 // GET REPORT
 app.get("/report/:eventCode", requireCodePerksAdmin, async (req, res) => {
   try {

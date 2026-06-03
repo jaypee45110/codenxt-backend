@@ -327,7 +327,192 @@ async function getEventRegistrations(eventCode, limit = 50) {
   return result.rows || [];
 }
 
+async function ensureCodeDemoHandshakesTable() {
+  if (!pool) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS codedemo_handshakes (
+      id BIGSERIAL PRIMARY KEY,
+      event_code TEXT NOT NULL,
+      event_id TEXT,
+      parent_event_code TEXT,
+      vertical TEXT,
+      demo_date TEXT,
+      team_code TEXT,
+      team_label TEXT,
+      daily_demo_code TEXT,
+      daily_demo_day_index INTEGER,
+      daily_demo_team_index INTEGER,
+      location_name TEXT,
+      scan_score INTEGER,
+      next_step_score INTEGER,
+      interest INTEGER,
+      product_understanding INTEGER,
+      relevance INTEGER,
+      purchase_intent INTEGER,
+      store_manager_score INTEGER,
+      total_score INTEGER,
+      reported_by TEXT,
+      reported_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      raw_payload JSONB,
+      UNIQUE (event_code, demo_date, team_code)
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codedemo_handshakes_parent_date_idx
+    ON codedemo_handshakes (parent_event_code, demo_date)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codedemo_handshakes_event_code_idx
+    ON codedemo_handshakes (event_code)
+  `);
+}
+
+async function saveCodeDemoHandshakeReport(report = {}) {
+  if (!pool || !report.eventCode) return null;
+
+  await ensureCodeDemoHandshakesTable();
+
+  const scanScore = Number(report.scanScore ?? 10);
+  const nextStepScore = Number(report.nextStepScore ?? 10);
+  const interest = Number(report.interest ?? 0);
+  const productUnderstanding = Number(report.productUnderstanding ?? 0);
+  const relevance = Number(report.relevance ?? 0);
+  const purchaseIntent = Number(report.purchaseIntent ?? 0);
+  const storeManagerScore = Number(report.storeManagerScore ?? 0);
+
+  const totalScore = Number(
+    report.totalScore ??
+    (
+      scanScore +
+      nextStepScore +
+      interest +
+      productUnderstanding +
+      relevance +
+      purchaseIntent +
+      storeManagerScore
+    )
+  );
+
+  const result = await pool.query(
+    `
+      INSERT INTO codedemo_handshakes (
+        event_code,
+        event_id,
+        parent_event_code,
+        vertical,
+        demo_date,
+        team_code,
+        team_label,
+        daily_demo_code,
+        daily_demo_day_index,
+        daily_demo_team_index,
+        location_name,
+        scan_score,
+        next_step_score,
+        interest,
+        product_understanding,
+        relevance,
+        purchase_intent,
+        store_manager_score,
+        total_score,
+        reported_by,
+        raw_payload,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW())
+      ON CONFLICT (event_code, demo_date, team_code)
+      DO UPDATE SET
+        event_id = EXCLUDED.event_id,
+        parent_event_code = EXCLUDED.parent_event_code,
+        vertical = EXCLUDED.vertical,
+        team_label = EXCLUDED.team_label,
+        daily_demo_code = EXCLUDED.daily_demo_code,
+        daily_demo_day_index = EXCLUDED.daily_demo_day_index,
+        daily_demo_team_index = EXCLUDED.daily_demo_team_index,
+        location_name = EXCLUDED.location_name,
+        scan_score = EXCLUDED.scan_score,
+        next_step_score = EXCLUDED.next_step_score,
+        interest = EXCLUDED.interest,
+        product_understanding = EXCLUDED.product_understanding,
+        relevance = EXCLUDED.relevance,
+        purchase_intent = EXCLUDED.purchase_intent,
+        store_manager_score = EXCLUDED.store_manager_score,
+        total_score = EXCLUDED.total_score,
+        reported_by = EXCLUDED.reported_by,
+        raw_payload = EXCLUDED.raw_payload,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [
+      report.eventCode,
+      report.eventId || '',
+      report.parentEventCode || '',
+      report.vertical || 'codedemo',
+      report.demoDate || '',
+      report.teamCode || '',
+      report.teamLabel || '',
+      report.dailyDemoCode || report.eventCode,
+      report.dailyDemoDayIndex || null,
+      report.dailyDemoTeamIndex || null,
+      report.locationName || '',
+      scanScore,
+      nextStepScore,
+      interest,
+      productUnderstanding,
+      relevance,
+      purchaseIntent,
+      storeManagerScore,
+      totalScore,
+      report.reportedBy || '',
+      JSON.stringify(report.rawPayload || report),
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function getCodeDemoHandshakeReports(filters = {}) {
+  if (!pool) return [];
+
+  await ensureCodeDemoHandshakesTable();
+
+  const values = [];
+  const where = [];
+
+  if (filters.eventCode) {
+    values.push(filters.eventCode);
+    where.push(`event_code = $${values.length}`);
+  }
+
+  if (filters.parentEventCode) {
+    values.push(filters.parentEventCode);
+    where.push(`parent_event_code = $${values.length}`);
+  }
+
+  if (filters.demoDate) {
+    values.push(filters.demoDate);
+    where.push(`demo_date = $${values.length}`);
+  }
+
+  const sql = `
+    SELECT *
+    FROM codedemo_handshakes
+    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    ORDER BY demo_date ASC, daily_demo_team_index ASC, team_code ASC, updated_at DESC
+  `;
+
+  const result = await pool.query(sql, values);
+  return result.rows;
+}
+
+
 module.exports = {
+  getCodeDemoHandshakeReports,
+  saveCodeDemoHandshakeReport,
   pool,
   testDbConnection,
   ensureCampaignsTable,
