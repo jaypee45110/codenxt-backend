@@ -1187,7 +1187,24 @@ function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
     purchaseIntent +
     storeManagerScore;
 
-  const demoLocation = input.demoLocation || meta.demoLocation || {};
+  const firstDemoLocation = Array.isArray(meta.demoLocations) ? meta.demoLocations[0] || {} : {};
+  const demoLocation = input.demoLocation || meta.demoLocation || firstDemoLocation || {};
+
+  const resolvedTeamLabel =
+    input.teamLabel ||
+    meta.teamLabel ||
+    demoLocation.teamLabel ||
+    demoLocation.teamLeaderName ||
+    firstDemoLocation.teamLeaderName ||
+    "";
+
+  const resolvedReportedBy =
+    input.reportedBy ||
+    input.teamLeader ||
+    demoLocation.teamLeaderName ||
+    firstDemoLocation.teamLeaderName ||
+    resolvedTeamLabel ||
+    "";
 
   return {
     eventCode,
@@ -1195,8 +1212,8 @@ function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
     parentEventCode: input.parentEventCode || meta.parentEventCode || meta.parentCode || "",
     vertical: "codedemo",
     demoDate: String(input.demoDate || meta.demoDate || meta.startAt || "").slice(0, 10),
-    teamCode: String(input.teamCode || meta.teamCode || "").trim().toUpperCase(),
-    teamLabel: String(input.teamLabel || meta.teamLabel || "").trim(),
+    teamCode: String(input.teamCode || meta.teamCode || demoLocation.teamCode || firstDemoLocation.teamCode || "").trim().toUpperCase(),
+    teamLabel: String(resolvedTeamLabel).trim(),
     dailyDemoCode: String(input.dailyDemoCode || meta.dailyDemoCode || eventCode).trim(),
     dailyDemoDayIndex: Number(input.dailyDemoDayIndex || meta.dailyDemoDayIndex || meta.dailyDemoIndex || 0) || null,
     dailyDemoTeamIndex: Number(input.dailyDemoTeamIndex || meta.dailyDemoTeamIndex || 0) || null,
@@ -1205,6 +1222,9 @@ function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
       demoLocation.name ||
       demoLocation.storeName ||
       demoLocation.locationName ||
+      firstDemoLocation.name ||
+      firstDemoLocation.storeName ||
+      firstDemoLocation.locationName ||
       meta.venue ||
       meta.city ||
       ""
@@ -1217,7 +1237,7 @@ function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
     purchaseIntent,
     storeManagerScore,
     totalScore,
-    reportedBy: String(input.reportedBy || input.teamLeader || "").trim(),
+    reportedBy: String(resolvedReportedBy).trim(),
     rawPayload: input,
   };
 }
