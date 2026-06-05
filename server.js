@@ -20,7 +20,9 @@ const {
   saveEventRegistration,
   getEventRegistrations,
   saveCodeDemoHandshakeReport,
-  getCodeDemoHandshakeReports
+  getCodeDemoHandshakeReports,
+  saveCodeDemoException,
+  getCodeDemoExceptions
 } = require("./db");
 const { sendEmail } = require("./mailer");
 const QRCode = require("qrcode");
@@ -1390,6 +1392,30 @@ app.get("/codedemo/handshake/:eventCode", requireCodePerksAdmin, async (req, res
   } catch (error) {
     console.error("Get codeDemo handshake failed:", error.message);
     return res.status(500).json({ ok: false, error: "Failed to get handshake" });
+  }
+});
+
+app.get("/codedemo/exceptions/:eventCode", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    const status = String(req.query?.status || "").trim();
+    const limit = Number(req.query?.limit || 50);
+
+    const exceptions = await getCodeDemoExceptions({
+      eventCode,
+      status: status || undefined,
+      limit,
+    });
+
+    return res.json({
+      ok: true,
+      eventCode,
+      count: exceptions.length,
+      exceptions,
+    });
+  } catch (error) {
+    console.error("Get codeDemo exceptions failed:", error.message);
+    return res.status(500).json({ ok: false, error: "Failed to get codeDemo exceptions" });
   }
 });
 

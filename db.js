@@ -509,8 +509,118 @@ async function getCodeDemoHandshakeReports(filters = {}) {
   return result.rows;
 }
 
+async function ensureCodeDemoExceptionsTable() {
+  if (!pool) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS codedemo_exceptions (
+      id BIGSERIAL PRIMARY KEY,
+      event_code TEXT NOT NULL,
+      event_id TEXT,
+      parent_event_code TEXT,
+      activity_id TEXT,
+      severity TEXT NOT NULL,
+      category TEXT NOT NULL,
+      exception_type TEXT NOT NULL,
+      message TEXT,
+      status TEXT DEFAULT 'open',
+      details JSONB,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codedemo_exceptions_event_code_idx
+    ON codedemo_exceptions (event_code)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codedemo_exceptions_status_idx
+    ON codedemo_exceptions (status)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codedemo_exceptions_created_at_idx
+    ON codedemo_exceptions (created_at DESC)
+  `);
+}
+
+async function saveCodeDemoException(exception = {}) {
+  if (!pool || !exception.eventCode) return null;
+
+  await ensureCodeDemoExceptionsTable();
+
+  const result = await pool.query(
+    `
+      INSERT INTO codedemo_exceptions (
+        event_code,
+        event_id,
+        parent_event_code,
+        activity_id,
+        severity,
+        category,
+        exception_type,
+        message,
+        status,
+        details
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      RETURNING *
+    `,
+    [
+      exception.eventCode,
+      exception.eventId || '',
+      exception.parentEventCode || '',
+      exception.activityId || '',
+      exception.severity || 'yellow',
+      exception.category || 'system',
+      exception.type || exception.exceptionType || 'unknown_exception',
+      exception.message || '',
+      exception.status || 'open',
+      JSON.stringify(exception.details || {}),
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function getCodeDemoExceptions(filters = {}) {
+  if (!pool || !filters.eventCode) return [];
+
+  await ensureCodeDemoExceptionsTable();
+
+  const values = [filters.eventCode];
+  const where = ['event_code = $1'];
+
+  if (filters.status) {
+    values.push(filters.status);
+    where.push(`status = $${values.length}`);
+  }
+
+  const limit = Math.max(1, Math.min(Number(filters.limit || 50), 200));
+  values.push(limit);
+
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM codedemo_exceptions
+      WHERE ${where.join(' AND ')}
+      ORDER BY created_at DESC
+      LIMIT $${values.length}
+    `,
+    values
+  );
+
+  return result.rows || [];
+}
+
+
 
 module.exports = {
+  getCodeDemoExceptions,
+  saveCodeDemoException,
+  ensureCodeDemoExceptionsTable,
   getCodeDemoHandshakeReports,
   saveCodeDemoHandshakeReport,
   pool,
