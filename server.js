@@ -1395,6 +1395,72 @@ app.get("/codedemo/handshake/:eventCode", requireCodePerksAdmin, async (req, res
   }
 });
 
+app.post("/codedemo/handshake-missing/:eventCode", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    const { eventId, meta } = await resolveCodeDemoEvent(eventCode);
+
+    if (!meta || !meta.id) {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    const deadline = getCodeDemoHandshakeDeadline(meta, req.body || {});
+    const reports = await getCodeDemoHandshakeReports({ eventCode });
+
+    if (reports.length > 0) {
+      return res.json({
+        ok: true,
+        eventCode,
+        missing: false,
+        reports: reports.length,
+        deadlineAt: deadline.deadlineAt,
+        endAt: deadline.endAt,
+      });
+    }
+
+    if (!deadline.expired) {
+      return res.json({
+        ok: true,
+        eventCode,
+        missing: false,
+        reports: 0,
+        deadlineAt: deadline.deadlineAt,
+        endAt: deadline.endAt,
+        reason: "Handshake deadline has not passed",
+      });
+    }
+
+    const exception = await saveCodeDemoException({
+      eventCode,
+      eventId: eventId || meta.id || "",
+      parentEventCode: meta.parentEventCode || meta.parentCode || "",
+      activityId: meta.activityId || meta.dailyDemoCode || eventCode,
+      severity: "yellow",
+      category: "handshake",
+      type: "handshake_missing",
+      message: "Handshake has not been submitted after activity deadline",
+      details: {
+        deadlineAt: deadline.deadlineAt,
+        endAt: deadline.endAt,
+        activityDate: meta.demoDate || String(meta.startAt || "").slice(0, 10),
+        teamCode: meta.teamCode || "",
+        teamLabel: meta.teamLabel || "",
+        dailyDemoCode: meta.dailyDemoCode || "",
+      },
+    });
+
+    return res.json({
+      ok: true,
+      eventCode,
+      missing: true,
+      exception,
+    });
+  } catch (error) {
+    console.error("Check codeDemo handshake missing failed:", error.message);
+    return res.status(500).json({ ok: false, error: "Failed to check missing handshake" });
+  }
+});
+
 app.get("/codedemo/exceptions/:eventCode", requireCodePerksAdmin, async (req, res) => {
   try {
     const eventCode = String(req.params.eventCode || "").trim();
