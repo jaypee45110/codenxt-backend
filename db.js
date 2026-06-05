@@ -585,6 +585,26 @@ async function saveCodeDemoException(exception = {}) {
   return result.rows[0] || null;
 }
 
+async function getLatestCodeDemoExceptions(limit = 50) {
+  if (!pool) return [];
+
+  await ensureCodeDemoExceptionsTable();
+
+  const safeLimit = Math.max(1, Math.min(Number(limit || 50), 200));
+
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM codedemo_exceptions
+      ORDER BY created_at DESC
+      LIMIT $1
+    `,
+    [safeLimit]
+  );
+
+  return result.rows || [];
+}
+
 async function getCodeDemoExceptions(filters = {}) {
   if (!pool || !filters.eventCode) return [];
 
@@ -618,6 +638,7 @@ async function getCodeDemoExceptions(filters = {}) {
 
 
 module.exports = {
+  getLatestCodeDemoExceptions,
   getCodeDemoExceptions,
   saveCodeDemoException,
   ensureCodeDemoExceptionsTable,

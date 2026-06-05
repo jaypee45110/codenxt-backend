@@ -22,7 +22,8 @@ const {
   saveCodeDemoHandshakeReport,
   getCodeDemoHandshakeReports,
   saveCodeDemoException,
-  getCodeDemoExceptions
+  getCodeDemoExceptions,
+  getLatestCodeDemoExceptions
 } = require("./db");
 const { sendEmail } = require("./mailer");
 const QRCode = require("qrcode");
@@ -1485,6 +1486,27 @@ app.get("/codedemo/exceptions/:eventCode", requireCodePerksAdmin, async (req, re
   }
 });
 
+
+app.get("/codedemo/exceptions-latest", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const limit = Number(req.query?.limit || 50);
+
+    const exceptions = await getLatestCodeDemoExceptions(limit);
+
+    return res.json({
+      ok: true,
+      count: exceptions.length,
+      exceptions,
+    });
+  } catch (error) {
+    console.error("Get latest codeDemo exceptions failed:", error.message);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to get latest codeDemo exceptions",
+    });
+  }
+});
+
 app.get("/codedemo/handshake-report/:parentEventCode", requireCodePerksAdmin, async (req, res) => {
   try {
     const parentEventCode = String(req.params.parentEventCode || "").trim();
@@ -2893,6 +2915,64 @@ async function getCodePerksBenefitInventoryStatus(eventId, meta = {}) {
   };
 }
 
+async function logCodeDemoInventoryExceptions(eventId, meta = {}, inventoryStatus = {}) {
+  const eventCode = meta.code || meta.eventCode || "";
+  if (!eventCode) return;
+
+  const lowThreshold = 3;
+
+  const checks = [
+    {
+      tier: "gold",
+      total: Number(inventoryStatus.goldTotal || 0),
+      remaining: Number(inventoryStatus.goldRemaining || 0),
+    },
+    {
+      tier: "silver",
+      total: Number(inventoryStatus.silverTotal || 0),
+      remaining: Number(inventoryStatus.silverRemaining || 0),
+    },
+  ];
+
+  for (const item of checks) {
+    if (item.total <= 0) continue;
+
+    if (item.remaining <= 0) {
+      await saveCodeDemoException({
+        eventCode,
+        eventId,
+        severity: "red",
+        category: "inventory",
+        type: "inventory_empty",
+        message: `${item.tier} inventory is empty`,
+        details: {
+          tier: item.tier,
+          total: item.total,
+          remaining: item.remaining,
+        },
+      });
+      continue;
+    }
+
+    if (item.remaining <= lowThreshold) {
+      await saveCodeDemoException({
+        eventCode,
+        eventId,
+        severity: "yellow",
+        category: "inventory",
+        type: "inventory_low",
+        message: `${item.tier} inventory is low`,
+        details: {
+          tier: item.tier,
+          total: item.total,
+          remaining: item.remaining,
+          lowThreshold,
+        },
+      });
+    }
+  }
+}
+
 async function assignCodePerksBenefitTier(eventId, meta = {}) {
   let freshMeta = meta || {};
 
@@ -2928,6 +3008,7 @@ async function assignCodePerksBenefitTier(eventId, meta = {}) {
 
     if (goldAssigned <= inventory.goldTotal) {
       const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, freshMeta);
+      await logCodeDemoInventoryExceptions(eventId, freshMeta, inventoryStatus);
       return { tier: "gold", inventoryStatus };
     }
 
@@ -2939,6 +3020,7 @@ async function assignCodePerksBenefitTier(eventId, meta = {}) {
 
     if (silverAssigned <= inventory.silverTotal) {
       const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, freshMeta);
+      await logCodeDemoInventoryExceptions(eventId, freshMeta, inventoryStatus);
       return { tier: "silver", inventoryStatus };
     }
 
@@ -2947,6 +3029,7 @@ async function assignCodePerksBenefitTier(eventId, meta = {}) {
 
   await redis.incr(`event:${eventId}:benefit:standardAssigned`);
   const inventoryStatus = await getCodePerksBenefitInventoryStatus(eventId, freshMeta);
+  await logCodeDemoInventoryExceptions(eventId, freshMeta, inventoryStatus);
 
   return { tier: "standard", inventoryStatus };
 }
