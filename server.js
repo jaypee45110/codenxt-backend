@@ -3656,18 +3656,51 @@ app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
       }
 
       if (claim.redeemed) {
+        await saveCodeDemoException({
+          eventCode: claim.eventCode || "",
+          eventId: claim.eventId || "",
+          severity: "red",
+          category: "claim",
+          type: "already_redeemed",
+          message: "Claim has already been redeemed",
+          details: {
+            claimId: claim.claimId || "",
+            token,
+            redeemedAt: claim.redeemedAt || null,
+            redeemedBy: claim.redeemedBy || "",
+            attemptedBy: redeemedBy,
+          },
+        });
+
         return res.status(409).json({
           ok: false,
           alreadyRedeemed: true,
           redeemedAt: claim.redeemedAt || null,
+          validationStatus: "already_redeemed",
           error: "Already redeemed",
         });
       }
 
       if (isCodePerksClaimExpired(claim)) {
+        await saveCodeDemoException({
+          eventCode: claim.eventCode || "",
+          eventId: claim.eventId || "",
+          severity: "red",
+          category: "claim",
+          type: "expired_claim",
+          message: "Claim has expired",
+          details: {
+            claimId: claim.id || claim.claimId || "",
+            token,
+            attemptedBy: redeemedBy,
+            expiresAt: claim.expiresAt || claim.claimUntil || claim.validUntil || null,
+          },
+        });
+
         return res.status(410).json({
           ok: false,
           expired: true,
+          validationStatus: "expired_claim",
           error: "Redemption code expired",
         });
       }
@@ -3699,10 +3732,27 @@ app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
     }
 
     if (claim.redeemed) {
+      await saveCodeDemoException({
+        eventCode: claim.eventCode || "",
+        eventId: claim.eventId || "",
+        severity: "red",
+        category: "claim",
+        type: "already_redeemed",
+        message: "Claim has already been redeemed",
+        details: {
+          claimId: claim.claimId || "",
+          token,
+          redeemedAt: claim.redeemedAt || null,
+          redeemedBy: claim.redeemedBy || "",
+          attemptedBy: redeemedBy,
+        },
+      });
+
       return res.status(409).json({
         ok: false,
         alreadyRedeemed: true,
         redeemedAt: claim.redeemedAt || null,
+        validationStatus: "already_redeemed",
         error: "Already redeemed",
       });
     }
