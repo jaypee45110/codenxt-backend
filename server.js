@@ -1289,40 +1289,57 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
   const yellowExceptions = openExceptions.filter((item) => String(item.severity || "").toLowerCase() === "yellow");
   const conversionRate = uniqueScans > 0 ? Math.round((registrations / uniqueScans) * 1000) / 10 : 0;
 
+  let strengthType = "handshake_complete";
   let strength = "The team has submitted a complete Handshake report.";
   if (strongest && strongest.value >= 8) {
+    strengthType = `strong_${strongest.key}`;
     strength = `${strongest.label} is the strongest signal in this activity.`;
   } else if (handshakeScore >= 7.5) {
+    strengthType = "strong_overall_handshake";
     strength = "The activity shows a strong overall Handshake result.";
   } else if (registrations > 0 && conversionRate >= 30) {
+    strengthType = "healthy_registration_conversion";
     strength = "The activity converts a healthy share of scans into registrations.";
   }
 
+  let improvementType = "no_major_weakness";
   let improvement = "No major weakness stands out yet.";
   if (weakest && weakest.value > 0 && weakest.value <= 6) {
+    improvementType = `low_${weakest.key}`;
     improvement = `${weakest.label} is the lowest Handshake signal and should be improved.`;
   } else if (redExceptions.length > 0) {
+    improvementType = "red_exceptions";
     improvement = "Critical exceptions need attention before the next activity.";
   } else if (yellowExceptions.length > 0) {
+    improvementType = "yellow_exceptions";
     improvement = "There are warning-level exceptions that should be reviewed.";
   } else if (uniqueScans > 0 && conversionRate < 20) {
+    improvementType = "low_registration_conversion";
     improvement = "Registration conversion is low compared with scan activity.";
   }
 
+  let recommendationType = "repeat_strength";
   let recommendation = "Repeat the strongest parts of the activity and keep the team brief simple.";
   if (weakest?.key === "understanding") {
+    recommendationType = "clarify_product_explanation";
     recommendation = "Make the product explanation clearer in the first 30 seconds.";
   } else if (weakest?.key === "trust") {
+    recommendationType = "strengthen_trust_proof";
     recommendation = "Use stronger proof points, examples, or guarantees to build trust faster.";
   } else if (weakest?.key === "safety") {
+    recommendationType = "reduce_friction";
     recommendation = "Reduce friction and make the next step feel safe and easy.";
   } else if (weakest?.key === "insight") {
+    recommendationType = "ask_better_discovery_question";
     recommendation = "Ask one better discovery question before presenting the offer.";
   } else if (weakest?.key === "relevance") {
+    recommendationType = "sharpen_customer_problem";
     recommendation = "Open with a sharper customer problem before explaining the product.";
   } else if (redExceptions.length > 0) {
+    recommendationType = "resolve_red_exceptions";
     recommendation = "Resolve red exceptions first; they are likely to affect trust and reporting quality.";
   } else if (uniqueScans > 0 && conversionRate < 20) {
+    recommendationType = "improve_qr_call_to_action";
     recommendation = "Make the QR call-to-action more visible and explain the value of registering.";
   }
 
@@ -1336,6 +1353,9 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
     openExceptions: openExceptions.length,
     redExceptions: redExceptions.length,
     yellowExceptions: yellowExceptions.length,
+    strengthType,
+    improvementType,
+    recommendationType,
     strength,
     improvement,
     recommendation,
