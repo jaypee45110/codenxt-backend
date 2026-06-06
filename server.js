@@ -1264,6 +1264,21 @@ function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
   };
 }
 
+function formatCodeDemoHandshakeReport(row = {}) {
+  const handshakeScore = Number(row.handshake_score ?? row.handshakeScore ?? row.total_score ?? 0);
+
+  return {
+    ...row,
+    relevance: Number(row.relevance ?? 0),
+    understanding: Number(row.understanding ?? row.product_understanding ?? 0),
+    trust: Number(row.trust ?? 0),
+    safety: Number(row.safety ?? 0),
+    insight: Number(row.insight ?? 0),
+    handshakeScore,
+    totalScore: handshakeScore,
+  };
+}
+
 async function resolveCodeDemoEvent(eventCode) {
   let eventId = null;
   let meta = null;
@@ -1380,7 +1395,7 @@ app.get("/codedemo/handshake/:eventCode", requireCodePerksAdmin, async (req, res
       demoDate: demoDate || undefined,
     });
 
-    return res.json({ ok: true, eventCode, reports });
+    return res.json({ ok: true, eventCode, reports: reports.map(formatCodeDemoHandshakeReport) });
   } catch (error) {
     console.error("Get codeDemo handshake failed:", error.message);
     return res.status(500).json({ ok: false, error: "Failed to get handshake" });
@@ -1515,7 +1530,12 @@ app.get("/codedemo/handshake-report/:parentEventCode", requireCodePerksAdmin, as
       });
     }
 
-    return res.json({ ok: true, parentEventCode, date: demoDate || "", reports });
+    return res.json({
+      ok: true,
+      parentEventCode,
+      date: demoDate || "",
+      reports: reports.map(formatCodeDemoHandshakeReport),
+    });
   } catch (error) {
     console.error("Get codeDemo handshake report failed:", error.message);
     return res.status(500).json({ ok: false, error: "Failed to get handshake report" });
