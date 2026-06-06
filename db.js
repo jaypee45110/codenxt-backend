@@ -306,6 +306,53 @@ async function saveEventRegistration(registration = {}) {
   return result.rows[0] || null;
 }
 
+async function getEventScanSummary(eventCode) {
+  if (!pool || !eventCode) {
+    return { scans: 0, uniqueScans: 0 };
+  }
+
+  await ensureEventScansTable();
+
+  const result = await pool.query(
+    `
+      SELECT
+        COUNT(*)::INTEGER AS scans,
+        COUNT(DISTINCT NULLIF(scan_id, ''))::INTEGER AS unique_scans
+      FROM event_scans
+      WHERE event_code = $1
+    `,
+    [eventCode]
+  );
+
+  const row = result.rows[0] || {};
+  return {
+    scans: Number(row.scans || 0),
+    uniqueScans: Number(row.unique_scans || 0),
+  };
+}
+
+async function getEventRegistrationSummary(eventCode) {
+  if (!pool || !eventCode) {
+    return { registrations: 0 };
+  }
+
+  await ensureEventRegistrationsTable();
+
+  const result = await pool.query(
+    `
+      SELECT COUNT(*)::INTEGER AS registrations
+      FROM event_registrations
+      WHERE event_code = $1
+    `,
+    [eventCode]
+  );
+
+  const row = result.rows[0] || {};
+  return {
+    registrations: Number(row.registrations || 0),
+  };
+}
+
 async function getEventRegistrations(eventCode, limit = 50) {
   if (!pool || !eventCode) return [];
 
@@ -710,6 +757,8 @@ module.exports = {
   getCampaignByCode,
   ensureEventScansTable,
   saveEventScan,
+  getEventScanSummary,
+  getEventRegistrationSummary,
   ensureEventRegistrationsTable,
   saveEventRegistration,
   getEventRegistrations,
