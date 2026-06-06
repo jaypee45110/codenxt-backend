@@ -371,7 +371,8 @@ async function ensureCodeDemoHandshakesTable() {
       ADD COLUMN IF NOT EXISTS trust INTEGER,
       ADD COLUMN IF NOT EXISTS safety INTEGER,
       ADD COLUMN IF NOT EXISTS insight INTEGER,
-      ADD COLUMN IF NOT EXISTS handshake_score NUMERIC(4,1)
+      ADD COLUMN IF NOT EXISTS handshake_score NUMERIC(4,1),
+      ALTER COLUMN total_score TYPE NUMERIC(4,1) USING total_score::NUMERIC(4,1)
   `);
 
   await pool.query(`
