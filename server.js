@@ -3783,6 +3783,7 @@ app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
   try {
     const token = String(req.params.token || "").trim();
     const redeemedBy = String(req.body?.redeemedBy || "redemption-scan").trim();
+    const requestEventCode = String(req.body?.eventCode || req.query?.eventCode || "").trim();
 
     if (!token) {
       return res.status(400).json({
@@ -3798,8 +3799,23 @@ app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
       const claim = raw ? JSON.parse(raw) : null;
 
       if (!claim) {
+        if (requestEventCode) {
+          await saveCodeDemoException({
+            eventCode: requestEventCode,
+            severity: "red",
+            category: "claim",
+            type: "invalid_claim",
+            message: "Redemption code was not found",
+            details: {
+              token,
+              attemptedBy: redeemedBy,
+            },
+          });
+        }
+
         return res.status(404).json({
           ok: false,
+          validationStatus: "invalid_claim",
           error: "Redemption code not found",
         });
       }
