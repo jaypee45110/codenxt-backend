@@ -349,15 +349,29 @@ async function ensureCodeDemoHandshakesTable() {
       interest INTEGER,
       product_understanding INTEGER,
       relevance INTEGER,
+      understanding INTEGER,
+      trust INTEGER,
+      safety INTEGER,
+      insight INTEGER,
+      handshake_score NUMERIC(4,1),
       purchase_intent INTEGER,
       store_manager_score INTEGER,
-      total_score INTEGER,
+      total_score NUMERIC(4,1),
       reported_by TEXT,
       reported_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW(),
       raw_payload JSONB,
       UNIQUE (event_code, demo_date, team_code)
     )
+  `);
+
+  await pool.query(`
+    ALTER TABLE codedemo_handshakes
+      ADD COLUMN IF NOT EXISTS understanding INTEGER,
+      ADD COLUMN IF NOT EXISTS trust INTEGER,
+      ADD COLUMN IF NOT EXISTS safety INTEGER,
+      ADD COLUMN IF NOT EXISTS insight INTEGER,
+      ADD COLUMN IF NOT EXISTS handshake_score NUMERIC(4,1)
   `);
 
   await pool.query(`
@@ -376,26 +390,26 @@ async function saveCodeDemoHandshakeReport(report = {}) {
 
   await ensureCodeDemoHandshakesTable();
 
-  const scanScore = Number(report.scanScore ?? 10);
-  const nextStepScore = Number(report.nextStepScore ?? 10);
-  const interest = Number(report.interest ?? 0);
-  const productUnderstanding = Number(report.productUnderstanding ?? 0);
   const relevance = Number(report.relevance ?? 0);
-  const purchaseIntent = Number(report.purchaseIntent ?? 0);
-  const storeManagerScore = Number(report.storeManagerScore ?? 0);
-
-  const totalScore = Number(
+  const understanding = Number(report.understanding ?? 0);
+  const trust = Number(report.trust ?? 0);
+  const safety = Number(report.safety ?? 0);
+  const insight = Number(report.insight ?? 0);
+  const handshakeScore = Number(
+    report.handshakeScore ??
     report.totalScore ??
     (
-      scanScore +
-      nextStepScore +
-      interest +
-      productUnderstanding +
-      relevance +
-      purchaseIntent +
-      storeManagerScore
+      Math.round(((relevance + understanding + trust + safety + insight) / 5) * 10) / 10
     )
   );
+
+  const scanScore = Number(report.scanScore ?? 0);
+  const nextStepScore = Number(report.nextStepScore ?? 0);
+  const interest = Number(report.interest ?? 0);
+  const productUnderstanding = Number(report.productUnderstanding ?? understanding);
+  const purchaseIntent = Number(report.purchaseIntent ?? 0);
+  const storeManagerScore = Number(report.storeManagerScore ?? 0);
+  const totalScore = handshakeScore;
 
   const result = await pool.query(
     `
@@ -416,6 +430,11 @@ async function saveCodeDemoHandshakeReport(report = {}) {
         interest,
         product_understanding,
         relevance,
+        understanding,
+        trust,
+        safety,
+        insight,
+        handshake_score,
         purchase_intent,
         store_manager_score,
         total_score,
@@ -423,7 +442,7 @@ async function saveCodeDemoHandshakeReport(report = {}) {
         raw_payload,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,NOW())
       ON CONFLICT (event_code, demo_date, team_code)
       DO UPDATE SET
         event_id = EXCLUDED.event_id,
@@ -439,6 +458,11 @@ async function saveCodeDemoHandshakeReport(report = {}) {
         interest = EXCLUDED.interest,
         product_understanding = EXCLUDED.product_understanding,
         relevance = EXCLUDED.relevance,
+        understanding = EXCLUDED.understanding,
+        trust = EXCLUDED.trust,
+        safety = EXCLUDED.safety,
+        insight = EXCLUDED.insight,
+        handshake_score = EXCLUDED.handshake_score,
         purchase_intent = EXCLUDED.purchase_intent,
         store_manager_score = EXCLUDED.store_manager_score,
         total_score = EXCLUDED.total_score,
@@ -464,6 +488,11 @@ async function saveCodeDemoHandshakeReport(report = {}) {
       interest,
       productUnderstanding,
       relevance,
+      understanding,
+      trust,
+      safety,
+      insight,
+      handshakeScore,
       purchaseIntent,
       storeManagerScore,
       totalScore,

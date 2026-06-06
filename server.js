@@ -1201,22 +1201,14 @@ function getCodeDemoHandshakeDeadline(meta = {}, input = {}) {
 }
 
 function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
-  const scanScore = normalizeCodeDemoScore(input.scanScore, 10);
-  const nextStepScore = normalizeCodeDemoScore(input.nextStepScore, 10);
-  const interest = normalizeCodeDemoScore(input.interest, 0);
-  const productUnderstanding = normalizeCodeDemoScore(input.productUnderstanding, 0);
-  const relevance = normalizeCodeDemoScore(input.relevance, 0);
-  const purchaseIntent = normalizeCodeDemoScore(input.purchaseIntent, 0);
-  const storeManagerScore = normalizeCodeDemoScore(input.storeManagerScore, 0);
+  const relevance = normalizeCodeDemoScore(input.relevance ?? input.relevans, 0);
+  const understanding = normalizeCodeDemoScore(input.understanding ?? input.forstaelse ?? input.productUnderstanding, 0);
+  const trust = normalizeCodeDemoScore(input.trust ?? input.tillit, 0);
+  const safety = normalizeCodeDemoScore(input.safety ?? input.trygghet, 0);
+  const insight = normalizeCodeDemoScore(input.insight ?? input.innsikt, 0);
 
-  const totalScore =
-    scanScore +
-    nextStepScore +
-    interest +
-    productUnderstanding +
-    relevance +
-    purchaseIntent +
-    storeManagerScore;
+  const handshakeScore =
+    Math.round(((relevance + understanding + trust + safety + insight) / 5) * 10) / 10;
 
   const firstDemoLocation = Array.isArray(meta.demoLocations) ? meta.demoLocations[0] || {} : {};
   const demoLocation = input.demoLocation || meta.demoLocation || firstDemoLocation || {};
@@ -1260,14 +1252,13 @@ function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
       meta.city ||
       ""
     ).trim(),
-    scanScore,
-    nextStepScore,
-    interest,
-    productUnderstanding,
     relevance,
-    purchaseIntent,
-    storeManagerScore,
-    totalScore,
+    understanding,
+    trust,
+    safety,
+    insight,
+    handshakeScore,
+    totalScore: handshakeScore,
     reportedBy: String(resolvedReportedBy).trim(),
     rawPayload: input,
   };
