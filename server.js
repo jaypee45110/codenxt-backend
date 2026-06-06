@@ -19,6 +19,8 @@ const {
   saveEventScan,
   saveEventRegistration,
   getEventRegistrations,
+  getEventScanSummary,
+  getEventRegistrationSummary,
   saveCodeDemoHandshakeReport,
   getCodeDemoHandshakeReports,
   saveCodeDemoException,
@@ -1264,6 +1266,82 @@ function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
   };
 }
 
+function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uniqueScans = 0, registrations = 0 } = {}) {
+  const criteria = [
+    { key: "relevance", label: "Relevance", value: Number(handshake.relevance || 0) },
+    { key: "understanding", label: "Understanding", value: Number(handshake.understanding || 0) },
+    { key: "trust", label: "Trust", value: Number(handshake.trust || 0) },
+    { key: "safety", label: "Safety", value: Number(handshake.safety || 0) },
+    { key: "insight", label: "Insight", value: Number(handshake.insight || 0) },
+  ];
+
+  const scoredCriteria = criteria.filter((item) => item.value > 0);
+  const strongest = scoredCriteria.length
+    ? scoredCriteria.reduce((best, item) => item.value > best.value ? item : best, scoredCriteria[0])
+    : null;
+  const weakest = scoredCriteria.length
+    ? scoredCriteria.reduce((worst, item) => item.value < worst.value ? item : worst, scoredCriteria[0])
+    : null;
+
+  const handshakeScore = Number(handshake.handshakeScore ?? handshake.handshake_score ?? handshake.totalScore ?? 0);
+  const openExceptions = exceptions.filter((item) => String(item.status || "open").toLowerCase() === "open");
+  const redExceptions = openExceptions.filter((item) => String(item.severity || "").toLowerCase() === "red");
+  const yellowExceptions = openExceptions.filter((item) => String(item.severity || "").toLowerCase() === "yellow");
+  const conversionRate = uniqueScans > 0 ? Math.round((registrations / uniqueScans) * 1000) / 10 : 0;
+
+  let strength = "The team has submitted a complete Handshake report.";
+  if (strongest && strongest.value >= 8) {
+    strength = `${strongest.label} is the strongest signal in this activity.`;
+  } else if (handshakeScore >= 7.5) {
+    strength = "The activity shows a strong overall Handshake result.";
+  } else if (registrations > 0 && conversionRate >= 30) {
+    strength = "The activity converts a healthy share of scans into registrations.";
+  }
+
+  let improvement = "No major weakness stands out yet.";
+  if (weakest && weakest.value > 0 && weakest.value <= 6) {
+    improvement = `${weakest.label} is the lowest Handshake signal and should be improved.`;
+  } else if (redExceptions.length > 0) {
+    improvement = "Critical exceptions need attention before the next activity.";
+  } else if (yellowExceptions.length > 0) {
+    improvement = "There are warning-level exceptions that should be reviewed.";
+  } else if (uniqueScans > 0 && conversionRate < 20) {
+    improvement = "Registration conversion is low compared with scan activity.";
+  }
+
+  let recommendation = "Repeat the strongest parts of the activity and keep the team brief simple.";
+  if (weakest?.key === "understanding") {
+    recommendation = "Make the product explanation clearer in the first 30 seconds.";
+  } else if (weakest?.key === "trust") {
+    recommendation = "Use stronger proof points, examples, or guarantees to build trust faster.";
+  } else if (weakest?.key === "safety") {
+    recommendation = "Reduce friction and make the next step feel safe and easy.";
+  } else if (weakest?.key === "insight") {
+    recommendation = "Ask one better discovery question before presenting the offer.";
+  } else if (weakest?.key === "relevance") {
+    recommendation = "Open with a sharper customer problem before explaining the product.";
+  } else if (redExceptions.length > 0) {
+    recommendation = "Resolve red exceptions first; they are likely to affect trust and reporting quality.";
+  } else if (uniqueScans > 0 && conversionRate < 20) {
+    recommendation = "Make the QR call-to-action more visible and explain the value of registering.";
+  }
+
+  return {
+    model: "codedemo-ai-coach-v1-rule-based",
+    handshakeScore,
+    scans,
+    uniqueScans,
+    registrations,
+    conversionRate,
+    openExceptions: openExceptions.length,
+    redExceptions: redExceptions.length,
+    yellowExceptions: yellowExceptions.length,
+    strength,
+    improvement,
+    recommendation,
+  };
+}
+
 function formatCodeDemoHandshakeReport(row = {}) {
   const handshakeScore = Number(row.handshake_score ?? row.handshakeScore ?? row.total_score ?? 0);
 
@@ -1510,6 +1588,52 @@ app.get("/codedemo/exceptions-latest", requireCodePerksAdmin, async (req, res) =
       ok: false,
       error: "Failed to get latest codeDemo exceptions",
     });
+  }
+});
+
+app.get("/codedemo/coach/:eventCode", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    const demoDate = String(req.query?.date || "").trim();
+
+    const reports = await getCodeDemoHandshakeReports({
+      eventCode,
+      demoDate: demoDate || undefined,
+    });
+
+    const formattedReports = reports.map(formatCodeDemoHandshakeReport);
+    const latestHandshake = formattedReports[0] || {};
+
+    const exceptions = await getCodeDemoExceptions({
+      eventCode,
+      status: "open",
+      limit: 50,
+    });
+
+    const scanSummary = await getEventScanSummary(eventCode);
+    const registrationSummary = await getEventRegistrationSummary(eventCode);
+
+    const coach = generateCodeDemoCoach({
+      handshake: latestHandshake,
+      exceptions,
+      scans: scanSummary.scans,
+      uniqueScans: scanSummary.uniqueScans,
+      registrations: registrationSummary.registrations,
+    });
+
+    return res.json({
+      ok: true,
+      eventCode,
+      date: demoDate || "",
+      coach,
+      handshake: latestHandshake,
+      exceptions,
+      scans: scanSummary,
+      registrations: registrationSummary,
+    });
+  } catch (error) {
+    console.error("Get codeDemo AI Coach failed:", error.message);
+    return res.status(500).json({ ok: false, error: "Failed to get AI Coach" });
   }
 });
 
