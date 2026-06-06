@@ -551,6 +551,35 @@ async function saveCodeDemoException(exception = {}) {
 
   await ensureCodeDemoExceptionsTable();
 
+  const details = exception.details || {};
+  const dedupeTier = details.tier ? String(details.tier) : "";
+
+  const existing = await pool.query(
+    `
+      SELECT *
+      FROM codedemo_exceptions
+      WHERE event_code = $1
+        AND category = $2
+        AND exception_type = $3
+        AND status = $4
+        AND COALESCE(details->>'tier', '') = $5
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [
+      exception.eventCode,
+      exception.category || 'system',
+      exception.type || exception.exceptionType || 'unknown_exception',
+      exception.status || 'open',
+      dedupeTier,
+    ]
+  );
+
+  if (existing.rows[0]) {
+    // existing_exception_tier_dedupe
+    return existing.rows[0];
+  }
+
   const result = await pool.query(
     `
       INSERT INTO codedemo_exceptions (
@@ -578,7 +607,7 @@ async function saveCodeDemoException(exception = {}) {
       exception.type || exception.exceptionType || 'unknown_exception',
       exception.message || '',
       exception.status || 'open',
-      JSON.stringify(exception.details || {}),
+      JSON.stringify(details),
     ]
   );
 
