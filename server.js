@@ -1431,6 +1431,61 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
   };
 }
 
+async function checkCodeDemoAnalyticsExceptions({ eventCode, scanSummary = {}, registrationSummary = {} } = {}) {
+  const uniqueScans = Number(scanSummary.uniqueScans || 0);
+  const registrations = Number(registrationSummary.registrations || 0);
+  const conversionRate = uniqueScans > 0 ? Math.round((registrations / uniqueScans) * 1000) / 10 : 0;
+
+  if (!eventCode) return null;
+
+  if (registrations > uniqueScans && registrations > 0) {
+    return saveCodeDemoException({
+      eventCode,
+      severity: "red",
+      category: "analytics",
+      type: "scan_registration_mismatch",
+      message: "Registrations exceed unique scans",
+      details: {
+        uniqueScans,
+        registrations,
+        conversionRate,
+      },
+    });
+  }
+
+  if (uniqueScans >= 50 && conversionRate < 5) {
+    return saveCodeDemoException({
+      eventCode,
+      severity: "yellow",
+      category: "analytics",
+      type: "low_registration_conversion",
+      message: "High scan activity has very low registration conversion",
+      details: {
+        uniqueScans,
+        registrations,
+        conversionRate,
+      },
+    });
+  }
+
+  if (registrations >= 25 && uniqueScans <= 5) {
+    return saveCodeDemoException({
+      eventCode,
+      severity: "yellow",
+      category: "analytics",
+      type: "registration_spike",
+      message: "Registration activity is unusually high compared with scan activity",
+      details: {
+        uniqueScans,
+        registrations,
+        conversionRate,
+      },
+    });
+  }
+
+  return null;
+}
+
 function formatCodeDemoHandshakeReport(row = {}) {
   const handshakeScore = Number(row.handshake_score ?? row.handshakeScore ?? row.total_score ?? 0);
 
@@ -1758,9 +1813,21 @@ app.get("/codedemo/coach/:eventCode", requireCodePerksAdmin, async (req, res) =>
     const scanSummary = await getEventScanSummary(eventCode);
     const registrationSummary = await getEventRegistrationSummary(eventCode);
 
+    await checkCodeDemoAnalyticsExceptions({
+      eventCode,
+      scanSummary,
+      registrationSummary,
+    });
+
+    const refreshedExceptions = await getCodeDemoExceptions({
+      eventCode,
+      status: "open",
+      limit: 50,
+    });
+
     const coach = generateCodeDemoCoach({
       handshake: latestHandshake,
-      exceptions,
+      exceptions: refreshedExceptions,
       scans: scanSummary.scans,
       uniqueScans: scanSummary.uniqueScans,
       registrations: registrationSummary.registrations,
@@ -1772,7 +1839,7 @@ app.get("/codedemo/coach/:eventCode", requireCodePerksAdmin, async (req, res) =>
       date: demoDate || "",
       coach,
       handshake: latestHandshake,
-      exceptions,
+      exceptions: refreshedExceptions,
       scans: scanSummary,
       registrations: registrationSummary,
     });
