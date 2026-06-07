@@ -1403,14 +1403,22 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
 
   let correlationInsight = "";
 
-  if (weakest?.key === "trust" && (topExceptionCategory === "technical" || topExceptionType === "invalid_claim")) {
-    correlationInsight = "Trust may have been affected by technical or validation issues during the activity.";
+  if (topExceptionType === "scan_registration_mismatch") {
+    correlationInsight = "Registrations exceed unique scans, so reporting quality and registration integrity should be reviewed.";
+  } else if (topExceptionType === "low_registration_conversion") {
+    correlationInsight = "High scan activity did not translate into registrations, which may indicate weak call-to-action or registration friction.";
+  } else if (topExceptionType === "registration_spike") {
+    correlationInsight = "Registration activity is unusually high compared with scan activity, so data quality and registration sources should be reviewed.";
+  } else if (topExceptionType === "handshake_missing") {
+    correlationInsight = "The activity is missing Handshake data, so the coaching basis is incomplete.";
+  } else if (topExceptionType === "invalid_claim") {
+    correlationInsight = "Invalid claim attempts may indicate unclear redemption instructions, wrong QR use, or validation friction.";
+  } else if (weakest?.key === "trust" && topExceptionCategory === "technical") {
+    correlationInsight = "Trust may have been affected by technical issues during the activity.";
   } else if (weakest?.key === "relevance" && topExceptionCategory === "location") {
     correlationInsight = "Location issues may have reduced perceived relevance.";
   } else if (weakest?.key === "understanding" && topExceptionCategory === "staffing") {
     correlationInsight = "Staffing issues may have affected product explanation quality.";
-  } else if (topExceptionType === "handshake_missing") {
-    correlationInsight = "The activity is missing Handshake data, so the coaching basis is incomplete.";
   } else if (redExceptions.length > 0) {
     correlationInsight = "Critical exceptions may have affected execution quality and reporting confidence.";
   }
