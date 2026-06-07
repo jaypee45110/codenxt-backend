@@ -1287,6 +1287,25 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
   const openExceptions = exceptions.filter((item) => String(item.status || "open").toLowerCase() === "open");
   const redExceptions = openExceptions.filter((item) => String(item.severity || "").toLowerCase() === "red");
   const yellowExceptions = openExceptions.filter((item) => String(item.severity || "").toLowerCase() === "yellow");
+  const infoExceptions = openExceptions.filter((item) => String(item.severity || "").toLowerCase() === "info");
+
+  const exceptionTypes = {};
+  const exceptionCategories = {};
+
+  for (const exception of openExceptions) {
+    const type = String(exception.exception_type || exception.type || exception.exceptionType || "unknown_exception").trim();
+    const category = String(exception.category || "system").trim();
+
+    exceptionTypes[type] = (exceptionTypes[type] || 0) + 1;
+    exceptionCategories[category] = (exceptionCategories[category] || 0) + 1;
+  }
+
+  const topExceptionType =
+    Object.entries(exceptionTypes).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+
+  const topExceptionCategory =
+    Object.entries(exceptionCategories).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+
   const conversionRate = uniqueScans > 0 ? Math.round((registrations / uniqueScans) * 1000) / 10 : 0;
 
   let strengthType = "handshake_complete";
