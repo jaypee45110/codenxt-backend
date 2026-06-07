@@ -1566,6 +1566,62 @@ app.post("/codedemo/handshake-missing/:eventCode", requireCodePerksAdmin, async 
   }
 });
 
+app.post("/codedemo/exception/:eventCode", async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    const body = req.body || {};
+
+    if (!eventCode) {
+      return res.status(400).json({ ok: false, error: "Missing event code" });
+    }
+
+    const category = String(body.category || "other").trim().slice(0, 80);
+    const type = String(body.type || body.exceptionType || "manual_exception").trim().slice(0, 100);
+    const severityInput = String(body.severity || "yellow").trim().toLowerCase();
+    const severity = ["red", "yellow", "info"].includes(severityInput) ? severityInput : "yellow";
+    const message = String(body.message || body.description || "").trim().slice(0, 1000);
+
+    if (!message) {
+      return res.status(400).json({ ok: false, error: "Missing exception description" });
+    }
+
+    const { eventId, meta } = await resolveCodeDemoEvent(eventCode);
+
+    if (!meta || !meta.id) {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    const exception = await saveCodeDemoException({
+      eventCode,
+      eventId: eventId || meta?.id || "",
+      parentEventCode: meta?.parentEventCode || meta?.parentCode || body.parentEventCode || "",
+      activityId: body.activityId || meta?.activityId || meta?.dailyDemoCode || eventCode,
+      severity,
+      category,
+      type,
+      message,
+      details: {
+        source: "team_leader",
+        reportedBy: String(body.reportedBy || body.teamLeaderName || "").trim().slice(0, 160),
+        teamCode: String(body.teamCode || meta?.teamCode || "").trim().slice(0, 80),
+        teamLabel: String(body.teamLabel || meta?.teamLabel || "").trim().slice(0, 120),
+        locationName: String(body.locationName || meta?.locationName || meta?.demoLocation?.name || "").trim().slice(0, 180),
+        activityDate: String(body.activityDate || meta?.demoDate || "").trim().slice(0, 40),
+        note: message,
+      },
+    });
+
+    return res.json({
+      ok: true,
+      eventCode,
+      exception,
+    });
+  } catch (error) {
+    console.error("Create codeDemo team exception failed:", error.message);
+    return res.status(500).json({ ok: false, error: "Failed to create exception" });
+  }
+});
+
 app.get("/codedemo/exceptions/:eventCode", requireCodePerksAdmin, async (req, res) => {
   try {
     const eventCode = String(req.params.eventCode || "").trim();
