@@ -1339,7 +1339,34 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
 
   let recommendationType = "repeat_strength";
   let recommendation = "Repeat the strongest parts of the activity and keep the team brief simple.";
-  if (weakest?.key === "understanding") {
+  if (topExceptionType === "inventory_empty") {
+    recommendationType = "restore_bonus_inventory";
+    recommendation = "Bonus inventory is empty. Refill or adjust available rewards before the next activity.";
+  } else if (topExceptionType === "inventory_low") {
+    recommendationType = "monitor_bonus_inventory";
+    recommendation = "Bonus inventory is low. Check remaining rewards before the next activity starts.";
+  } else if (topExceptionType === "handshake_missing") {
+    recommendationType = "enforce_handshake_completion";
+    recommendation = "The activity is missing a Handshake report. Close every activity with Handshake before reporting.";
+  } else if (topExceptionType === "invalid_claim") {
+    recommendationType = "check_claim_validation_flow";
+    recommendation = "Invalid claim attempts were registered. Check QR instructions and redemption validation flow.";
+  } else if (topExceptionType === "already_redeemed") {
+    recommendationType = "prevent_duplicate_redemption";
+    recommendation = "Duplicate redemption attempts were registered. Keep scanner validation strict at handout.";
+  } else if (topExceptionType === "expired_claim") {
+    recommendationType = "clarify_claim_deadline";
+    recommendation = "Expired claims were attempted. Make the claim deadline clearer during the activity.";
+  } else if (topExceptionCategory === "technical") {
+    recommendationType = "stabilize_technical_setup";
+    recommendation = "Technical exceptions were registered. Verify network, QR access, and device readiness before the next activity.";
+  } else if (topExceptionCategory === "staffing") {
+    recommendationType = "improve_staff_coverage";
+    recommendation = "Staffing exceptions were registered. Review team coverage and roles before the next activity.";
+  } else if (topExceptionCategory === "location") {
+    recommendationType = "improve_location_readiness";
+    recommendation = "Location exceptions were registered. Confirm placement, access, and local setup before the next activity.";
+  } else if (weakest?.key === "understanding") {
     recommendationType = "clarify_product_explanation";
     recommendation = "Make the product explanation clearer in the first 30 seconds.";
   } else if (weakest?.key === "trust") {
@@ -1362,8 +1389,22 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
     recommendation = "Make the QR call-to-action more visible and explain the value of registering.";
   }
 
+  let correlationInsight = "";
+
+  if (weakest?.key === "trust" && (topExceptionCategory === "technical" || topExceptionType === "invalid_claim")) {
+    correlationInsight = "Trust may have been affected by technical or validation issues during the activity.";
+  } else if (weakest?.key === "relevance" && topExceptionCategory === "location") {
+    correlationInsight = "Location issues may have reduced perceived relevance.";
+  } else if (weakest?.key === "understanding" && topExceptionCategory === "staffing") {
+    correlationInsight = "Staffing issues may have affected product explanation quality.";
+  } else if (topExceptionType === "handshake_missing") {
+    correlationInsight = "The activity is missing Handshake data, so the coaching basis is incomplete.";
+  } else if (redExceptions.length > 0) {
+    correlationInsight = "Critical exceptions may have affected execution quality and reporting confidence.";
+  }
+
   return {
-    model: "codedemo-ai-coach-v1-rule-based",
+    model: "codedemo-ai-coach-v2-rule-based",
     handshakeScore,
     scans,
     uniqueScans,
@@ -1372,6 +1413,12 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
     openExceptions: openExceptions.length,
     redExceptions: redExceptions.length,
     yellowExceptions: yellowExceptions.length,
+    infoExceptions: infoExceptions.length,
+    exceptionTypes,
+    exceptionCategories,
+    topExceptionType,
+    topExceptionCategory,
+    correlationInsight,
     strengthType,
     improvementType,
     recommendationType,
