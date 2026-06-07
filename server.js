@@ -1342,7 +1342,16 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
 
   let recommendationType = "repeat_strength";
   let recommendation = "Repeat the strongest parts of the activity and keep the team brief simple.";
-  if (topExceptionType === "inventory_empty") {
+  if (topExceptionType === "scan_registration_mismatch") {
+    recommendationType = "review_registration_integrity";
+    recommendation = "Registrations exceed unique scans. Review registration integrity, duplicate protection, and scan tracking.";
+  } else if (topExceptionType === "low_registration_conversion") {
+    recommendationType = "improve_scan_to_registration_conversion";
+    recommendation = "High scan activity produced very few registrations. Review QR placement, call-to-action, and registration friction.";
+  } else if (topExceptionType === "registration_spike") {
+    recommendationType = "review_registration_spike";
+    recommendation = "Registration activity is unusually high compared with scan activity. Review data quality and registration sources.";
+  } else if (topExceptionType === "inventory_empty") {
     recommendationType = "restore_bonus_inventory";
     recommendation = "Bonus inventory is empty. Refill or adjust available rewards before the next activity.";
   } else if (topExceptionType === "inventory_low") {
