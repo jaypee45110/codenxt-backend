@@ -1310,7 +1310,10 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
 
   let strengthType = "handshake_complete";
   let strength = "The team has submitted a complete Handshake report.";
-  if (strongest && strongest.value >= 8) {
+  if (exceptionTypes.handshake_missing > 0) {
+    strengthType = "handshake_missing";
+    strength = "The activity is currently missing a completed Handshake report.";
+  } else if (strongest && strongest.value >= 8) {
     strengthType = `strong_${strongest.key}`;
     strength = `${strongest.label} is the strongest signal in this activity.`;
   } else if (handshakeScore >= 7.5) {
