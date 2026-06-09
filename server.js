@@ -1807,6 +1807,73 @@ app.patch("/codedemo/exceptions/:id/status", requireCodePerksAdmin, async (req, 
 });
 
 
+app.get("/codedemo/team-exceptions/:eventCode", async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    const status = String(req.query?.status || "open").trim().toLowerCase();
+    const limit = Number(req.query?.limit || 50);
+
+    if (!eventCode) {
+      return res.status(400).json({ ok: false, error: "Missing event code" });
+    }
+
+    const safeStatus = status === "open" ? "open" : "open";
+
+    const exceptions = await getCodeDemoExceptions({
+      eventCode,
+      status: safeStatus,
+      limit,
+    });
+
+    return res.json({
+      ok: true,
+      eventCode,
+      count: exceptions.length,
+      exceptions,
+    });
+  } catch (error) {
+    console.error("Get codeDemo team exceptions failed:", error.message);
+    return res.status(500).json({ ok: false, error: "Failed to get team exceptions" });
+  }
+});
+
+
+app.patch("/codedemo/team-exceptions/:id/status", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const body = req.body || {};
+    const status = String(body.status || "").trim().toLowerCase();
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ ok: false, error: "Invalid exception id" });
+    }
+
+    if (!["resolved", "unresolved"].includes(status)) {
+      return res.status(400).json({ ok: false, error: "Invalid team exception status" });
+    }
+
+    const exception = await updateCodeDemoExceptionStatus({
+      id,
+      status,
+      note: body.note || body.message || "",
+      updatedBy: body.updatedBy || body.teamLabel || "team_leader",
+    });
+
+    if (!exception) {
+      return res.status(404).json({ ok: false, error: "Exception not found" });
+    }
+
+    return res.json({
+      ok: true,
+      exception,
+    });
+  } catch (error) {
+    console.error("Update codeDemo team exception status failed:", error.message);
+    return res.status(500).json({ ok: false, error: "Failed to update team exception status" });
+  }
+});
+
+
 app.get("/codedemo/exceptions/:eventCode", requireCodePerksAdmin, async (req, res) => {
   try {
     const eventCode = String(req.params.eventCode || "").trim();
