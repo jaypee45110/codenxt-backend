@@ -456,7 +456,9 @@ const {
   demoLocations,
   locationMode,
   tourCsvImportReady,
-  tourGeoReady
+  tourGeoReady,
+  campaignFocus,
+  campaignRiskProfile
 } = req.body;
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
@@ -504,6 +506,10 @@ maxClaims,
   demoLocations: Array.isArray(demoLocations) ? demoLocations : [],
   tourCsvImportReady: !!tourCsvImportReady,
   tourGeoReady: !!tourGeoReady,
+  campaignFocus: Array.isArray(campaignFocus) ? campaignFocus : [],
+  campaignRiskProfile: campaignRiskProfile && typeof campaignRiskProfile === "object"
+    ? campaignRiskProfile
+    : {},
 };
     const dailyDemoEvents = buildCodeDemoDailyDemoEvents(event, req.body);
     event.dailyDemoEvents = dailyDemoEvents;
