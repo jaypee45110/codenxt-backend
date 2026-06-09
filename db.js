@@ -764,7 +764,16 @@ async function updateCodeDemoExceptionStatus({ id, status, note = "", updatedBy 
         details = COALESCE(details, '{}'::jsonb) || jsonb_build_object(
           'lastStatusNote', $3::text,
           'lastStatusUpdatedBy', $4::text,
-          'lastStatusUpdatedAt', NOW()
+          'lastStatusUpdatedAt', NOW(),
+          'timeline',
+          COALESCE(details->'timeline', '[]'::jsonb) || jsonb_build_array(
+            jsonb_build_object(
+              'status', $2::text,
+              'updatedBy', $4::text,
+              'note', $3::text,
+              'updatedAt', NOW()
+            )
+          )
         )
       WHERE id = $1
       RETURNING *
