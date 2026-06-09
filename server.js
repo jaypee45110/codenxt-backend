@@ -24,6 +24,7 @@ const {
   saveCodeDemoHandshakeReport,
   getCodeDemoHandshakeReports,
   saveCodeDemoException,
+  updateCodeDemoExceptionStatus,
   getCodeDemoExceptions,
   getLatestCodeDemoExceptions
 } = require("./db");
@@ -1768,6 +1769,43 @@ app.post("/codedemo/exception/:eventCode", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Failed to create exception" });
   }
 });
+
+
+app.patch("/codedemo/exceptions/:id/status", requireCodePerksAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const body = req.body || {};
+    const status = String(body.status || "").trim().toLowerCase();
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ ok: false, error: "Invalid exception id" });
+    }
+
+    const exception = await updateCodeDemoExceptionStatus({
+      id,
+      status,
+      note: body.note || body.message || "",
+      updatedBy: body.updatedBy || body.owner || "",
+    });
+
+    if (!exception) {
+      return res.status(404).json({ ok: false, error: "Exception not found" });
+    }
+
+    return res.json({
+      ok: true,
+      exception,
+    });
+  } catch (error) {
+    console.error("Update codeDemo exception status failed:", error.message);
+    const statusCode = error.message === "Invalid exception status" ? 400 : 500;
+    return res.status(statusCode).json({
+      ok: false,
+      error: error.message === "Invalid exception status" ? error.message : "Failed to update exception status",
+    });
+  }
+});
+
 
 app.get("/codedemo/exceptions/:eventCode", requireCodePerksAdmin, async (req, res) => {
   try {

@@ -743,10 +743,49 @@ async function getCodeDemoExceptions(filters = {}) {
 
 
 
+async function updateCodeDemoExceptionStatus({ id, status, note = "", updatedBy = "" } = {}) {
+  if (!pool || !id) return null;
+
+  await ensureCodeDemoExceptionsTable();
+
+  const allowedStatuses = new Set(["open", "in_progress", "resolved", "unresolved"]);
+  const safeStatus = String(status || "").trim().toLowerCase();
+
+  if (!allowedStatuses.has(safeStatus)) {
+    throw new Error("Invalid exception status");
+  }
+
+  const result = await pool.query(
+    `
+      UPDATE codedemo_exceptions
+      SET
+        status = $2,
+        resolved_at = CASE WHEN $2 = 'resolved' THEN NOW() ELSE resolved_at END,
+        details = COALESCE(details, '{}'::jsonb) || jsonb_build_object(
+          'lastStatusNote', $3::text,
+          'lastStatusUpdatedBy', $4::text,
+          'lastStatusUpdatedAt', NOW()
+        )
+      WHERE id = $1
+      RETURNING *
+    `,
+    [
+      id,
+      safeStatus,
+      String(note || "").trim().slice(0, 1000),
+      String(updatedBy || "").trim().slice(0, 160),
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
+
 module.exports = {
   getLatestCodeDemoExceptions,
   getCodeDemoExceptions,
   saveCodeDemoException,
+  updateCodeDemoExceptionStatus,
   ensureCodeDemoExceptionsTable,
   getCodeDemoHandshakeReports,
   saveCodeDemoHandshakeReport,
