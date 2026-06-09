@@ -1825,11 +1825,26 @@ app.get("/codedemo/team-exceptions/:eventCode", async (req, res) => {
       limit,
     });
 
+    const teamExceptions = exceptions.filter((item) => {
+      const details = item.details || {};
+      const source = String(details.source || "").toLowerCase();
+      const category = String(item.category || "").toLowerCase();
+
+      return source === "team_leader" || [
+        "internet",
+        "material",
+        "materials",
+        "staff",
+        "delayed_start",
+        "other",
+      ].includes(category);
+    });
+
     return res.json({
       ok: true,
       eventCode,
-      count: exceptions.length,
-      exceptions,
+      count: teamExceptions.length,
+      exceptions: teamExceptions,
     });
   } catch (error) {
     console.error("Get codeDemo team exceptions failed:", error.message);
