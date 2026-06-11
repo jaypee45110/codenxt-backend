@@ -73,6 +73,7 @@ const JWT_SECRET = "codenxt-dev-secret-change-later";
 
 let events = {};
 let rewards = {};
+let codeDemoHandshakeReports = {};
 function getRewardForTier(storedReward, tier) {
   const requestedTier = tier || "general";
 
@@ -749,6 +750,15 @@ if ((!meta || !meta.id) && inMemoryEvent) {
   meta = inMemoryEvent;
 }
   }
+
+if ((!meta || !meta.id) && events[eventId]) {
+  meta = events[eventId];
+}
+
+if ((!meta || !meta.id) && inMemoryEvent) {
+  meta = inMemoryEvent;
+}
+
 let rawScans = 0;
 let uniqueScans = 0;
 let innerCircleJoinCount = 0;
@@ -1273,73 +1283,372 @@ function buildCodeDemoHandshakePayload(input = {}, meta = {}, eventCode = "") {
   };
 }
 
-function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uniqueScans = 0, registrations = 0 } = {}) {
-  const criteria = [
-    { key: "relevance", label: "Relevance", value: Number(handshake.relevance || 0) },
-    { key: "understanding", label: "Understanding", value: Number(handshake.understanding || 0) },
-    { key: "trust", label: "Trust", value: Number(handshake.trust || 0) },
-    { key: "safety", label: "Safety", value: Number(handshake.safety || 0) },
-    { key: "insight", label: "Insight", value: Number(handshake.insight || 0) },
-  ];
+function toCodeDemoNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
 
-  const scoredCriteria = criteria.filter((item) => item.value > 0);
-  const strongest = scoredCriteria.length
-    ? scoredCriteria.reduce((best, item) => item.value > best.value ? item : best, scoredCriteria[0])
-    : null;
-  const weakest = scoredCriteria.length
-    ? scoredCriteria.reduce((worst, item) => item.value < worst.value ? item : worst, scoredCriteria[0])
-    : null;
+function roundCodeDemoMetric(value, digits = 1) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  const factor = 10 ** digits;
+  return Math.round(number * factor) / factor;
+}
 
-  const handshakeScore = Number(handshake.handshakeScore ?? handshake.handshake_score ?? handshake.totalScore ?? 0);
+function getCodeDemoHandshakeScore(report = {}) {
+  const explicit = toCodeDemoNumber(report.handshakeScore ?? report.handshake_score ?? report.totalScore ?? report.total_score, 0);
+  if (explicit > 0) return explicit;
+
+  const values = ["relevance", "understanding", "trust", "safety", "insight"]
+    .map((key) => toCodeDemoNumber(report[key], 0))
+    .filter((value) => value > 0);
+
+  if (!values.length) return 0;
+  return roundCodeDemoMetric(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+function getCodeDemoExceptionType(exception = {}) {
+  return String(exception.exception_type || exception.type || exception.exceptionType || "unknown_exception").trim();
+}
+
+function getCodeDemoExceptionCategory(exception = {}) {
+  return String(exception.category || "system").trim();
+}
+
+function getCodeDemoExceptionSeverity(exception = {}) {
+  const value = String(exception.severity || "yellow").trim().toLowerCase();
+  if (["red", "critical", "high", "error"].includes(value)) return "red";
+  if (["info", "green", "resolved", "ok"].includes(value)) return value === "info" ? "info" : "green";
+  return "yellow";
+}
+
+function getCodeDemoExceptionSeverityRank(exception = {}) {
+  const severity = getCodeDemoExceptionSeverity(exception);
+  if (severity === "red") return 3;
+  if (severity === "yellow") return 2;
+  if (severity === "info") return 1;
+  return 0;
+}
+
+function getCodeDemoExceptionTeamKey(exception = {}) {
+  const details = exception.details || {};
+  return String(
+    exception.teamCode ||
+    exception.team_code ||
+    exception.teamLabel ||
+    exception.team ||
+    details.teamCode ||
+    details.teamLabel ||
+    details.team ||
+    ""
+  ).trim();
+}
+
+function getCodeDemoExceptionActivityKey(exception = {}) {
+  const details = exception.details || {};
+  const date = String(exception.demoDate || exception.demo_date || exception.activityDate || details.activityDate || "").trim();
+  const location = String(exception.locationName || exception.location || details.locationName || details.location || "").trim();
+  const team = getCodeDemoExceptionTeamKey(exception);
+  return [date, location, team].filter(Boolean).join("|");
+}
+
+function summarizeCodeDemoExceptions(exceptions = []) {
   const openExceptions = exceptions.filter((item) => String(item.status || "open").toLowerCase() === "open");
-  const redExceptions = openExceptions.filter((item) => String(item.severity || "").toLowerCase() === "red");
-  const yellowExceptions = openExceptions.filter((item) => String(item.severity || "").toLowerCase() === "yellow");
-  const infoExceptions = openExceptions.filter((item) => String(item.severity || "").toLowerCase() === "info");
-
+  const redExceptions = openExceptions.filter((item) => getCodeDemoExceptionSeverity(item) === "red");
+  const yellowExceptions = openExceptions.filter((item) => getCodeDemoExceptionSeverity(item) === "yellow");
+  const infoExceptions = openExceptions.filter((item) => getCodeDemoExceptionSeverity(item) === "info");
   const exceptionTypes = {};
   const exceptionCategories = {};
 
   for (const exception of openExceptions) {
-    const type = String(exception.exception_type || exception.type || exception.exceptionType || "unknown_exception").trim();
-    const category = String(exception.category || "system").trim();
-
+    const type = getCodeDemoExceptionType(exception);
+    const category = getCodeDemoExceptionCategory(exception);
     exceptionTypes[type] = (exceptionTypes[type] || 0) + 1;
     exceptionCategories[category] = (exceptionCategories[category] || 0) + 1;
   }
 
-  const topExceptionType =
-    Object.entries(exceptionTypes).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+  return {
+    openExceptions,
+    redExceptions,
+    yellowExceptions,
+    infoExceptions,
+    exceptionTypes,
+    exceptionCategories,
+    topExceptionType: Object.entries(exceptionTypes).sort((a, b) => b[1] - a[1])[0]?.[0] || "",
+    topExceptionCategory: Object.entries(exceptionCategories).sort((a, b) => b[1] - a[1])[0]?.[0] || "",
+    worstSeverity: openExceptions.reduce((worst, item) => Math.max(worst, getCodeDemoExceptionSeverityRank(item)), 0),
+  };
+}
 
-  const topExceptionCategory =
-    Object.entries(exceptionCategories).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+function selectCodeDemoSignal(averages = {}, direction = "strongest") {
+  const labels = {
+    relevance: "Relevance",
+    understanding: "Understanding",
+    trust: "Trust",
+    safety: "Safety",
+    insight: "Insight",
+  };
 
-  const conversionRate = uniqueScans > 0 ? Math.round((registrations / uniqueScans) * 1000) / 10 : 0;
+  const entries = Object.entries(labels)
+    .map(([key, label]) => ({ key, label, value: toCodeDemoNumber(averages[key], 0) }))
+    .filter((item) => item.value > 0);
+
+  if (!entries.length) return null;
+
+  return entries.reduce((selected, item) => {
+    if (direction === "weakest") return item.value < selected.value ? item : selected;
+    return item.value > selected.value ? item : selected;
+  }, entries[0]);
+}
+
+function aggregateCodeDemoHandshakes(reports = []) {
+  const signalKeys = ["relevance", "understanding", "trust", "safety", "insight"];
+  const submitted = Array.isArray(reports) ? reports : [];
+  const averages = {};
+
+  for (const key of signalKeys) {
+    const values = submitted.map((report) => toCodeDemoNumber(report[key], 0)).filter((value) => value > 0);
+    averages[key] = values.length ? roundCodeDemoMetric(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
+  }
+
+  const scores = submitted.map(getCodeDemoHandshakeScore).filter((value) => value > 0);
+  const handshakeScore = scores.length ? roundCodeDemoMetric(scores.reduce((sum, value) => sum + value, 0) / scores.length) : 0;
+  const strongestSignal = selectCodeDemoSignal(averages, "strongest");
+  const weakestSignal = selectCodeDemoSignal(averages, "weakest");
+
+  return {
+    submittedCount: submitted.length,
+    handshakeScore,
+    ...averages,
+    strongestSignal,
+    weakestSignal,
+    worstHandshakeScore: scores.length ? roundCodeDemoMetric(Math.min(...scores)) : 0,
+    bestHandshakeScore: scores.length ? roundCodeDemoMetric(Math.max(...scores)) : 0,
+  };
+}
+
+function groupCodeDemoReports(reports = [], keyFn) {
+  const groups = new Map();
+
+  for (const report of reports) {
+    const key = keyFn(report);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(report);
+  }
+
+  return groups;
+}
+
+function buildCodeDemoTeamCoach(reports = [], exceptions = []) {
+  const groups = groupCodeDemoReports(reports, (report = {}) => String(report.teamCode || report.team_code || report.teamLabel || report.team_label || "").trim());
+
+  return Array.from(groups.entries()).map(([teamKey, rows]) => {
+    const first = rows[0] || {};
+    const teamExceptions = exceptions.filter((exception) => getCodeDemoExceptionTeamKey(exception) === teamKey || getCodeDemoExceptionTeamKey(exception) === String(first.teamLabel || first.team_label || "").trim());
+    const exceptionSummary = summarizeCodeDemoExceptions(teamExceptions);
+    const aggregate = aggregateCodeDemoHandshakes(rows);
+
+    return {
+      teamKey,
+      teamCode: first.teamCode || first.team_code || "",
+      teamLabel: first.teamLabel || first.team_label || teamKey,
+      submittedCount: aggregate.submittedCount,
+      handshakeScore: aggregate.handshakeScore,
+      relevance: aggregate.relevance,
+      understanding: aggregate.understanding,
+      trust: aggregate.trust,
+      safety: aggregate.safety,
+      insight: aggregate.insight,
+      scans: null,
+      registrations: null,
+      conversionRate: null,
+      strongestSignal: aggregate.strongestSignal,
+      weakestSignal: aggregate.weakestSignal,
+      openExceptions: exceptionSummary.openExceptions.length,
+      redExceptions: exceptionSummary.redExceptions.length,
+      yellowExceptions: exceptionSummary.yellowExceptions.length,
+      infoExceptions: exceptionSummary.infoExceptions.length,
+      worstSeverity: exceptionSummary.worstSeverity,
+    };
+  }).sort((a, b) => a.teamLabel.localeCompare(b.teamLabel));
+}
+
+function buildCodeDemoActivityCoach(reports = [], exceptions = []) {
+  const groups = groupCodeDemoReports(reports, (report = {}) => {
+    const date = String(report.demoDate || report.demo_date || "").trim();
+    const location = String(report.locationName || report.location_name || report.location || "").trim();
+    const team = String(report.teamCode || report.team_code || report.teamLabel || report.team_label || "").trim();
+    return [date, location, team].filter(Boolean).join("|");
+  });
+
+  return Array.from(groups.entries()).map(([activityKey, rows]) => {
+    const first = rows[0] || {};
+    const activityExceptions = exceptions.filter((exception) => getCodeDemoExceptionActivityKey(exception) === activityKey);
+    const exceptionSummary = summarizeCodeDemoExceptions(activityExceptions);
+    const aggregate = aggregateCodeDemoHandshakes(rows);
+
+    return {
+      activityKey,
+      demoDate: first.demoDate || first.demo_date || "",
+      locationName: first.locationName || first.location_name || first.location || "",
+      teamCode: first.teamCode || first.team_code || "",
+      teamLabel: first.teamLabel || first.team_label || "",
+      submittedCount: aggregate.submittedCount,
+      handshakeScore: aggregate.handshakeScore,
+      relevance: aggregate.relevance,
+      understanding: aggregate.understanding,
+      trust: aggregate.trust,
+      safety: aggregate.safety,
+      insight: aggregate.insight,
+      scans: null,
+      registrations: null,
+      conversionRate: null,
+      strongestSignal: aggregate.strongestSignal,
+      weakestSignal: aggregate.weakestSignal,
+      openExceptions: exceptionSummary.openExceptions.length,
+      redExceptions: exceptionSummary.redExceptions.length,
+      yellowExceptions: exceptionSummary.yellowExceptions.length,
+      infoExceptions: exceptionSummary.infoExceptions.length,
+      worstSeverity: exceptionSummary.worstSeverity,
+    };
+  }).sort((a, b) => `${a.demoDate}-${a.teamCode}`.localeCompare(`${b.demoDate}-${b.teamCode}`));
+}
+
+function selectBestCodeDemoTeam(teamCoach = []) {
+  return [...teamCoach]
+    .filter((team) => team.submittedCount > 0)
+    .sort((a, b) => b.handshakeScore - a.handshakeScore || a.worstSeverity - b.worstSeverity || a.teamLabel.localeCompare(b.teamLabel))[0] || null;
+}
+
+function selectWorstCodeDemoTeam(teamCoach = []) {
+  return [...teamCoach]
+    .filter((team) => team.submittedCount > 0 || team.openExceptions > 0)
+    .sort((a, b) => b.worstSeverity - a.worstSeverity || a.handshakeScore - b.handshakeScore || b.openExceptions - a.openExceptions || a.teamLabel.localeCompare(b.teamLabel))[0] || null;
+}
+
+function chooseCodeDemoRecommendation({ campaignAggregate = {}, exceptionSummary = {}, scans = 0, uniqueScans = 0, registrations = 0 } = {}) {
+  const conversionRate = uniqueScans > 0 ? roundCodeDemoMetric((registrations / uniqueScans) * 100) : 0;
+  const weakest = campaignAggregate.weakestSignal;
+  const strongest = campaignAggregate.strongestSignal;
+  const exceptionTypes = exceptionSummary.exceptionTypes || {};
+  const topExceptionCategory = exceptionSummary.topExceptionCategory || "";
+
+  if (exceptionSummary.redExceptions?.length > 0) {
+    return {
+      priority: "red_exceptions",
+      recommendationType: "resolve_red_exceptions",
+      recommendation: "Resolve red exceptions first; they are likely to affect trust and reporting quality.",
+    };
+  }
+
+  if (exceptionTypes.scan_registration_mismatch > 0) {
+    return {
+      priority: "analytics_integrity",
+      recommendationType: "review_registration_integrity",
+      recommendation: "Registrations exceed unique scans. Review registration integrity, duplicate protection, and scan tracking.",
+    };
+  }
+
+  if (exceptionTypes.handshake_missing > 0 || campaignAggregate.submittedCount === 0) {
+    return {
+      priority: "missing_handshake",
+      recommendationType: "enforce_handshake_completion",
+      recommendation: "Close every activity with Handshake before reporting; the coaching basis is incomplete.",
+    };
+  }
+
+  if (campaignAggregate.handshakeScore > 0 && campaignAggregate.handshakeScore < 6.5) {
+    return {
+      priority: "low_handshake_score",
+      recommendationType: "improve_overall_handshake",
+      recommendation: "Overall Handshake quality is low. Review team briefing and the activity script before the next activation.",
+    };
+  }
+
+  if (uniqueScans >= 50 && conversionRate < 20) {
+    return {
+      priority: "low_conversion",
+      recommendationType: "improve_qr_call_to_action",
+      recommendation: "Make the QR call-to-action more visible and explain the value of registering.",
+    };
+  }
+
+  if (exceptionSummary.yellowExceptions?.length > 0) {
+    return {
+      priority: "yellow_exceptions",
+      recommendationType: "yellow_exceptions",
+      recommendation: "There are warning-level exceptions that should be reviewed before the next activity.",
+    };
+  }
+
+  if (weakest && weakest.value <= 6) {
+    const map = {
+      relevance: ["sharpen_customer_problem", "Open with a sharper customer problem before explaining the product."],
+      understanding: ["clarify_product_explanation", "Make the product explanation clearer in the first 30 seconds."],
+      trust: ["strengthen_trust_proof", "Use stronger proof points, examples, or guarantees to build trust faster."],
+      safety: ["reduce_friction", "Reduce friction and make the next step feel safe and easy."],
+      insight: ["ask_better_discovery_question", "Ask one better discovery question before presenting the offer."],
+    };
+    const [recommendationType, recommendation] = map[weakest.key] || ["improve_weakest_signal", "Improve the weakest Handshake signal before the next activity."];
+    return { priority: "weakest_signal", recommendationType, recommendation };
+  }
+
+  if (topExceptionCategory === "technical") {
+    return {
+      priority: "technical_exception_pattern",
+      recommendationType: "stabilize_technical_setup",
+      recommendation: "Technical exceptions were registered. Verify network, QR access, and device readiness before the next activity.",
+    };
+  }
+
+  return {
+    priority: "repeat_strength",
+    recommendationType: "repeat_strength",
+    recommendation: strongest
+      ? `Repeat the strongest signal (${strongest.label}) and keep the team brief simple.`
+      : "Repeat the strongest parts of the activity and keep the team brief simple.",
+  };
+}
+
+function generateCodeDemoCoach({ handshake = {}, handshakes = [], exceptions = [], scans = 0, uniqueScans = 0, registrations = 0 } = {}) {
+  const reports = Array.isArray(handshakes) && handshakes.length ? handshakes : (handshake && Object.keys(handshake).length ? [handshake] : []);
+  const campaignAggregate = aggregateCodeDemoHandshakes(reports);
+  const exceptionSummary = summarizeCodeDemoExceptions(exceptions);
+  const teamCoach = buildCodeDemoTeamCoach(reports, exceptionSummary.openExceptions);
+  const activityCoach = buildCodeDemoActivityCoach(reports, exceptionSummary.openExceptions);
+  const bestTeam = selectBestCodeDemoTeam(teamCoach);
+  const worstTeam = selectWorstCodeDemoTeam(teamCoach);
+  const conversionRate = uniqueScans > 0 ? roundCodeDemoMetric((registrations / uniqueScans) * 100) : 0;
+  const recommendation = chooseCodeDemoRecommendation({ campaignAggregate, exceptionSummary, scans, uniqueScans, registrations });
+  const strongest = campaignAggregate.strongestSignal;
+  const weakest = campaignAggregate.weakestSignal;
 
   let strengthType = "handshake_complete";
   let strength = "The team has submitted a complete Handshake report.";
-  if (exceptionTypes.handshake_missing > 0) {
+  if (campaignAggregate.submittedCount === 0 || exceptionSummary.exceptionTypes.handshake_missing > 0) {
     strengthType = "handshake_missing";
-    strength = "The activity is currently missing a completed Handshake report.";
+    strength = "The campaign is currently missing completed Handshake reports.";
   } else if (strongest && strongest.value >= 8) {
     strengthType = `strong_${strongest.key}`;
-    strength = `${strongest.label} is the strongest signal in this activity.`;
-  } else if (handshakeScore >= 7.5) {
+    strength = `${strongest.label} is the strongest campaign-level Handshake signal.`;
+  } else if (campaignAggregate.handshakeScore >= 7.5) {
     strengthType = "strong_overall_handshake";
-    strength = "The activity shows a strong overall Handshake result.";
+    strength = "The campaign shows a strong overall Handshake result.";
   } else if (registrations > 0 && conversionRate >= 30) {
     strengthType = "healthy_registration_conversion";
-    strength = "The activity converts a healthy share of scans into registrations.";
+    strength = "The campaign converts a healthy share of scans into registrations.";
   }
 
   let improvementType = "no_major_weakness";
   let improvement = "No major weakness stands out yet.";
   if (weakest && weakest.value > 0 && weakest.value <= 6) {
     improvementType = `low_${weakest.key}`;
-    improvement = `${weakest.label} is the lowest Handshake signal and should be improved.`;
-  } else if (redExceptions.length > 0) {
+    improvement = `${weakest.label} is the lowest campaign-level Handshake signal and should be improved.`;
+  } else if (exceptionSummary.redExceptions.length > 0) {
     improvementType = "red_exceptions";
     improvement = "Critical exceptions need attention before the next activity.";
-  } else if (yellowExceptions.length > 0) {
+  } else if (exceptionSummary.yellowExceptions.length > 0) {
     improvementType = "yellow_exceptions";
     improvement = "There are warning-level exceptions that should be reviewed.";
   } else if (uniqueScans > 0 && conversionRate < 20) {
@@ -1347,111 +1656,78 @@ function generateCodeDemoCoach({ handshake = {}, exceptions = [], scans = 0, uni
     improvement = "Registration conversion is low compared with scan activity.";
   }
 
-  let recommendationType = "repeat_strength";
-  let recommendation = "Repeat the strongest parts of the activity and keep the team brief simple.";
-  if (topExceptionType === "scan_registration_mismatch") {
-    recommendationType = "review_registration_integrity";
-    recommendation = "Registrations exceed unique scans. Review registration integrity, duplicate protection, and scan tracking.";
-  } else if (topExceptionType === "low_registration_conversion") {
-    recommendationType = "improve_scan_to_registration_conversion";
-    recommendation = "High scan activity produced very few registrations. Review QR placement, call-to-action, and registration friction.";
-  } else if (topExceptionType === "registration_spike") {
-    recommendationType = "review_registration_spike";
-    recommendation = "Registration activity is unusually high compared with scan activity. Review data quality and registration sources.";
-  } else if (topExceptionType === "inventory_empty") {
-    recommendationType = "restore_bonus_inventory";
-    recommendation = "Bonus inventory is empty. Refill or adjust available rewards before the next activity.";
-  } else if (topExceptionType === "inventory_low") {
-    recommendationType = "monitor_bonus_inventory";
-    recommendation = "Bonus inventory is low. Check remaining rewards before the next activity starts.";
-  } else if (topExceptionType === "handshake_missing") {
-    recommendationType = "enforce_handshake_completion";
-    recommendation = "The activity is missing a Handshake report. Close every activity with Handshake before reporting.";
-  } else if (topExceptionType === "invalid_claim") {
-    recommendationType = "check_claim_validation_flow";
-    recommendation = "Invalid claim attempts were registered. Check QR instructions and redemption validation flow.";
-  } else if (topExceptionType === "already_redeemed") {
-    recommendationType = "prevent_duplicate_redemption";
-    recommendation = "Duplicate redemption attempts were registered. Keep scanner validation strict at handout.";
-  } else if (topExceptionType === "expired_claim") {
-    recommendationType = "clarify_claim_deadline";
-    recommendation = "Expired claims were attempted. Make the claim deadline clearer during the activity.";
-  } else if (topExceptionCategory === "technical") {
-    recommendationType = "stabilize_technical_setup";
-    recommendation = "Technical exceptions were registered. Verify network, QR access, and device readiness before the next activity.";
-  } else if (topExceptionCategory === "staffing") {
-    recommendationType = "improve_staff_coverage";
-    recommendation = "Staffing exceptions were registered. Review team coverage and roles before the next activity.";
-  } else if (topExceptionCategory === "location") {
-    recommendationType = "improve_location_readiness";
-    recommendation = "Location exceptions were registered. Confirm placement, access, and local setup before the next activity.";
-  } else if (weakest?.key === "understanding") {
-    recommendationType = "clarify_product_explanation";
-    recommendation = "Make the product explanation clearer in the first 30 seconds.";
-  } else if (weakest?.key === "trust") {
-    recommendationType = "strengthen_trust_proof";
-    recommendation = "Use stronger proof points, examples, or guarantees to build trust faster.";
-  } else if (weakest?.key === "safety") {
-    recommendationType = "reduce_friction";
-    recommendation = "Reduce friction and make the next step feel safe and easy.";
-  } else if (weakest?.key === "insight") {
-    recommendationType = "ask_better_discovery_question";
-    recommendation = "Ask one better discovery question before presenting the offer.";
-  } else if (weakest?.key === "relevance") {
-    recommendationType = "sharpen_customer_problem";
-    recommendation = "Open with a sharper customer problem before explaining the product.";
-  } else if (redExceptions.length > 0) {
-    recommendationType = "resolve_red_exceptions";
-    recommendation = "Resolve red exceptions first; they are likely to affect trust and reporting quality.";
-  } else if (uniqueScans > 0 && conversionRate < 20) {
-    recommendationType = "improve_qr_call_to_action";
-    recommendation = "Make the QR call-to-action more visible and explain the value of registering.";
-  }
-
   let correlationInsight = "";
-
-  if (topExceptionType === "scan_registration_mismatch") {
+  if (exceptionSummary.topExceptionType === "scan_registration_mismatch") {
     correlationInsight = "Registrations exceed unique scans, so reporting quality and registration integrity should be reviewed.";
-  } else if (topExceptionType === "low_registration_conversion") {
+  } else if (exceptionSummary.topExceptionType === "low_registration_conversion") {
     correlationInsight = "High scan activity did not translate into registrations, which may indicate weak call-to-action or registration friction.";
-  } else if (topExceptionType === "registration_spike") {
+  } else if (exceptionSummary.topExceptionType === "registration_spike") {
     correlationInsight = "Registration activity is unusually high compared with scan activity, so data quality and registration sources should be reviewed.";
-  } else if (topExceptionType === "handshake_missing") {
-    correlationInsight = "The activity is missing Handshake data, so the coaching basis is incomplete.";
-  } else if (topExceptionType === "invalid_claim") {
-    correlationInsight = "Invalid claim attempts may indicate unclear redemption instructions, wrong QR use, or validation friction.";
-  } else if (weakest?.key === "trust" && topExceptionCategory === "technical") {
-    correlationInsight = "Trust may have been affected by technical issues during the activity.";
-  } else if (weakest?.key === "relevance" && topExceptionCategory === "location") {
+  } else if (exceptionSummary.topExceptionType === "handshake_missing") {
+    correlationInsight = "The campaign is missing Handshake data, so the coaching basis is incomplete.";
+  } else if (weakest?.key === "trust" && exceptionSummary.topExceptionCategory === "technical") {
+    correlationInsight = "Trust may have been affected by technical issues during the campaign.";
+  } else if (weakest?.key === "relevance" && exceptionSummary.topExceptionCategory === "location") {
     correlationInsight = "Location issues may have reduced perceived relevance.";
-  } else if (weakest?.key === "understanding" && topExceptionCategory === "staffing") {
+  } else if (weakest?.key === "understanding" && exceptionSummary.topExceptionCategory === "staffing") {
     correlationInsight = "Staffing issues may have affected product explanation quality.";
-  } else if (redExceptions.length > 0) {
+  } else if (exceptionSummary.redExceptions.length > 0) {
     correlationInsight = "Critical exceptions may have affected execution quality and reporting confidence.";
   }
 
-  return {
-    model: "codedemo-ai-coach-v2-rule-based",
-    handshakeScore,
+  const campaignCoach = {
+    submittedCount: campaignAggregate.submittedCount,
+    handshakeScore: campaignAggregate.handshakeScore,
+    relevance: campaignAggregate.relevance,
+    understanding: campaignAggregate.understanding,
+    trust: campaignAggregate.trust,
+    safety: campaignAggregate.safety,
+    insight: campaignAggregate.insight,
     scans,
     uniqueScans,
     registrations,
     conversionRate,
-    openExceptions: openExceptions.length,
-    redExceptions: redExceptions.length,
-    yellowExceptions: yellowExceptions.length,
-    infoExceptions: infoExceptions.length,
-    exceptionTypes,
-    exceptionCategories,
-    topExceptionType,
-    topExceptionCategory,
+    openExceptions: exceptionSummary.openExceptions.length,
+    redExceptions: exceptionSummary.redExceptions.length,
+    yellowExceptions: exceptionSummary.yellowExceptions.length,
+    infoExceptions: exceptionSummary.infoExceptions.length,
+    strongestSignal: campaignAggregate.strongestSignal,
+    weakestSignal: campaignAggregate.weakestSignal,
+    bestTeam,
+    worstTeam,
+    recommendationPriority: recommendation.priority,
+  };
+
+  return {
+    model: "codedemo-ai-coach-v3-aggregated-rule-based",
+    handshakeScore: campaignAggregate.handshakeScore,
+    scans,
+    uniqueScans,
+    registrations,
+    conversionRate,
+    openExceptions: exceptionSummary.openExceptions.length,
+    redExceptions: exceptionSummary.redExceptions.length,
+    yellowExceptions: exceptionSummary.yellowExceptions.length,
+    infoExceptions: exceptionSummary.infoExceptions.length,
+    exceptionTypes: exceptionSummary.exceptionTypes,
+    exceptionCategories: exceptionSummary.exceptionCategories,
+    topExceptionType: exceptionSummary.topExceptionType,
+    topExceptionCategory: exceptionSummary.topExceptionCategory,
     correlationInsight,
     strengthType,
     improvementType,
-    recommendationType,
+    recommendationType: recommendation.recommendationType,
+    recommendationPriority: recommendation.priority,
     strength,
     improvement,
-    recommendation,
+    recommendation: recommendation.recommendation,
+    strongestSignal: campaignAggregate.strongestSignal,
+    weakestSignal: campaignAggregate.weakestSignal,
+    bestTeam,
+    worstTeam,
+    campaignCoach,
+    teamCoach,
+    activityCoach,
   };
 }
 
@@ -1619,12 +1895,16 @@ app.post("/codedemo/handshake", async (req, res) => {
     };
 
     const saved = await saveCodeDemoHandshakeReport(payload);
+    const storedHandshake = saved || payload;
+    const memoryKey = `${payload.demoDate || ''}|${payload.teamCode || ''}`;
+    codeDemoHandshakeReports[eventCode] = codeDemoHandshakeReports[eventCode] || {};
+    codeDemoHandshakeReports[eventCode][memoryKey] = storedHandshake;
 
     if (process.env.REDIS_URL) {
       await redis.set(`codedemo:handshake:${eventCode}`, JSON.stringify(payload));
     }
 
-    return res.json({ ok: true, handshake: saved || payload });
+    return res.json({ ok: true, handshake: storedHandshake });
   } catch (error) {
     console.error("Save codeDemo handshake failed:", error.message);
     return res.status(500).json({ ok: false, error: "Failed to save handshake" });
@@ -1636,10 +1916,15 @@ app.get("/codedemo/handshake/:eventCode", requireCodePerksAdmin, async (req, res
     const eventCode = String(req.params.eventCode || "").trim();
     const demoDate = String(req.query?.date || "").trim();
 
-    const reports = await getCodeDemoHandshakeReports({
+    let reports = await getCodeDemoHandshakeReports({
       eventCode,
       demoDate: demoDate || undefined,
     });
+
+    if (!reports.length && codeDemoHandshakeReports[eventCode]) {
+      reports = Object.values(codeDemoHandshakeReports[eventCode])
+        .filter((report) => !demoDate || String(report.demoDate || report.demo_date || '').slice(0, 10) === demoDate);
+    }
 
     return res.json({ ok: true, eventCode, reports: reports.map(formatCodeDemoHandshakeReport) });
   } catch (error) {
@@ -1939,13 +2224,18 @@ app.get("/codedemo/coach/:eventCode", requireCodePerksAdmin, async (req, res) =>
     const eventCode = String(req.params.eventCode || "").trim();
     const demoDate = String(req.query?.date || "").trim();
 
-    const reports = await getCodeDemoHandshakeReports({
+    let reports = await getCodeDemoHandshakeReports({
       eventCode,
       demoDate: demoDate || undefined,
     });
 
+    if (!reports.length && codeDemoHandshakeReports[eventCode]) {
+      reports = Object.values(codeDemoHandshakeReports[eventCode])
+        .filter((report) => !demoDate || String(report.demoDate || report.demo_date || '').slice(0, 10) === demoDate);
+    }
+
     const formattedReports = reports.map(formatCodeDemoHandshakeReport);
-    const latestHandshake = formattedReports[0] || {};
+    const primaryHandshake = formattedReports[0] || {};
 
     const exceptions = await getCodeDemoExceptions({
       eventCode,
@@ -1969,7 +2259,8 @@ app.get("/codedemo/coach/:eventCode", requireCodePerksAdmin, async (req, res) =>
     });
 
     const coach = generateCodeDemoCoach({
-      handshake: latestHandshake,
+      handshake: primaryHandshake,
+      handshakes: formattedReports,
       exceptions: refreshedExceptions,
       scans: scanSummary.scans,
       uniqueScans: scanSummary.uniqueScans,
@@ -1981,7 +2272,11 @@ app.get("/codedemo/coach/:eventCode", requireCodePerksAdmin, async (req, res) =>
       eventCode,
       date: demoDate || "",
       coach,
-      handshake: latestHandshake,
+      handshake: primaryHandshake,
+      handshakes: formattedReports,
+      campaignCoach: coach.campaignCoach,
+      teamCoach: coach.teamCoach,
+      activityCoach: coach.activityCoach,
       exceptions: refreshedExceptions,
       scans: scanSummary,
       registrations: registrationSummary,
