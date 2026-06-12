@@ -27,8 +27,10 @@ const {
   updateCodeDemoExceptionStatus,
   getCodeDemoExceptions,
   getLatestCodeDemoExceptions,
+  ensureCodePodGoldXtraRedemptionsTable,
   saveCodePodGoldXtraRedemption,
-  getCodePodGoldXtraRedemptionByToken
+  getCodePodGoldXtraRedemptionByToken,
+  redeemCodePodGoldXtraRedemption
 } = require("./db");
 const { sendEmail } = require("./mailer");
 const QRCode = require("qrcode");
@@ -36,6 +38,10 @@ const app = express();
 
 testDbConnection().catch((error) => {
   console.error("POSTGRES STARTUP CHECK FAILED:", error.message);
+});
+
+ensureCodePodGoldXtraRedemptionsTable().catch((error) => {
+  console.error("CODEPOD GOLDXTRA TABLE INIT FAILED:", error.message);
 });
 
 function normalizeRewardDelivery(input = {}) {
@@ -189,6 +195,8 @@ async function assignCodePodGoldXtra(eventCode, scanId, partnerReward) {
 
 function buildCodePodGoldXtraValidationPayload(source = {}) {
   const reward = source.reward || {};
+  const redeemedAt = source.redeemed_at || source.redeemedAt || null;
+  const isRedeemed = Boolean(redeemedAt) || source.status === "redeemed";
 
   return {
     ok: true,
@@ -196,7 +204,11 @@ function buildCodePodGoldXtraValidationPayload(source = {}) {
     rewardType: "partner_reward",
     tier: "gold",
     displayTier: "GoldXtra",
-    status: "valid",
+    status: isRedeemed ? "redeemed" : "valid",
+    redeemed: isRedeemed,
+    redeemedAt,
+    redeemedBy: source.redeemed_by || source.redeemedBy || "",
+    alreadyRedeemedAttempts: Number(source.already_redeemed_attempts || source.alreadyRedeemedAttempts || 0),
     partnerReward: {
       title: reward.title || source.reward_title || source.rewardTitle || "",
       partnerName: reward.partnerName || source.partner_name || source.partnerName || "",
@@ -4823,13 +4835,57 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
 app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
   try {
     const token = String(req.params.token || "").trim();
-    const redeemedBy = String(req.body?.redeemedBy || "redemption-scan").trim();
+    const redeemedBy = String(req.body?.redeemedBy || "partner").trim() || "partner";
     const requestEventCode = String(req.body?.eventCode || req.query?.eventCode || "").trim();
 
     if (!token) {
       return res.status(400).json({
         ok: false,
         error: "Missing redemption token",
+      });
+    }
+
+    if (token.toUpperCase().startsWith("GX-")) {
+      const result = await redeemCodePodGoldXtraRedemption(token, redeemedBy);
+      const row = result.row;
+
+      if (result.status === "not_found" || !row) {
+        return res.status(404).json({
+          ok: false,
+          status: "not_found",
+        });
+      }
+
+      if (result.status === "already_redeemed") {
+        return res.status(409).json({
+          ok: false,
+          status: "already_redeemed",
+          redeemedAt: row.redeemed_at || null,
+        });
+      }
+
+      if (process.env.REDIS_URL) {
+        const tokenKey = `codepod:partnerReward:token:${token}`;
+        try {
+          const rawGoldXtra = await redis.get(tokenKey);
+          if (rawGoldXtra) {
+            const goldXtra = JSON.parse(rawGoldXtra);
+            await redis.set(tokenKey, JSON.stringify({
+              ...goldXtra,
+              status: "redeemed",
+              redeemedAt: row.redeemed_at || new Date().toISOString(),
+              redeemedBy: row.redeemed_by || redeemedBy,
+            }));
+          }
+        } catch (redisError) {
+          console.warn("codePod GoldXtra Redis redeem cache update failed:", redisError.message);
+        }
+      }
+
+      return res.json({
+        ...buildCodePodGoldXtraValidationPayload(row),
+        ok: true,
+        status: "redeemed",
       });
     }
 

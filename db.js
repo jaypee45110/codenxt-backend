@@ -926,6 +926,50 @@ async function getCodePodGoldXtraRedemptionByToken(token) {
   return result.rows[0] || null;
 }
 
+async function redeemCodePodGoldXtraRedemption(token, redeemedBy = "partner") {
+  if (!pool || !token) return { status: "not_found", row: null };
+
+  await ensureCodePodGoldXtraRedemptionsTable();
+
+  const redeemed = await pool.query(
+    `
+      UPDATE codepod_goldxtra_redemptions
+      SET
+        status = 'redeemed',
+        redeemed_at = NOW(),
+        redeemed_by = $2,
+        updated_at = NOW()
+      WHERE token = $1
+        AND redeemed_at IS NULL
+      RETURNING *
+    `,
+    [token, String(redeemedBy || "partner").trim() || "partner"]
+  );
+
+  if (redeemed.rows[0]) {
+    return { status: "redeemed", row: redeemed.rows[0] };
+  }
+
+  const alreadyRedeemed = await pool.query(
+    `
+      UPDATE codepod_goldxtra_redemptions
+      SET
+        already_redeemed_attempts = already_redeemed_attempts + 1,
+        updated_at = NOW()
+      WHERE token = $1
+        AND redeemed_at IS NOT NULL
+      RETURNING *
+    `,
+    [token]
+  );
+
+  if (alreadyRedeemed.rows[0]) {
+    return { status: "already_redeemed", row: alreadyRedeemed.rows[0] };
+  }
+
+  return { status: "not_found", row: null };
+}
+
 
 module.exports = {
   getLatestCodeDemoExceptions,
@@ -936,6 +980,7 @@ module.exports = {
   ensureCodePodGoldXtraRedemptionsTable,
   saveCodePodGoldXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
+  redeemCodePodGoldXtraRedemption,
   getCodeDemoHandshakeReports,
   saveCodeDemoHandshakeReport,
   pool,
