@@ -789,6 +789,143 @@ async function updateCodeDemoExceptionStatus({ id, status, note = "", updatedBy 
   return result.rows[0] || null;
 }
 
+async function ensureCodePodGoldXtraRedemptionsTable() {
+  if (!pool) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS codepod_goldxtra_redemptions (
+      id BIGSERIAL PRIMARY KEY,
+      token TEXT UNIQUE NOT NULL,
+      event_code TEXT NOT NULL,
+      event_id TEXT,
+      scan_id TEXT NOT NULL,
+      vertical TEXT NOT NULL DEFAULT 'codepod',
+      reward_type TEXT NOT NULL DEFAULT 'partner_reward',
+      tier TEXT NOT NULL DEFAULT 'gold',
+      display_tier TEXT NOT NULL DEFAULT 'GoldXtra',
+      partner_name TEXT,
+      reward_title TEXT,
+      redemption_location TEXT,
+      redemption_deadline TEXT,
+      redemption_instructions TEXT,
+      status TEXT NOT NULL DEFAULT 'assigned',
+      assigned_at TIMESTAMPTZ DEFAULT NOW(),
+      downloaded_at TIMESTAMPTZ,
+      redeemed_at TIMESTAMPTZ,
+      redeemed_by TEXT,
+      already_redeemed_attempts INTEGER NOT NULL DEFAULT 0,
+      raw_payload JSONB,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (event_code, scan_id)
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codepod_goldxtra_redemptions_event_code_idx
+    ON codepod_goldxtra_redemptions (event_code)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codepod_goldxtra_redemptions_status_idx
+    ON codepod_goldxtra_redemptions (status)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codepod_goldxtra_redemptions_assigned_at_idx
+    ON codepod_goldxtra_redemptions (assigned_at DESC)
+  `);
+}
+
+async function saveCodePodGoldXtraRedemption(record = {}) {
+  if (!pool || !record.eventCode || !record.scanId || !record.token) return null;
+
+  await ensureCodePodGoldXtraRedemptionsTable();
+
+  const result = await pool.query(
+    `
+      INSERT INTO codepod_goldxtra_redemptions (
+        token,
+        event_code,
+        event_id,
+        scan_id,
+        vertical,
+        reward_type,
+        tier,
+        display_tier,
+        partner_name,
+        reward_title,
+        redemption_location,
+        redemption_deadline,
+        redemption_instructions,
+        status,
+        assigned_at,
+        raw_payload,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15::timestamptz,NOW()),$16,NOW())
+      ON CONFLICT (event_code, scan_id)
+      DO UPDATE SET
+        event_id = COALESCE(EXCLUDED.event_id, codepod_goldxtra_redemptions.event_id),
+        vertical = EXCLUDED.vertical,
+        reward_type = EXCLUDED.reward_type,
+        tier = EXCLUDED.tier,
+        display_tier = EXCLUDED.display_tier,
+        partner_name = EXCLUDED.partner_name,
+        reward_title = EXCLUDED.reward_title,
+        redemption_location = EXCLUDED.redemption_location,
+        redemption_deadline = EXCLUDED.redemption_deadline,
+        redemption_instructions = EXCLUDED.redemption_instructions,
+        status = CASE
+          WHEN codepod_goldxtra_redemptions.redeemed_at IS NOT NULL THEN codepod_goldxtra_redemptions.status
+          ELSE EXCLUDED.status
+        END,
+        assigned_at = COALESCE(codepod_goldxtra_redemptions.assigned_at, EXCLUDED.assigned_at),
+        raw_payload = EXCLUDED.raw_payload,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [
+      record.token,
+      record.eventCode,
+      record.eventId || '',
+      record.scanId,
+      record.vertical || 'codepod',
+      record.rewardType || 'partner_reward',
+      record.tier || 'gold',
+      record.displayTier || 'GoldXtra',
+      record.partnerName || '',
+      record.rewardTitle || record.title || '',
+      record.redemptionLocation || '',
+      record.redemptionDeadline || '',
+      record.redemptionInstructions || '',
+      record.status || 'assigned',
+      record.assignedAt || null,
+      JSON.stringify(record.rawPayload || record),
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function getCodePodGoldXtraRedemptionByToken(token) {
+  if (!pool || !token) return null;
+
+  await ensureCodePodGoldXtraRedemptionsTable();
+
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM codepod_goldxtra_redemptions
+      WHERE token = $1
+      LIMIT 1
+    `,
+    [token]
+  );
+
+  return result.rows[0] || null;
+}
+
 
 module.exports = {
   getLatestCodeDemoExceptions,
@@ -796,6 +933,9 @@ module.exports = {
   saveCodeDemoException,
   updateCodeDemoExceptionStatus,
   ensureCodeDemoExceptionsTable,
+  ensureCodePodGoldXtraRedemptionsTable,
+  saveCodePodGoldXtraRedemption,
+  getCodePodGoldXtraRedemptionByToken,
   getCodeDemoHandshakeReports,
   saveCodeDemoHandshakeReport,
   pool,

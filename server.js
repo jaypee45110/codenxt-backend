@@ -26,7 +26,9 @@ const {
   saveCodeDemoException,
   updateCodeDemoExceptionStatus,
   getCodeDemoExceptions,
-  getLatestCodeDemoExceptions
+  getLatestCodeDemoExceptions,
+  saveCodePodGoldXtraRedemption,
+  getCodePodGoldXtraRedemptionByToken
 } = require("./db");
 const { sendEmail } = require("./mailer");
 const QRCode = require("qrcode");
@@ -56,6 +58,152 @@ function normalizeBonusDetails(input = {}) {
     gold: normalizeTier(input.gold || {}),
     silver: normalizeTier(input.silver || {}),
     standard: normalizeTier(input.standard || input.general || {}),
+  };
+}
+
+function normalizeCodePodPartnerReward(input = {}) {
+  const quantity = Math.max(0, Math.floor(Number(input.quantity || 0) || 0));
+
+  return {
+    active: input.active === true || input.active === "true",
+    rewardType: "partner_reward",
+    tier: "gold",
+    displayTier: "GoldXtra",
+    partnerName: String(input.partnerName || "").trim(),
+    title: String(input.title || "").trim(),
+    quantity,
+    redemptionLocation: String(input.redemptionLocation || "").trim(),
+    redemptionDeadline: String(input.redemptionDeadline || "").trim(),
+    redemptionInstructions: String(input.redemptionInstructions || "").trim(),
+  };
+}
+
+function parseCodePodPartnerReward(input = {}) {
+  if (typeof input === "string") {
+    try {
+      return normalizeCodePodPartnerReward(JSON.parse(input));
+    } catch {
+      return normalizeCodePodPartnerReward({});
+    }
+  }
+
+  return normalizeCodePodPartnerReward(input || {});
+}
+
+async function createCodePodGoldXtraToken(payload) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const token = `GX-${crypto.randomBytes(12).toString("hex").toUpperCase()}`;
+    const tokenKey = `codepod:partnerReward:token:${token}`;
+    const stored = await redis.set(tokenKey, JSON.stringify({ ...payload, token }), "NX");
+    if (stored) return token;
+  }
+
+  const token = `GX-${uuidv4().replace(/-/g, "").toUpperCase()}`;
+  await redis.set(`codepod:partnerReward:token:${token}`, JSON.stringify({ ...payload, token }), "NX");
+  return token;
+}
+
+async function assignCodePodGoldXtra(eventCode, scanId, partnerReward) {
+  if (!process.env.REDIS_URL || !eventCode || !scanId) return null;
+
+  const reward = parseCodePodPartnerReward(partnerReward);
+  if (!reward.active || reward.quantity <= 0) return null;
+
+  const assignedKey = `codepod:partnerReward:assigned:${eventCode}`;
+  const scanKey = `codepod:partnerReward:scan:${eventCode}:${scanId}`;
+
+  try {
+    const storedAssignment = await redis.get(scanKey);
+    if (storedAssignment) {
+      const assignment = JSON.parse(storedAssignment);
+      if (assignment?.assigned) {
+        const assignedCount = Number(await redis.get(assignedKey) || assignment.assignedCount || 0);
+        if (!assignment.redemptionToken) {
+          assignment.redemptionToken = await createCodePodGoldXtraToken({
+            eventCode,
+            scanId,
+            tier: "gold",
+            displayTier: "GoldXtra",
+            rewardType: "partner_reward",
+            status: "assigned",
+            assignedCount,
+            assignedAt: assignment.assignedAt || new Date().toISOString(),
+          });
+          await redis.set(scanKey, JSON.stringify(assignment));
+        }
+        return {
+          ...reward,
+          assigned: true,
+          redemptionToken: assignment.redemptionToken || "",
+          assignedAt: assignment.assignedAt || "",
+          assignedCount,
+          remaining: Math.max(0, reward.quantity - assignedCount),
+        };
+      }
+      return null;
+    }
+
+    const assignedCount = await redis.incr(assignedKey);
+    if (assignedCount > reward.quantity) {
+      await redis.decr(assignedKey);
+      return null;
+    }
+
+    const assignment = {
+      assigned: true,
+      assignedCount,
+      assignedAt: new Date().toISOString(),
+    };
+    assignment.redemptionToken = await createCodePodGoldXtraToken({
+      eventCode,
+      scanId,
+      tier: "gold",
+      displayTier: "GoldXtra",
+      rewardType: "partner_reward",
+      status: "assigned",
+      assignedCount,
+      assignedAt: assignment.assignedAt,
+      reward: {
+        title: reward.title,
+        partnerName: reward.partnerName,
+        redemptionLocation: reward.redemptionLocation,
+        redemptionDeadline: reward.redemptionDeadline,
+        redemptionInstructions: reward.redemptionInstructions,
+      },
+    });
+    await redis.set(scanKey, JSON.stringify(assignment));
+
+    return {
+      ...reward,
+      assigned: true,
+      redemptionToken: assignment.redemptionToken,
+      assignedAt: assignment.assignedAt,
+      assignedCount,
+      remaining: Math.max(0, reward.quantity - assignedCount),
+    };
+  } catch (error) {
+    console.warn("codePod GoldXtra assignment failed:", error.message);
+    return null;
+  }
+}
+
+function buildCodePodGoldXtraValidationPayload(source = {}) {
+  const reward = source.reward || {};
+
+  return {
+    ok: true,
+    vertical: "codepod",
+    rewardType: "partner_reward",
+    tier: "gold",
+    displayTier: "GoldXtra",
+    status: "valid",
+    partnerReward: {
+      title: reward.title || source.reward_title || source.rewardTitle || "",
+      partnerName: reward.partnerName || source.partner_name || source.partnerName || "",
+      redemptionLocation: reward.redemptionLocation || source.redemption_location || source.redemptionLocation || "",
+      redemptionDeadline: reward.redemptionDeadline || source.redemption_deadline || source.redemptionDeadline || "",
+      redemptionInstructions: reward.redemptionInstructions || source.redemption_instructions || source.redemptionInstructions || "",
+    },
   };
 }
 
@@ -452,6 +600,7 @@ const {
   rewardDelivery,
   redemptionLocation,
   bonusDetails,
+  partnerReward,
   defaultLang,
   lang,
   language,
@@ -469,6 +618,9 @@ const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory ||
 const normalizedRewardDelivery = normalizeRewardDelivery(rewardDelivery || {});
 const normalizedRedemptionLocation = String(redemptionLocation || "").trim();
 const normalizedBonusDetails = normalizeBonusDetails(bonusDetails || {});
+const normalizedPartnerReward = normalizedVertical === "codepod"
+  ? normalizeCodePodPartnerReward(partnerReward || {})
+  : null;
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
 
@@ -513,6 +665,9 @@ maxClaims,
     ? campaignRiskProfile
     : {},
 };
+if (normalizedPartnerReward) {
+  event.partnerReward = normalizedPartnerReward;
+}
     const dailyDemoEvents = buildCodeDemoDailyDemoEvents(event, req.body);
     event.dailyDemoEvents = dailyDemoEvents;
     events[id] = event;
@@ -521,7 +676,7 @@ maxClaims,
     });
 
 if (process.env.REDIS_URL) {
-await redis.hset(`event:${id}:meta`, {
+const eventMeta = {
   id,
   vertical: normalizedVertical,
   code: code || id,
@@ -550,7 +705,11 @@ artistLogo: artistLogo || "",
   dailyDemoEvents: JSON.stringify(event.dailyDemoEvents || []),
   tourCsvImportReady: String(!!event.tourCsvImportReady),
   tourGeoReady: String(!!event.tourGeoReady),
-});
+};
+if (normalizedPartnerReward) {
+  eventMeta.partnerReward = JSON.stringify(normalizedPartnerReward);
+}
+await redis.hset(`event:${id}:meta`, eventMeta);
 
   await redis.set(`eventcode:${code || id}`, id);
   await redis.set(`eventcode:${normalizedVertical}:${code || id}`, id);
@@ -711,6 +870,14 @@ if (meta && meta.bonusDetails) {
   }
 }
 
+if (meta && meta.partnerReward && typeof meta.partnerReward === "string") {
+  try {
+    meta.partnerReward = JSON.parse(meta.partnerReward);
+  } catch {
+    meta.partnerReward = normalizeCodePodPartnerReward({});
+  }
+}
+
 if (meta && meta.demoLocations) {
   try {
     meta.demoLocations = JSON.parse(meta.demoLocations);
@@ -823,6 +990,10 @@ rawScans,
   uniqueScans,
   innerCircleJoinCount,
 };
+
+if (String(meta?.vertical || "").trim().toLowerCase() === "codepod") {
+  normalizedMeta.partnerReward = normalizeCodePodPartnerReward(meta?.partnerReward || {});
+}
 
   events[eventId] = normalizedMeta;
   return res.json(normalizedMeta);
@@ -3348,7 +3519,7 @@ if (scanRank && scanRank <= goldLimit) {
   tier = "silver";
 }
 
-return res.json({
+const responsePayload = {
   success: true,
   eventCode,
   eventId,
@@ -3361,7 +3532,59 @@ return res.json({
     goldLimit,
     silverLimit,
   },
-});
+};
+
+const isCodePodScan = vertical === "codepod" || String(event?.vertical || "").trim().toLowerCase() === "codepod";
+if (isCodePodScan && tier === "gold" && event?.partnerReward) {
+  const goldXtraAssignment = await assignCodePodGoldXtra(eventCode, scanId, event.partnerReward);
+  if (goldXtraAssignment?.assigned) {
+    try {
+      await saveCodePodGoldXtraRedemption({
+        token: goldXtraAssignment.redemptionToken,
+        eventCode,
+        eventId,
+        scanId,
+        vertical: "codepod",
+        rewardType: "partner_reward",
+        tier: "gold",
+        displayTier: "GoldXtra",
+        partnerName: goldXtraAssignment.partnerName,
+        rewardTitle: goldXtraAssignment.title,
+        redemptionLocation: goldXtraAssignment.redemptionLocation,
+        redemptionDeadline: goldXtraAssignment.redemptionDeadline,
+        redemptionInstructions: goldXtraAssignment.redemptionInstructions,
+        status: "assigned",
+        assignedAt: goldXtraAssignment.assignedAt,
+        rawPayload: {
+          eventCode,
+          eventId,
+          scanId,
+          tier,
+          displayTier: "GoldXtra",
+          rewardType: "partner_reward",
+          partnerReward: goldXtraAssignment,
+        },
+      });
+    } catch (dbError) {
+      console.warn("codePod GoldXtra Postgres save failed:", dbError.message);
+    }
+
+    responsePayload.displayTier = "GoldXtra";
+    responsePayload.rewardType = "partner_reward";
+    responsePayload.partnerReward = {
+      active: true,
+      assigned: true,
+      title: goldXtraAssignment.title,
+      partnerName: goldXtraAssignment.partnerName,
+      quantity: goldXtraAssignment.quantity,
+      assignedCount: goldXtraAssignment.assignedCount,
+      remaining: goldXtraAssignment.remaining,
+      redemptionToken: goldXtraAssignment.redemptionToken,
+    };
+  }
+}
+
+return res.json(responsePayload);
   } catch (err) {
     console.error("Scan register failed:", err.message);
     res.status(500).json({ error: "Failed to register scan" });
@@ -4500,7 +4723,28 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
       });
     }
 
+    const isCodePodGoldXtraToken = token.toUpperCase().startsWith("GX-");
+
     if (process.env.REDIS_URL) {
+      if (isCodePodGoldXtraToken) {
+        const rawGoldXtra = await redis.get(`codepod:partnerReward:token:${token}`);
+        const goldXtra = rawGoldXtra ? JSON.parse(rawGoldXtra) : null;
+
+        if (goldXtra) {
+          return res.json(buildCodePodGoldXtraValidationPayload(goldXtra));
+        }
+
+        const postgresGoldXtra = await getCodePodGoldXtraRedemptionByToken(token);
+        if (postgresGoldXtra) {
+          return res.json(buildCodePodGoldXtraValidationPayload(postgresGoldXtra));
+        }
+
+        return res.status(404).json({
+          ok: false,
+          status: "not_found",
+        });
+      }
+
       const claimId = await redis.get(`codeperks:redemption:${token}`);
       const raw = claimId ? await redis.get(`codeperks:claim:${claimId}`) : null;
       const claim = raw ? JSON.parse(raw) : null;
@@ -4529,6 +4773,18 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
         redemptionDeadlineTime: claim.redemptionDeadlineTime || "",
         redemptionInstructions: claim.redemptionInstructions || "",
         status: claim.status || "pending",
+      });
+    }
+
+    if (isCodePodGoldXtraToken) {
+      const postgresGoldXtra = await getCodePodGoldXtraRedemptionByToken(token);
+      if (postgresGoldXtra) {
+        return res.json(buildCodePodGoldXtraValidationPayload(postgresGoldXtra));
+      }
+
+      return res.status(404).json({
+        ok: false,
+        status: "not_found",
       });
     }
 
