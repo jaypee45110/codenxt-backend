@@ -20,6 +20,7 @@ const {
   saveEventRegistration,
   getEventRegistrations,
   getEventScanSummary,
+  getCodePodReportRows,
   getEventRegistrationSummary,
   saveCodeDemoHandshakeReport,
   getCodeDemoHandshakeReports,
@@ -94,6 +95,137 @@ function parseCodePodPartnerReward(input = {}) {
   }
 
   return normalizeCodePodPartnerReward(input || {});
+}
+
+function normalizeCodePodDigitalSouvenir(input = {}) {
+  if (typeof input === "string") {
+    try {
+      return normalizeCodePodDigitalSouvenir(JSON.parse(input));
+    } catch {
+      return normalizeCodePodDigitalSouvenir({});
+    }
+  }
+
+  const normalizeTier = (tier = {}) => ({
+    enabled: tier.enabled === true || tier.enabled === "true",
+    title: String(tier.title || "").trim(),
+    type: String(tier.type || "image").trim(),
+    contentUrl: String(tier.contentUrl || tier.url || "").trim(),
+    contentFileName: String(tier.contentFileName || tier.fileName || "").trim(),
+    quantity: Math.max(0, Math.floor(Number(tier.quantity || 0) || 0)),
+  });
+
+  return {
+    general: normalizeTier(input.general || {}),
+    silver: normalizeTier(input.silver || {}),
+    gold: normalizeTier(input.gold || {}),
+    goldXtra: input.goldXtra || {},
+  };
+}
+
+async function assignCodePodDigitalSouvenirTier(eventCode, scanId, digitalSouvenir, event = {}) {
+  const inventory = normalizeCodePodDigitalSouvenir(digitalSouvenir || {});
+  const scanKey = scanId ? `codepod:digitalSouvenir:scan:${eventCode}:${scanId}` : "";
+
+  const buildAssignment = (tier, assignedCount = 0, quantity = 0, unlimited = false) => ({
+    tier,
+    assignedCount: Number(assignedCount || 0),
+    quantity: Number(quantity || 0),
+    remaining: unlimited ? null : Math.max(0, Number(quantity || 0) - Number(assignedCount || 0)),
+    unlimited,
+    exhausted: false,
+    noReward: false,
+  });
+
+  if (process.env.REDIS_URL) {
+    if (scanKey) {
+      const stored = await redis.get(scanKey);
+      if (stored) {
+        try {
+          return JSON.parse(stored);
+        } catch {
+          // Continue with a fresh assignment if the cached value is malformed.
+        }
+      }
+    }
+
+    const tryLimitedTier = async (tier) => {
+      const quantity = Math.max(0, Math.floor(Number(inventory[tier]?.quantity || 0) || 0));
+      if (quantity <= 0) return null;
+
+      const counterKey = `codepod:digitalSouvenir:assigned:${eventCode}:${tier}`;
+      const assignedCount = await redis.incr(counterKey);
+      if (assignedCount <= quantity) {
+        const assignment = buildAssignment(tier, assignedCount, quantity, false);
+        if (scanKey) await redis.set(scanKey, JSON.stringify(assignment));
+        return assignment;
+      }
+
+      await redis.decr(counterKey);
+      return null;
+    };
+
+    const gold = await tryLimitedTier("gold");
+    if (gold) return gold;
+
+    const silver = await tryLimitedTier("silver");
+    if (silver) return silver;
+
+    const generalQuantity = Math.max(0, Math.floor(Number(inventory.general?.quantity || 0) || 0));
+    const generalCounterKey = `codepod:digitalSouvenir:assigned:${eventCode}:general`;
+    const assignedGeneral = await redis.incr(generalCounterKey);
+    if (generalQuantity === 0 || assignedGeneral <= generalQuantity) {
+      const assignment = buildAssignment("general", assignedGeneral, generalQuantity, generalQuantity === 0);
+      if (scanKey) await redis.set(scanKey, JSON.stringify(assignment));
+      return assignment;
+    }
+
+    await redis.decr(generalCounterKey);
+    const exhausted = {
+      ...buildAssignment("general", assignedGeneral - 1, generalQuantity, false),
+      exhausted: true,
+      noReward: true,
+    };
+    if (scanKey) await redis.set(scanKey, JSON.stringify(exhausted));
+    return exhausted;
+  }
+
+  event._codepodDigitalSouvenirAssigned = event._codepodDigitalSouvenirAssigned || { gold: 0, silver: 0, general: 0 };
+  event._codepodDigitalSouvenirScan = event._codepodDigitalSouvenirScan || {};
+
+  if (scanId && event._codepodDigitalSouvenirScan[scanId]) {
+    return event._codepodDigitalSouvenirScan[scanId];
+  }
+
+  const assignLocal = (tier, quantity, unlimited = false) => {
+    event._codepodDigitalSouvenirAssigned[tier] = Number(event._codepodDigitalSouvenirAssigned[tier] || 0) + 1;
+    const assignment = buildAssignment(tier, event._codepodDigitalSouvenirAssigned[tier], quantity, unlimited);
+    if (scanId) event._codepodDigitalSouvenirScan[scanId] = assignment;
+    return assignment;
+  };
+
+  const goldQuantity = Math.max(0, Math.floor(Number(inventory.gold?.quantity || 0) || 0));
+  if (goldQuantity > Number(event._codepodDigitalSouvenirAssigned.gold || 0)) {
+    return assignLocal("gold", goldQuantity, false);
+  }
+
+  const silverQuantity = Math.max(0, Math.floor(Number(inventory.silver?.quantity || 0) || 0));
+  if (silverQuantity > Number(event._codepodDigitalSouvenirAssigned.silver || 0)) {
+    return assignLocal("silver", silverQuantity, false);
+  }
+
+  const generalQuantity = Math.max(0, Math.floor(Number(inventory.general?.quantity || 0) || 0));
+  if (generalQuantity === 0 || generalQuantity > Number(event._codepodDigitalSouvenirAssigned.general || 0)) {
+    return assignLocal("general", generalQuantity, generalQuantity === 0);
+  }
+
+  const exhausted = {
+    ...buildAssignment("general", event._codepodDigitalSouvenirAssigned.general, generalQuantity, false),
+    exhausted: true,
+    noReward: true,
+  };
+  if (scanId) event._codepodDigitalSouvenirScan[scanId] = exhausted;
+  return exhausted;
 }
 
 async function createCodePodGoldXtraToken(payload) {
@@ -217,6 +349,28 @@ function buildCodePodGoldXtraValidationPayload(source = {}) {
       redemptionInstructions: reward.redemptionInstructions || source.redemption_instructions || source.redemptionInstructions || "",
     },
   };
+}
+
+async function refreshCodePodGoldXtraRedisToken(token, row) {
+  if (!process.env.REDIS_URL || !token || !row) return;
+
+  const tokenKey = `codepod:partnerReward:token:${token}`;
+
+  try {
+    const rawGoldXtra = await redis.get(tokenKey);
+    if (!rawGoldXtra) return;
+
+    const goldXtra = JSON.parse(rawGoldXtra);
+    await redis.set(tokenKey, JSON.stringify({
+      ...goldXtra,
+      status: row.status || goldXtra.status || "assigned",
+      redeemedAt: row.redeemed_at || null,
+      redeemedBy: row.redeemed_by || "",
+      alreadyRedeemedAttempts: Number(row.already_redeemed_attempts || 0),
+    }));
+  } catch (redisError) {
+    console.warn("codePod GoldXtra Redis redeem cache update failed:", redisError.message);
+  }
 }
 
 app.use(cors({
@@ -611,9 +765,10 @@ const {
   benefitInventory,
   rewardDelivery,
   redemptionLocation,
-  bonusDetails,
-  partnerReward,
-  defaultLang,
+	  bonusDetails,
+	  partnerReward,
+	  digitalSouvenir,
+	  defaultLang,
   lang,
   language,
   demoLocations,
@@ -632,6 +787,9 @@ const normalizedRedemptionLocation = String(redemptionLocation || "").trim();
 const normalizedBonusDetails = normalizeBonusDetails(bonusDetails || {});
 const normalizedPartnerReward = normalizedVertical === "codepod"
   ? normalizeCodePodPartnerReward(partnerReward || {})
+  : null;
+const normalizedDigitalSouvenir = normalizedVertical === "codepod"
+  ? normalizeCodePodDigitalSouvenir(digitalSouvenir || {})
   : null;
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
@@ -680,6 +838,9 @@ maxClaims,
 if (normalizedPartnerReward) {
   event.partnerReward = normalizedPartnerReward;
 }
+if (normalizedDigitalSouvenir) {
+  event.digitalSouvenir = normalizedDigitalSouvenir;
+}
     const dailyDemoEvents = buildCodeDemoDailyDemoEvents(event, req.body);
     event.dailyDemoEvents = dailyDemoEvents;
     events[id] = event;
@@ -720,6 +881,9 @@ artistLogo: artistLogo || "",
 };
 if (normalizedPartnerReward) {
   eventMeta.partnerReward = JSON.stringify(normalizedPartnerReward);
+}
+if (normalizedDigitalSouvenir) {
+  eventMeta.digitalSouvenir = JSON.stringify(normalizedDigitalSouvenir);
 }
 await redis.hset(`event:${id}:meta`, eventMeta);
 
@@ -816,6 +980,7 @@ try {
 app.get("/event/:eventId", async (req, res) => {
   try {
     let { eventId } = req.params;
+    const requestedEventId = eventId;
 
 // Try Redis lookup if available
 if (process.env.REDIS_URL) {
@@ -890,6 +1055,14 @@ if (meta && meta.partnerReward && typeof meta.partnerReward === "string") {
   }
 }
 
+if (meta && meta.digitalSouvenir && typeof meta.digitalSouvenir === "string") {
+  try {
+    meta.digitalSouvenir = JSON.parse(meta.digitalSouvenir);
+  } catch {
+    meta.digitalSouvenir = normalizeCodePodDigitalSouvenir({});
+  }
+}
+
 if (meta && meta.demoLocations) {
   try {
     meta.demoLocations = JSON.parse(meta.demoLocations);
@@ -938,6 +1111,14 @@ if ((!meta || !meta.id) && inMemoryEvent) {
   meta = inMemoryEvent;
 }
 
+if (!meta || !meta.id) {
+  const campaign = await getCampaignByCode(requestedEventId);
+  if (campaign?.raw_event) {
+    meta = campaign.raw_event;
+    eventId = meta.id || campaign.id || eventId;
+  }
+}
+	
 let rawScans = 0;
 let uniqueScans = 0;
 let innerCircleJoinCount = 0;
@@ -1005,6 +1186,7 @@ rawScans,
 
 if (String(meta?.vertical || "").trim().toLowerCase() === "codepod") {
   normalizedMeta.partnerReward = normalizeCodePodPartnerReward(meta?.partnerReward || {});
+  normalizedMeta.digitalSouvenir = normalizeCodePodDigitalSouvenir(meta?.digitalSouvenir || {});
 }
 
   events[eventId] = normalizedMeta;
@@ -2501,6 +2683,127 @@ app.get("/codedemo/handshake-report/:parentEventCode", requireCodePerksAdmin, as
 
 
 // GET REPORT
+app.get("/codepod/report/:eventCode", async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    if (!eventCode) {
+      return res.status(400).json({ ok: false, error: "Missing event code" });
+    }
+
+    let eventId = null;
+    let meta = Object.values(events).find(
+      (item) => item?.code === eventCode && String(item?.vertical || "").trim().toLowerCase() === "codepod"
+    ) || null;
+
+    if (meta?.id) eventId = meta.id;
+
+    if ((!meta || !eventId) && process.env.REDIS_URL) {
+      const resolvedId =
+        await redis.get(`eventcode:codepod:${eventCode}`) ||
+        await redis.get(`eventcode:${eventCode}`);
+
+      if (resolvedId) {
+        eventId = resolvedId;
+        const redisMeta = await redis.hgetall(`event:${resolvedId}:meta`);
+        if (redisMeta && redisMeta.id && String(redisMeta.vertical || "").trim().toLowerCase() === "codepod") {
+          meta = redisMeta;
+        }
+      }
+    }
+
+    if ((!meta || !meta.id) && getCampaignByCode) {
+      const campaign = await getCampaignByCode(eventCode);
+      const rawEvent = campaign?.raw_event || null;
+      const campaignVertical = String(campaign?.vertical || rawEvent?.vertical || "").trim().toLowerCase();
+
+      if (campaign && campaignVertical === "codepod") {
+        meta = rawEvent || campaign;
+        eventId = meta.id || campaign.id || eventId;
+      }
+    }
+
+    if (!meta) {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    const partnerReward = normalizeCodePodPartnerReward(meta.partnerReward || {});
+    const digitalSouvenir = normalizeCodePodDigitalSouvenir(meta.digitalSouvenir || {});
+    const rows = await getCodePodReportRows(eventCode);
+
+    const scans = rows.map((row) => {
+      const tier = String(row.tier || "").trim().toLowerCase();
+      const redemptionToken = row.redemption_token || "";
+
+      return {
+        eventCode: row.event_code || eventCode,
+        eventId: row.event_id || eventId || "",
+        scanId: row.scan_id || "",
+        scanRank: row.scan_rank || null,
+        timestamp: row.created_at ? new Date(row.created_at).toISOString() : "",
+        tier,
+        digitalSouvenirTier: tier,
+        displayTier: row.display_tier || "",
+        rewardType: row.reward_type || "",
+        goldXtraAssigned: Boolean(redemptionToken),
+        redemptionToken,
+        redemptionStatus: row.redemption_status || "",
+        redeemedAt: row.redeemed_at ? new Date(row.redeemed_at).toISOString() : null,
+        alreadyRedeemedAttempts: Number(row.already_redeemed_attempts || 0),
+        source: "qr",
+      };
+    });
+
+    const uniqueScanIds = new Set(scans.map((row) => row.scanId).filter(Boolean));
+    const tierCount = (tier) => scans.filter((row) => row.tier === tier).length;
+    const goldXtraRows = scans.filter((row) => row.goldXtraAssigned);
+
+    let rawScans = scans.length;
+    let uniqueScans = uniqueScanIds.size;
+    let joins = 0;
+
+    if (process.env.REDIS_URL && eventId) {
+      rawScans = Number(await redis.get(`event:${eventId}:rawScans`) || rawScans || 0);
+      uniqueScans = Number(await redis.get(`event:${eventId}:uniqueScans`) || uniqueScans || 0);
+      joins = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
+    } else {
+      rawScans = Number(meta.rawScans || rawScans || 0);
+      uniqueScans = Number(meta.uniqueScans || uniqueScans || 0);
+      joins = Number(meta.innerCircleJoinCount || 0);
+    }
+
+    return res.json({
+      ok: true,
+      vertical: "codepod",
+      eventCode,
+      event: {
+        eventCode,
+        eventId: eventId || meta.id || "",
+        podcastName: meta.podcastName || meta.artistName || meta.name || "",
+        episodeTitle: meta.episodeTitle || meta.title || meta.venue || "",
+        startAt: meta.startAt || "",
+        endAt: meta.endAt || "",
+        digitalSouvenir,
+        partnerReward,
+      },
+      metrics: {
+        scans: rawScans,
+        uniqueScans,
+        joins,
+        gold: tierCount("gold"),
+        silver: tierCount("silver"),
+        general: tierCount("general"),
+        goldXtraAssigned: goldXtraRows.length,
+        goldXtraRedeemed: goldXtraRows.filter((row) => row.redemptionStatus === "redeemed").length,
+        alreadyRedeemedAttempts: scans.reduce((sum, row) => sum + Number(row.alreadyRedeemedAttempts || 0), 0),
+      },
+      scans,
+    });
+  } catch (err) {
+    console.error("Get codePod report failed:", err.message);
+    return res.status(500).json({ ok: false, error: "Failed to get codePod report" });
+  }
+});
+
 app.get("/report/:eventCode", requireCodePerksAdmin, async (req, res) => {
   try {
     let { eventCode } = req.params;
@@ -3461,27 +3764,32 @@ if (process.env.REDIS_URL) {
 }
 
 const vertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
-
-try {
-  await saveEventScan({
-    eventCode,
-    eventId,
-    vertical,
-    scanId,
-    scanRank,
-    tier,
-    teamCode: event.teamCode || event.demoLocation?.teamCode || "",
-    teamLabel: event.teamLabel || event.demoLocation?.teamLabel || "",
-    dailyDemoCode: event.dailyDemoCode || event.code || eventCode,
-    dailyDemoDayIndex: event.dailyDemoDayIndex || event.dailyDemoIndex || null,
-    dailyDemoTeamIndex: event.dailyDemoTeamIndex || null,
-    userAgent: req.get("user-agent") || "",
-    ipHash: crypto.createHash("sha256").update(String(req.ip || "")).digest("hex"),
-    rawPayload: req.body || {},
-  });
-} catch (dbScanError) {
-  console.error("POSTGRES SCAN SAVE FAILED:", dbScanError.message);
-}
+const persistFinalScan = async (finalTier, extraPayload = {}) => {
+  try {
+    await saveEventScan({
+      eventCode,
+      eventId,
+      vertical,
+      scanId,
+      scanRank,
+      tier: finalTier,
+      teamCode: event.teamCode || event.demoLocation?.teamCode || "",
+      teamLabel: event.teamLabel || event.demoLocation?.teamLabel || "",
+      dailyDemoCode: event.dailyDemoCode || event.code || eventCode,
+      dailyDemoDayIndex: event.dailyDemoDayIndex || event.dailyDemoIndex || null,
+      dailyDemoTeamIndex: event.dailyDemoTeamIndex || null,
+      userAgent: req.get("user-agent") || "",
+      ipHash: crypto.createHash("sha256").update(String(req.ip || "")).digest("hex"),
+      rawPayload: {
+        ...(req.body || {}),
+        finalTier,
+        ...extraPayload,
+      },
+    });
+  } catch (dbScanError) {
+    console.error("POSTGRES SCAN SAVE FAILED:", dbScanError.message);
+  }
+};
 
 if (vertical === "codeperks" && process.env.REDIS_URL && scanId) {
   const benefitWindow = getCodePerksBenefitWindowStatus(event || {});
@@ -3507,6 +3815,8 @@ if (vertical === "codeperks" && process.env.REDIS_URL && scanId) {
     tier = benefitAssignment.tier;
   }
 
+  await persistFinalScan(tier, { benefitAssignment });
+	
   return res.json({
     success: true,
     eventCode,
@@ -3521,16 +3831,36 @@ if (vertical === "codeperks" && process.env.REDIS_URL && scanId) {
   });
 }
 
-const audienceSize = Number(event.audienceSize || event.maxClaims || 1000);
-const goldLimit = Math.max(1, Math.round(audienceSize * 0.01));
-const silverLimit = Math.max(goldLimit + 1, Math.round(audienceSize * 0.05));
+const isCodePodScan = vertical === "codepod" || String(event?.vertical || "").trim().toLowerCase() === "codepod";
+let codePodSouvenirAssignment = null;
+let tierLimits = null;
 
-if (scanRank && scanRank <= goldLimit) {
-  tier = "gold";
-} else if (scanRank && scanRank <= silverLimit) {
-  tier = "silver";
+if (isCodePodScan) {
+  codePodSouvenirAssignment = await assignCodePodDigitalSouvenirTier(
+    eventCode,
+    scanId,
+    event.digitalSouvenir,
+    event
+  );
+  tier = codePodSouvenirAssignment.tier || "general";
+} else {
+  const audienceSize = Number(event.audienceSize || event.maxClaims || 1000);
+  const goldLimit = Math.max(1, Math.round(audienceSize * 0.01));
+  const silverLimit = Math.max(goldLimit + 1, Math.round(audienceSize * 0.05));
+
+  if (scanRank && scanRank <= goldLimit) {
+    tier = "gold";
+  } else if (scanRank && scanRank <= silverLimit) {
+    tier = "silver";
+  }
+
+  tierLimits = {
+    audienceSize,
+    goldLimit,
+    silverLimit,
+  };
 }
-
+	
 const responsePayload = {
   success: true,
   eventCode,
@@ -3539,15 +3869,17 @@ const responsePayload = {
   uniqueScans: Number(uniqueScans || 0),
   scanRank,
   tier,
-  tierLimits: {
-    audienceSize,
-    goldLimit,
-    silverLimit,
-  },
 };
-
-const isCodePodScan = vertical === "codepod" || String(event?.vertical || "").trim().toLowerCase() === "codepod";
-if (isCodePodScan && tier === "gold" && event?.partnerReward) {
+if (tierLimits) {
+  responsePayload.tierLimits = tierLimits;
+}
+if (codePodSouvenirAssignment) {
+  responsePayload.digitalSouvenir = codePodSouvenirAssignment;
+  responsePayload.exhausted = Boolean(codePodSouvenirAssignment.exhausted);
+  responsePayload.noReward = Boolean(codePodSouvenirAssignment.noReward);
+}
+	
+if (isCodePodScan && event?.partnerReward) {
   const goldXtraAssignment = await assignCodePodGoldXtra(eventCode, scanId, event.partnerReward);
   if (goldXtraAssignment?.assigned) {
     try {
@@ -3596,6 +3928,8 @@ if (isCodePodScan && tier === "gold" && event?.partnerReward) {
   }
 }
 
+await persistFinalScan(tier, { digitalSouvenir: codePodSouvenirAssignment });
+	
 return res.json(responsePayload);
   } catch (err) {
     console.error("Scan register failed:", err.message);
@@ -4857,30 +5191,17 @@ app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
       }
 
       if (result.status === "already_redeemed") {
+        const refreshedRow = await getCodePodGoldXtraRedemptionByToken(token);
+        await refreshCodePodGoldXtraRedisToken(token, refreshedRow || row);
+
         return res.status(409).json({
           ok: false,
           status: "already_redeemed",
-          redeemedAt: row.redeemed_at || null,
+          redeemedAt: (refreshedRow || row).redeemed_at || null,
         });
       }
 
-      if (process.env.REDIS_URL) {
-        const tokenKey = `codepod:partnerReward:token:${token}`;
-        try {
-          const rawGoldXtra = await redis.get(tokenKey);
-          if (rawGoldXtra) {
-            const goldXtra = JSON.parse(rawGoldXtra);
-            await redis.set(tokenKey, JSON.stringify({
-              ...goldXtra,
-              status: "redeemed",
-              redeemedAt: row.redeemed_at || new Date().toISOString(),
-              redeemedBy: row.redeemed_by || redeemedBy,
-            }));
-          }
-        } catch (redisError) {
-          console.warn("codePod GoldXtra Redis redeem cache update failed:", redisError.message);
-        }
-      }
+      await refreshCodePodGoldXtraRedisToken(token, row);
 
       return res.json({
         ...buildCodePodGoldXtraValidationPayload(row),
