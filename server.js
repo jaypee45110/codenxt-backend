@@ -77,6 +77,7 @@ function normalizeCodePodPartnerReward(input = {}) {
     tier: "gold",
     displayTier: "GoldXtra",
     partnerName: String(input.partnerName || "").trim(),
+    product: String(input.product || "").trim(),
     title: String(input.title || "").trim(),
     quantity,
     redemptionLocation: String(input.redemptionLocation || "").trim(),
@@ -304,6 +305,7 @@ async function assignCodePodGoldXtra(eventCode, scanId, partnerReward) {
       reward: {
         title: reward.title,
         partnerName: reward.partnerName,
+        product: reward.product,
         redemptionLocation: reward.redemptionLocation,
         redemptionDeadline: reward.redemptionDeadline,
         redemptionInstructions: reward.redemptionInstructions,
@@ -344,6 +346,7 @@ function buildCodePodGoldXtraValidationPayload(source = {}) {
     partnerReward: {
       title: reward.title || source.reward_title || source.rewardTitle || "",
       partnerName: reward.partnerName || source.partner_name || source.partnerName || "",
+      product: reward.product || source.product || "",
       redemptionLocation: reward.redemptionLocation || source.redemption_location || source.redemptionLocation || "",
       redemptionDeadline: reward.redemptionDeadline || source.redemption_deadline || source.redemptionDeadline || "",
       redemptionInstructions: reward.redemptionInstructions || source.redemption_instructions || source.redemptionInstructions || "",
