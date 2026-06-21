@@ -3753,7 +3753,7 @@ app.post("/scan", async (req, res) => {
         await redis.expire(rateKey, 60);
       }
 
-      if (hits > 30) {
+      if (hits > 200) {
         return res.status(429).json({
           error: "Too many scan attempts. Please try again shortly.",
         });
