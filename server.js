@@ -3904,8 +3904,12 @@ let codePodSouvenirAssignment = null;
 let goldXtraAssignment = null;
 let tierLimits = null;
 
-if (isCodePodScan && event?.partnerReward) {
-  goldXtraAssignment = await assignCodePodGoldXtra(eventCode, scanId, event.partnerReward);
+const effectiveCodePodPartnerReward = event?.partnerReward?.active
+  ? event.partnerReward
+  : event?.digitalSouvenir?.goldXtra;
+
+if (isCodePodScan && effectiveCodePodPartnerReward) {
+  goldXtraAssignment = await assignCodePodGoldXtra(eventCode, scanId, effectiveCodePodPartnerReward);
 }
 
 if (isCodePodScan && goldXtraAssignment?.assigned) {
