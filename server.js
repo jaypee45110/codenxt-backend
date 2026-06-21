@@ -790,7 +790,8 @@ const {
   termsVersion,
   termsLanguage,
   termsAcceptedByName,
-  termsAcceptedByEmail
+  termsAcceptedByEmail,
+  paymentAccepted
 } = req.body;
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
@@ -856,6 +857,7 @@ maxClaims,
   termsLanguage: termsLanguage || normalizedDefaultLang,
   termsAcceptedByName: termsAcceptedByName || "",
   termsAcceptedByEmail: termsAcceptedByEmail || "",
+  paymentAccepted: !!paymentAccepted,
 };
 if (normalizedPartnerReward) {
   event.partnerReward = normalizedPartnerReward;
@@ -907,6 +909,7 @@ artistLogo: artistLogo || "",
   termsLanguage: termsLanguage || normalizedDefaultLang,
   termsAcceptedByName: termsAcceptedByName || "",
   termsAcceptedByEmail: termsAcceptedByEmail || "",
+  paymentAccepted: String(!!paymentAccepted),
 };
 if (normalizedPartnerReward) {
   eventMeta.partnerReward = JSON.stringify(normalizedPartnerReward);
@@ -1174,6 +1177,14 @@ const normalizedMeta = {
   startAt: meta?.startAt,
   unlockAt: meta?.unlockAt,
   endAt: meta?.endAt,
+  bonusWindow: meta?.bonusWindow || "",
+  termsAccepted: meta?.termsAccepted === "true" || meta?.termsAccepted === true,
+  termsAcceptedAt: meta?.termsAcceptedAt || "",
+  termsVersion: meta?.termsVersion || "",
+  termsLanguage: meta?.termsLanguage || "",
+  termsAcceptedByName: meta?.termsAcceptedByName || "",
+  termsAcceptedByEmail: meta?.termsAcceptedByEmail || "",
+  paymentAccepted: meta?.paymentAccepted === "true" || meta?.paymentAccepted === true,
   maxClaims: Number(meta?.maxClaims || 0),
   status: meta?.status,
   defaultLang: meta?.defaultLang || meta?.lang || meta?.language || "en",
