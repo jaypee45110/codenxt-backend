@@ -83,6 +83,8 @@ function normalizeCodePodPartnerReward(input = {}) {
     redemptionLocation: String(input.redemptionLocation || "").trim(),
     redemptionDeadline: String(input.redemptionDeadline || "").trim(),
     redemptionInstructions: String(input.redemptionInstructions || "").trim(),
+    partnerLogo: String(input.partnerLogo || "").trim(),
+    partnerLogoFileName: String(input.partnerLogoFileName || "").trim(),
   };
 }
 
@@ -309,6 +311,8 @@ async function assignCodePodGoldXtra(eventCode, scanId, partnerReward) {
         redemptionLocation: reward.redemptionLocation,
         redemptionDeadline: reward.redemptionDeadline,
         redemptionInstructions: reward.redemptionInstructions,
+        partnerLogo: reward.partnerLogo,
+        partnerLogoFileName: reward.partnerLogoFileName,
       },
     });
     await redis.set(scanKey, JSON.stringify(assignment));
@@ -779,7 +783,13 @@ const {
   tourCsvImportReady,
   tourGeoReady,
   campaignFocus,
-  campaignRiskProfile
+  campaignRiskProfile,
+  termsAccepted,
+  termsAcceptedAt,
+  termsVersion,
+  termsLanguage,
+  termsAcceptedByName,
+  termsAcceptedByEmail
 } = req.body;
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
@@ -837,6 +847,12 @@ maxClaims,
   campaignRiskProfile: campaignRiskProfile && typeof campaignRiskProfile === "object"
     ? campaignRiskProfile
     : {},
+  termsAccepted: !!termsAccepted,
+  termsAcceptedAt: termsAcceptedAt || "",
+  termsVersion: termsVersion || "",
+  termsLanguage: termsLanguage || normalizedDefaultLang,
+  termsAcceptedByName: termsAcceptedByName || "",
+  termsAcceptedByEmail: termsAcceptedByEmail || "",
 };
 if (normalizedPartnerReward) {
   event.partnerReward = normalizedPartnerReward;
@@ -881,6 +897,12 @@ artistLogo: artistLogo || "",
   dailyDemoEvents: JSON.stringify(event.dailyDemoEvents || []),
   tourCsvImportReady: String(!!event.tourCsvImportReady),
   tourGeoReady: String(!!event.tourGeoReady),
+  termsAccepted: String(!!termsAccepted),
+  termsAcceptedAt: termsAcceptedAt || "",
+  termsVersion: termsVersion || "",
+  termsLanguage: termsLanguage || normalizedDefaultLang,
+  termsAcceptedByName: termsAcceptedByName || "",
+  termsAcceptedByEmail: termsAcceptedByEmail || "",
 };
 if (normalizedPartnerReward) {
   eventMeta.partnerReward = JSON.stringify(normalizedPartnerReward);
@@ -2732,6 +2754,35 @@ app.get("/codepod/report/:eventCode", async (req, res) => {
     const partnerReward = normalizeCodePodPartnerReward(meta.partnerReward || {});
     const digitalSouvenir = normalizeCodePodDigitalSouvenir(meta.digitalSouvenir || {});
     const rows = await getCodePodReportRows(eventCode);
+    const registrations = await getEventRegistrations(eventCode, 1000);
+    const phoneByScanId = new Map(
+      registrations
+        .filter((registration) => registration.scan_id && registration.phone)
+        .map((registration) => [String(registration.scan_id), String(registration.phone)])
+    );
+
+    const scanTierByScanId = new Map(
+      rows
+        .filter((row) => row.scan_id)
+        .map((row) => [String(row.scan_id), {
+          tier: String(row.tier || "").trim().toLowerCase(),
+          displayTier: row.display_tier || row.tier || "",
+        }])
+    );
+
+    const registrationRows = registrations.map((registration) => {
+      const scanTier = scanTierByScanId.get(String(registration.scan_id || "")) || {};
+      return {
+        eventCode: registration.event_code || eventCode,
+        eventId: registration.event_id || eventId || "",
+        scanId: registration.scan_id || "",
+        phone: registration.phone || "",
+        timestamp: registration.created_at ? new Date(registration.created_at).toISOString() : "",
+        tier: scanTier.tier || registration.tier || "",
+        displayTier: scanTier.displayTier || registration.tier || "",
+        source: "inside",
+      };
+    });
 
     const scans = rows.map((row) => {
       const tier = String(row.tier || "").trim().toLowerCase();
@@ -2741,6 +2792,7 @@ app.get("/codepod/report/:eventCode", async (req, res) => {
         eventCode: row.event_code || eventCode,
         eventId: row.event_id || eventId || "",
         scanId: row.scan_id || "",
+        phone: phoneByScanId.get(String(row.scan_id || "")) || "",
         scanRank: row.scan_rank || null,
         timestamp: row.created_at ? new Date(row.created_at).toISOString() : "",
         tier,
@@ -2762,16 +2814,19 @@ app.get("/codepod/report/:eventCode", async (req, res) => {
 
     let rawScans = scans.length;
     let uniqueScans = uniqueScanIds.size;
-    let joins = 0;
+    let joins = registrationRows.length;
 
-    if (process.env.REDIS_URL && eventId) {
-      rawScans = Number(await redis.get(`event:${eventId}:rawScans`) || rawScans || 0);
-      uniqueScans = Number(await redis.get(`event:${eventId}:uniqueScans`) || uniqueScans || 0);
-      joins = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
-    } else {
+    try {
+      const scanSummary = await getEventScanSummary(eventCode);
+      const registrationSummary = await getEventRegistrationSummary(eventCode);
+      rawScans = Number(scanSummary.scans || rawScans || 0);
+      uniqueScans = Number(scanSummary.uniqueScans || uniqueScans || 0);
+      joins = Number(registrationSummary.registrations || 0);
+    } catch (summaryError) {
+      console.warn("codePod report Postgres summary failed:", summaryError.message);
       rawScans = Number(meta.rawScans || rawScans || 0);
       uniqueScans = Number(meta.uniqueScans || uniqueScans || 0);
-      joins = Number(meta.innerCircleJoinCount || 0);
+      joins = Number(meta.innerCircleJoinCount || joins || 0);
     }
 
     return res.json({
@@ -2788,10 +2843,17 @@ app.get("/codepod/report/:eventCode", async (req, res) => {
         digitalSouvenir,
         partnerReward,
       },
+      totalScans: rawScans,
+      uniqueScans,
+      joins,
+      registrationCount: joins,
+      rows: scans,
+      registrations: registrationRows,
       metrics: {
         scans: rawScans,
         uniqueScans,
         joins,
+        registrations: joins,
         gold: tierCount("gold"),
         silver: tierCount("silver"),
         general: tierCount("general"),
@@ -3220,8 +3282,11 @@ if (process.env.REDIS_URL) {
   if (phone) {
     const benefitWindow = getCodePerksBenefitWindowStatus(event || meta || {});
     const alreadyRegistered = await redis.sismember(`event:${eventId}:uniquePhones`, phone);
+    const isCodePodInnerCircle = String(req.body?.vertical || event?.vertical || meta?.vertical || "").trim().toLowerCase() === "codepod";
+    const codePodStartMs = Date.parse((event || meta || {}).unlockAt || (event || meta || {}).startAt || "");
+    const codePodNotOpen = isCodePodInnerCircle && Number.isFinite(codePodStartMs) && Date.now() < codePodStartMs;
 
-    if (!alreadyRegistered && benefitWindow.status !== "open") {
+    if (!alreadyRegistered && (isCodePodInnerCircle ? codePodNotOpen : benefitWindow.status !== "open")) {
       joins = Number(await redis.get(`event:${eventId}:innerCircleJoinCount`) || 0);
 
       return res.json({
@@ -3836,9 +3901,16 @@ if (vertical === "codeperks" && process.env.REDIS_URL && scanId) {
 
 const isCodePodScan = vertical === "codepod" || String(event?.vertical || "").trim().toLowerCase() === "codepod";
 let codePodSouvenirAssignment = null;
+let goldXtraAssignment = null;
 let tierLimits = null;
 
-if (isCodePodScan) {
+if (isCodePodScan && event?.partnerReward) {
+  goldXtraAssignment = await assignCodePodGoldXtra(eventCode, scanId, event.partnerReward);
+}
+
+if (isCodePodScan && goldXtraAssignment?.assigned) {
+  tier = "gold";
+} else if (isCodePodScan) {
   codePodSouvenirAssignment = await assignCodePodDigitalSouvenirTier(
     eventCode,
     scanId,
@@ -3882,9 +3954,7 @@ if (codePodSouvenirAssignment) {
   responsePayload.noReward = Boolean(codePodSouvenirAssignment.noReward);
 }
 	
-if (isCodePodScan && event?.partnerReward) {
-  const goldXtraAssignment = await assignCodePodGoldXtra(eventCode, scanId, event.partnerReward);
-  if (goldXtraAssignment?.assigned) {
+if (isCodePodScan && goldXtraAssignment?.assigned) {
     try {
       await saveCodePodGoldXtraRedemption({
         token: goldXtraAssignment.redemptionToken,
@@ -3927,8 +3997,9 @@ if (isCodePodScan && event?.partnerReward) {
       assignedCount: goldXtraAssignment.assignedCount,
       remaining: goldXtraAssignment.remaining,
       redemptionToken: goldXtraAssignment.redemptionToken,
+      partnerLogo: goldXtraAssignment.partnerLogo,
+      partnerLogoFileName: goldXtraAssignment.partnerLogoFileName,
     };
-  }
 }
 
 await persistFinalScan(tier, { digitalSouvenir: codePodSouvenirAssignment });
