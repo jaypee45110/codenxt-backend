@@ -767,6 +767,7 @@ const {
   startAt,
   unlockAt,
   endAt,
+  bonusWindow,
   maxClaims,
   status,
   benefitInventory,
@@ -794,6 +795,7 @@ const {
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
 const normalizedCompanyName = String(companyName || req.body.companyName || "").trim();
+const normalizedBonusWindow = String(bonusWindow || "").trim();
 const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory || {});
 const normalizedRewardDelivery = normalizeRewardDelivery(rewardDelivery || {});
 const normalizedRedemptionLocation = String(redemptionLocation || "").trim();
@@ -828,6 +830,7 @@ const event = {
   startAt,
   unlockAt,
   endAt,
+  bonusWindow: normalizedBonusWindow,
 maxClaims,
   status,
   benefitInventory: normalizedBenefitInventory,
@@ -881,6 +884,7 @@ artistLogo: artistLogo || "",
   startAt,
   unlockAt,
   endAt,
+  bonusWindow: normalizedBonusWindow,
   maxClaims: String(maxClaims),
   status,
   benefitInventory: JSON.stringify(normalizedBenefitInventory),
