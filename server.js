@@ -3919,6 +3919,14 @@ let codePodSouvenirAssignment = null;
 let goldXtraAssignment = null;
 let tierLimits = null;
 
+if (isCodePodScan && Date.now() > Date.parse(event.endAt)) {
+  return res.json({
+    success: false,
+    status: "expired",
+    error: "bonus_window_expired",
+  });
+}
+
 const effectiveCodePodPartnerReward = event?.partnerReward?.active
   ? event.partnerReward
   : event?.digitalSouvenir?.goldXtra;
