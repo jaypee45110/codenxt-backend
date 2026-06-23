@@ -3759,21 +3759,7 @@ app.post("/scan", async (req, res) => {
       req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
       req.socket?.remoteAddress ||
       "unknown";
-
-    if (process.env.REDIS_URL) {
-      const rateKey = `ratelimit:scan:${ip}`;
-      const hits = await redis.incr(rateKey);
-
-      if (hits === 1) {
-        await redis.expire(rateKey, 60);
-      }
-
-      if (hits > 200) {
-        return res.status(429).json({
-          error: "Too many scan attempts. Please try again shortly.",
-        });
-      }
-    }
+    const requestedVertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
     let eventId = null;
     let event = null;
 
@@ -3786,8 +3772,7 @@ app.post("/scan", async (req, res) => {
     }
 
     if (!eventId && process.env.REDIS_URL) {
-      const vertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
-      let resolvedId = await redis.get(`eventcode:${vertical}:${eventCode}`);
+      let resolvedId = await redis.get(`eventcode:${requestedVertical}:${eventCode}`);
       if (!resolvedId) {
         resolvedId = await redis.get(`eventcode:${eventCode}`);
       }
@@ -3801,6 +3786,25 @@ app.post("/scan", async (req, res) => {
     if (!event || !eventId) {
       return res.status(404).json({ error: "Event not found" });
     }
+
+const eventVertical = String(event?.vertical || "").trim().toLowerCase();
+const vertical = requestedVertical === "codepod" || eventVertical === "codepod" ? "codepod" : requestedVertical;
+
+if (process.env.REDIS_URL) {
+  const rateLimit = vertical === "codepod" ? 2000 : 200;
+  const rateKey = `ratelimit:scan:v2:${vertical}:${ip}`;
+  const hits = await redis.incr(rateKey);
+
+  if (hits === 1) {
+    await redis.expire(rateKey, 60);
+  }
+
+  if (hits > rateLimit) {
+    return res.status(429).json({
+      error: "Too many scan attempts. Please try again shortly.",
+    });
+  }
+}
 
 let rawScans = 0;
 let uniqueScans = 0;
@@ -3846,7 +3850,6 @@ if (process.env.REDIS_URL) {
   }
 }
 
-const vertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
 const persistFinalScan = async (finalTier, extraPayload = {}) => {
   try {
     await saveEventScan({
