@@ -2722,6 +2722,42 @@ app.get("/codedemo/handshake-report/:parentEventCode", requireCodePerksAdmin, as
 });
 
 
+app.post("/codepod/landing-track", async (req, res) => {
+  try {
+    const src = String(req.body?.src || "").trim();
+    if (!/^[1-5]$/.test(src)) {
+      return res.json({ success: true });
+    }
+
+    if (process.env.REDIS_URL) {
+      const entry = {
+        src,
+        campaign: "pilot_indie_podcast_2026",
+        path: String(req.body?.path || "").trim(),
+        href: String(req.body?.href || "").trim(),
+        userAgent: String(req.headers["user-agent"] || ""),
+        ip: String(
+          req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+          req.socket?.remoteAddress ||
+          ""
+        ),
+        createdAt: new Date().toISOString(),
+      };
+
+      await redis.rpush(
+        "codepod:landingTrack:pilot_indie_podcast_2026",
+        JSON.stringify(entry)
+      );
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("codePod landing track failed:", error.message);
+    return res.json({ success: true });
+  }
+});
+
+
 // GET REPORT
 app.get("/codepod/report/:eventCode", async (req, res) => {
   try {
