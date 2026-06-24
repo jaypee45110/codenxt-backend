@@ -2758,6 +2758,41 @@ app.post("/codepod/landing-track", async (req, res) => {
 });
 
 
+app.get("/codepod/landing-track/latest", async (req, res) => {
+  try {
+    if (!process.env.REDIS_URL) {
+      return res.json({ success: true, count: 0, rows: [] });
+    }
+
+    const rawRows = await redis.lrange(
+      "codepod:landingTrack:pilot_indie_podcast_2026",
+      -50,
+      -1
+    );
+
+    const rows = (rawRows || [])
+      .map((row) => {
+        try {
+          return JSON.parse(row);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .reverse();
+
+    return res.json({
+      success: true,
+      count: rows.length,
+      rows,
+    });
+  } catch (error) {
+    console.error("codePod landing track latest failed:", error.message);
+    return res.status(500).json({ success: false, error: "Failed to read landing track" });
+  }
+});
+
+
 // GET REPORT
 app.get("/codepod/report/:eventCode", async (req, res) => {
   try {
