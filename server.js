@@ -3842,6 +3842,43 @@ if (process.env.REDIS_URL) {
   }
 }
 
+if (vertical === "codepod" && eventId && scanId && process.env.REDIS_URL) {
+  const alreadyScanned = await redis.sismember(`event:${eventId}:uniqueScanIds`, scanId);
+  if (alreadyScanned) {
+    let previousTier = "general";
+
+    const storedSouvenir = await redis.get(`codepod:digitalSouvenir:scan:${eventCode}:${scanId}`);
+    if (storedSouvenir) {
+      try {
+        const souvenirAssignment = JSON.parse(storedSouvenir);
+        const storedTier = String(souvenirAssignment?.tier || "").trim().toLowerCase();
+        if (["gold", "silver", "general"].includes(storedTier)) previousTier = storedTier;
+      } catch {
+        previousTier = "general";
+      }
+    } else {
+      const storedGoldXtra = await redis.get(`codepod:partnerReward:scan:${eventCode}:${scanId}`);
+      if (storedGoldXtra) {
+        try {
+          const goldXtraAssignment = JSON.parse(storedGoldXtra);
+          if (goldXtraAssignment?.assigned) previousTier = "gold";
+        } catch {
+          previousTier = "general";
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      eventCode,
+      eventId,
+      alreadyParticipated: true,
+      tier: previousTier,
+      messageKey: "alreadyParticipated",
+    });
+  }
+}
+
 let rawScans = 0;
 let uniqueScans = 0;
 let scanRank = null;
