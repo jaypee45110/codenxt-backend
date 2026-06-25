@@ -2748,6 +2748,51 @@ app.post("/codepod/landing-track", async (req, res) => {
         "codepod:landingTrack:pilot_indie_podcast_2026",
         JSON.stringify(entry)
       );
+
+      const emailSentKey = `codepod:landingTrack:emailSent:${src}:${entry.createdAt.slice(0, 10)}`;
+      const shouldSendEmail = await redis.set(emailSentKey, "1", "NX", "EX", 86400);
+
+      if (shouldSendEmail) {
+        try {
+          const srcNameById = {
+            1: "Wolfgang Wee Uncut",
+            2: "Leger om livet",
+            3: "Synnøve",
+            4: "Jan Thomas",
+            5: "Fetisha",
+          };
+          const srcName = srcNameById[src] || "";
+          const subject = `codePod pilot: src=${src} åpnet`;
+          const text = [
+            `src: ${src}`,
+            srcName ? `name: ${srcName}` : "",
+            `createdAt: ${entry.createdAt}`,
+            `href: ${entry.href}`,
+            `ip: ${entry.ip}`,
+            `userAgent: ${entry.userAgent}`,
+          ].filter(Boolean).join("\n");
+          const html = `
+            <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#111;max-width:640px;">
+              <h2>codePod pilotlenke åpnet</h2>
+              <p><strong>src:</strong> ${escapeHtml(src)}</p>
+              ${srcName ? `<p><strong>name:</strong> ${escapeHtml(srcName)}</p>` : ""}
+              <p><strong>createdAt:</strong> ${escapeHtml(entry.createdAt)}</p>
+              <p><strong>href:</strong> ${escapeHtml(entry.href)}</p>
+              <p><strong>ip:</strong> ${escapeHtml(entry.ip)}</p>
+              <p><strong>userAgent:</strong> ${escapeHtml(entry.userAgent)}</p>
+            </div>
+          `;
+
+          await sendEmail({
+            to: "jan@codenxt.global",
+            subject,
+            html,
+            text,
+          });
+        } catch (emailError) {
+          console.warn("codePod landing track email failed:", emailError.message);
+        }
+      }
     }
 
     return res.json({ success: true });
