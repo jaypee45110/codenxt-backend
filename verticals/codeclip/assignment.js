@@ -72,6 +72,16 @@ async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
   }
 
   const clipXtra = inventory.clipXtra;
+  if (clipXtra?.active && clipXtra.quantity > 0 && (!redis || !eventCode || !scanId)) {
+    assigned.clipXtra = {
+      ...clipXtra,
+      assigned: false,
+      status: "unavailable",
+      reason: "redis_required",
+      requiresRedis: true,
+    };
+  }
+
   if (clipXtra?.active && clipXtra.quantity > 0 && redis && eventCode && scanId) {
     const assignedKey = `codeclip:clipXtra:assigned:${eventCode}`;
     const scanKey = `codeclip:clipXtra:scan:${eventCode}:${scanId}`;
