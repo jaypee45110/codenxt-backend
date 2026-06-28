@@ -32,6 +32,8 @@ const {
   ensureCodePodGoldXtraRedemptionsTable,
   saveCodePodGoldXtraRedemption,
   saveCodeClipXtraRedemption,
+  getCodeClipXtraRedemptionByToken,
+  redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
   redeemCodePodGoldXtraRedemption
 } = require("./db");
@@ -5425,6 +5427,7 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
     }
 
     const isCodePodGoldXtraToken = token.toUpperCase().startsWith("GX-");
+    const isCodeClipXtraToken = token.toUpperCase().startsWith("CX-");
 
     if (process.env.REDIS_URL) {
       if (isCodePodGoldXtraToken) {
@@ -5438,6 +5441,25 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
         const postgresGoldXtra = await getCodePodGoldXtraRedemptionByToken(token);
         if (postgresGoldXtra) {
           return res.json(buildCodePodGoldXtraValidationPayload(postgresGoldXtra));
+        }
+
+        return res.status(404).json({
+          ok: false,
+          status: "not_found",
+        });
+      }
+
+      if (isCodeClipXtraToken) {
+        const rawClipXtra = await redis.get(codeClipVertical.tokens.buildCodeClipXtraTokenKey(token));
+        const clipXtra = rawClipXtra ? JSON.parse(rawClipXtra) : null;
+
+        if (clipXtra) {
+          return res.json(codeClipVertical.validation.buildCodeClipXtraValidationPayload(clipXtra));
+        }
+
+        const postgresClipXtra = await getCodeClipXtraRedemptionByToken(token);
+        if (postgresClipXtra) {
+          return res.json(codeClipVertical.validation.buildCodeClipXtraValidationPayload(postgresClipXtra));
         }
 
         return res.status(404).json({
@@ -5489,6 +5511,18 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
       });
     }
 
+    if (isCodeClipXtraToken) {
+      const postgresClipXtra = await getCodeClipXtraRedemptionByToken(token);
+      if (postgresClipXtra) {
+        return res.json(codeClipVertical.validation.buildCodeClipXtraValidationPayload(postgresClipXtra));
+      }
+
+      return res.status(404).json({
+        ok: false,
+        status: "not_found",
+      });
+    }
+
     const claim = (globalThis.__CODEPERKS_REWARD_CLAIMS || []).find(
       (entry) => entry.redemptionToken === token
     );
@@ -5531,6 +5565,34 @@ app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
       return res.status(400).json({
         ok: false,
         error: "Missing redemption token",
+      });
+    }
+
+    if (token.toUpperCase().startsWith("CX-")) {
+      const result = await redeemCodeClipXtraRedemption(token, redeemedBy);
+      const row = result.row;
+
+      if (result.status === "not_found" || !row) {
+        return res.status(404).json({
+          ok: false,
+          status: "not_found",
+        });
+      }
+
+      if (result.status === "already_redeemed") {
+        const refreshedRow = await getCodeClipXtraRedemptionByToken(token);
+
+        return res.status(409).json({
+          ok: false,
+          status: "already_redeemed",
+          redeemedAt: (refreshedRow || row).redeemed_at || null,
+        });
+      }
+
+      return res.json({
+        ...codeClipVertical.validation.buildCodeClipXtraValidationPayload(row),
+        ok: true,
+        status: "redeemed",
       });
     }
 
