@@ -3926,7 +3926,9 @@ app.post("/scan", async (req, res) => {
     }
 
 const eventVertical = String(event?.vertical || "").trim().toLowerCase();
-const vertical = requestedVertical === "codepod" || eventVertical === "codepod" ? "codepod" : requestedVertical;
+const vertical = requestedVertical === "codepod" || eventVertical === "codepod"
+  ? "codepod"
+  : (requestedVertical === "codeclip" || eventVertical === "codeclip" ? "codeclip" : requestedVertical);
 
 if (process.env.REDIS_URL) {
   const rateLimit = vertical === "codepod" ? 2000 : 200;
@@ -4089,6 +4091,47 @@ if (vertical === "codeperks" && process.env.REDIS_URL && scanId) {
     benefitTier: tier,
     benefitInventory: benefitAssignment?.inventoryStatus || null,
     benefitWindow,
+  });
+}
+
+if (vertical === "codeclip") {
+  const codeClipEvent = codeClipVertical.routes.parseCodeClipRewardsMeta(event || {});
+
+  if (Date.now() > Date.parse(codeClipEvent.endAt)) {
+    return res.json({
+      success: false,
+      status: "expired",
+      error: "bonus_window_expired",
+    });
+  }
+
+  const codeClipRewardAssignments = await codeClipVertical.assignment.assignCodeClipRewards({
+    redis: process.env.REDIS_URL ? redis : null,
+    eventCode,
+    scanId,
+    rewards: codeClipEvent.rewards || {},
+  });
+
+  const assignedTier =
+    codeClipRewardAssignments.clipPlus?.assigned ? "clipPlus" :
+    codeClipRewardAssignments.clip?.assigned ? "clip" :
+    codeClipRewardAssignments.openClip?.assigned ? "openClip" :
+    "openClip";
+
+  tier = assignedTier;
+
+  await persistFinalScan(tier, { rewards: codeClipRewardAssignments });
+
+  return res.json({
+    success: true,
+    eventCode,
+    eventId,
+    rawScans: Number(rawScans || 0),
+    uniqueScans: Number(uniqueScans || 0),
+    scanRank,
+    tier,
+    rewards: codeClipRewardAssignments,
+    clipXtra: codeClipRewardAssignments.clipXtra || null,
   });
 }
 
