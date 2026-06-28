@@ -4098,76 +4098,21 @@ if (vertical === "codeperks" && process.env.REDIS_URL && scanId) {
 }
 
 if (vertical === "codeclip") {
-  const codeClipEvent = codeClipVertical.routes.parseCodeClipRewardsMeta(event || {});
-
-  if (Date.now() > Date.parse(codeClipEvent.endAt)) {
-    return res.json({
-      success: false,
-      status: "expired",
-      error: "bonus_window_expired",
-    });
-  }
-
-  const codeClipRewardAssignments = await codeClipVertical.assignment.assignCodeClipRewards({
-    redis: process.env.REDIS_URL ? redis : null,
-    eventCode,
-    scanId,
-    rewards: codeClipEvent.rewards || {},
-  });
-
-  const assignedTier =
-    codeClipRewardAssignments.clipPlus?.assigned ? "clipPlus" :
-    codeClipRewardAssignments.clip?.assigned ? "clip" :
-    codeClipRewardAssignments.openClip?.assigned ? "openClip" :
-    "openClip";
-
-  tier = assignedTier;
-
-  await persistFinalScan(tier, { rewards: codeClipRewardAssignments });
-
-  if (codeClipRewardAssignments.clipXtra?.assigned) {
-    try {
-      await saveCodeClipXtraRedemption({
-        token: codeClipRewardAssignments.clipXtra.redemptionToken,
-        eventCode,
-        eventId,
-        scanId,
-        vertical: "codeclip",
-        rewardType: "clip_xtra",
-        tier: "clipXtra",
-        displayTier: "ClipXtra",
-        partnerName: codeClipRewardAssignments.clipXtra.partnerName,
-        rewardTitle: codeClipRewardAssignments.clipXtra.title,
-        redemptionLocation: codeClipRewardAssignments.clipXtra.redemptionLocation,
-        redemptionDeadline: codeClipRewardAssignments.clipXtra.redemptionDeadline,
-        redemptionInstructions: codeClipRewardAssignments.clipXtra.redemptionInstructions,
-        status: "assigned",
-        assignedAt: codeClipRewardAssignments.clipXtra.assignedAt,
-        rawPayload: {
-          eventCode,
-          eventId,
-          scanId,
-          tier,
-          rewardType: "clip_xtra",
-          clipXtra: codeClipRewardAssignments.clipXtra,
-        },
-      });
-    } catch (dbError) {
-      console.warn("codeClip ClipXtra Postgres save failed:", dbError.message);
-    }
-  }
-
-  return res.json({
-    success: true,
+  const result = await codeClipVertical.service.handleCodeClipScan({
+    event,
     eventCode,
     eventId,
-    rawScans: Number(rawScans || 0),
-    uniqueScans: Number(uniqueScans || 0),
+    scanId,
+    rawScans,
+    uniqueScans,
     scanRank,
-    tier,
-    rewards: codeClipRewardAssignments,
-    clipXtra: codeClipRewardAssignments.clipXtra || null,
+    redis: process.env.REDIS_URL ? redis : null,
+    codeClipVertical,
+    persistFinalScan,
+    saveCodeClipXtraRedemption,
   });
+
+  return res.status(result.httpStatus).json(result.payload);
 }
 
 const isCodePodScan = vertical === "codepod" || String(event?.vertical || "").trim().toLowerCase() === "codepod";
@@ -5450,22 +5395,14 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
       }
 
       if (isCodeClipXtraToken) {
-        const postgresClipXtra = await getCodeClipXtraRedemptionByToken(token);
-        if (postgresClipXtra) {
-          return res.json(codeClipVertical.validation.buildCodeClipXtraValidationPayload(postgresClipXtra));
-        }
-
-        const rawClipXtra = await redis.get(codeClipVertical.tokens.buildCodeClipXtraTokenKey(token));
-        const clipXtra = rawClipXtra ? JSON.parse(rawClipXtra) : null;
-
-        if (clipXtra) {
-          return res.json(codeClipVertical.validation.buildCodeClipXtraValidationPayload(clipXtra));
-        }
-
-        return res.status(404).json({
-          ok: false,
-          status: "not_found",
+        const result = await codeClipVertical.service.validateClipXtraToken({
+          token,
+          redis,
+          getCodeClipXtraRedemptionByToken,
+          codeClipVertical,
         });
+
+        return res.status(result.found ? 200 : 404).json(result.payload);
       }
 
       const claimId = await redis.get(`codeperks:redemption:${token}`);
@@ -5512,15 +5449,14 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
     }
 
     if (isCodeClipXtraToken) {
-      const postgresClipXtra = await getCodeClipXtraRedemptionByToken(token);
-      if (postgresClipXtra) {
-        return res.json(codeClipVertical.validation.buildCodeClipXtraValidationPayload(postgresClipXtra));
-      }
-
-      return res.status(404).json({
-        ok: false,
-        status: "not_found",
+      const result = await codeClipVertical.service.validateClipXtraToken({
+        token,
+        redis: null,
+        getCodeClipXtraRedemptionByToken,
+        codeClipVertical,
       });
+
+      return res.status(result.found ? 200 : 404).json(result.payload);
     }
 
     const claim = (globalThis.__CODEPERKS_REWARD_CLAIMS || []).find(
@@ -5569,31 +5505,15 @@ app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
     }
 
     if (token.toUpperCase().startsWith("CX-")) {
-      const result = await redeemCodeClipXtraRedemption(token, redeemedBy);
-      const row = result.row;
-
-      if (result.status === "not_found" || !row) {
-        return res.status(404).json({
-          ok: false,
-          status: "not_found",
-        });
-      }
-
-      if (result.status === "already_redeemed") {
-        const refreshedRow = await getCodeClipXtraRedemptionByToken(token);
-
-        return res.status(409).json({
-          ok: false,
-          status: "already_redeemed",
-          redeemedAt: (refreshedRow || row).redeemed_at || null,
-        });
-      }
-
-      return res.json({
-        ...codeClipVertical.validation.buildCodeClipXtraValidationPayload(row),
-        ok: true,
-        status: "redeemed",
+      const result = await codeClipVertical.service.redeemClipXtraToken({
+        token,
+        redeemedBy,
+        redeemCodeClipXtraRedemption,
+        getCodeClipXtraRedemptionByToken,
+        codeClipVertical,
       });
+
+      return res.status(result.httpStatus).json(result.payload);
     }
 
     if (token.toUpperCase().startsWith("GX-")) {
