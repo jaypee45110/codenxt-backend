@@ -1,4 +1,4 @@
-const { normalizeCodeClipRewards, normalizeCodeClipXtra } = require("./verticals/codeclip/rewards");
+const codeClipVertical = require("./verticals/codeclip");
 require("dotenv").config();
 
 const REDIS_ENABLED = !!process.env.REDIS_URL;
@@ -813,7 +813,7 @@ const normalizedDigitalSouvenir = isCodePodEvent
   ? normalizeCodePodDigitalSouvenir(digitalSouvenir || {})
   : null;
 const normalizedCodeClipRewards = isCodeClipEvent
-  ? normalizeCodeClipRewards(rewards || {})
+  ? codeClipVertical.rewards.normalizeCodeClipRewards(rewards || {})
   : null;
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
