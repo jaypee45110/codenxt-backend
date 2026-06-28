@@ -1109,12 +1109,8 @@ if (meta && meta.digitalSouvenir && typeof meta.digitalSouvenir === "string") {
   }
 }
 
-if (meta && meta.rewards && typeof meta.rewards === "string") {
-  try {
-    meta.rewards = JSON.parse(meta.rewards);
-  } catch {
-    meta.rewards = {};
-  }
+if (String(meta?.vertical || "").trim().toLowerCase() === "codeclip") {
+  meta = codeClipVertical.routes.parseCodeClipRewardsMeta(meta);
 }
 
 if (meta && meta.demoLocations) {
@@ -1252,7 +1248,7 @@ if (String(meta?.vertical || "").trim().toLowerCase() === "codepod") {
 }
 
 if (String(meta?.vertical || "").trim().toLowerCase() === "codeclip") {
-  normalizedMeta.rewards = codeClipVertical.rewards.normalizeCodeClipRewards(meta?.rewards || {});
+  Object.assign(normalizedMeta, codeClipVertical.routes.attachCodeClipRewardsToNormalizedMeta(normalizedMeta, meta));
 }
 
   events[eventId] = normalizedMeta;
