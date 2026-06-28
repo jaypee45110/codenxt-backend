@@ -1027,6 +1027,68 @@ async function saveCodeClipXtraRedemption(record = {}) {
   return result.rows[0] || null;
 }
 
+async function getCodeClipXtraRedemptionByToken(token) {
+  if (!pool || !token) return null;
+
+  await ensureCodeClipXtraRedemptionsTable();
+
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM codeclip_clipxtra_redemptions
+      WHERE token = $1
+      LIMIT 1
+    `,
+    [token]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function redeemCodeClipXtraRedemption(token, redeemedBy = "partner") {
+  if (!pool || !token) return { status: "not_found", row: null };
+
+  await ensureCodeClipXtraRedemptionsTable();
+
+  const redeemed = await pool.query(
+    `
+      UPDATE codeclip_clipxtra_redemptions
+      SET
+        status = 'redeemed',
+        redeemed_at = NOW(),
+        redeemed_by = $2,
+        updated_at = NOW()
+      WHERE token = $1
+        AND redeemed_at IS NULL
+      RETURNING *
+    `,
+    [token, String(redeemedBy || "partner").trim() || "partner"]
+  );
+
+  if (redeemed.rows[0]) {
+    return { status: "redeemed", row: redeemed.rows[0] };
+  }
+
+  const alreadyRedeemed = await pool.query(
+    `
+      UPDATE codeclip_clipxtra_redemptions
+      SET
+        already_redeemed_attempts = already_redeemed_attempts + 1,
+        updated_at = NOW()
+      WHERE token = $1
+        AND redeemed_at IS NOT NULL
+      RETURNING *
+    `,
+    [token]
+  );
+
+  if (alreadyRedeemed.rows[0]) {
+    return { status: "already_redeemed", row: alreadyRedeemed.rows[0] };
+  }
+
+  return { status: "not_found", row: null };
+}
+
 async function getCodePodGoldXtraRedemptionByToken(token) {
   if (!pool || !token) return null;
 
@@ -1100,6 +1162,8 @@ module.exports = {
   saveCodePodGoldXtraRedemption,
   ensureCodeClipXtraRedemptionsTable,
   saveCodeClipXtraRedemption,
+  getCodeClipXtraRedemptionByToken,
+  redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
   redeemCodePodGoldXtraRedemption,
   getCodeDemoHandshakeReports,
