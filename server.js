@@ -5450,16 +5450,16 @@ app.get("/redemption/:token", limitCertificateValidate, async (req, res) => {
       }
 
       if (isCodeClipXtraToken) {
+        const postgresClipXtra = await getCodeClipXtraRedemptionByToken(token);
+        if (postgresClipXtra) {
+          return res.json(codeClipVertical.validation.buildCodeClipXtraValidationPayload(postgresClipXtra));
+        }
+
         const rawClipXtra = await redis.get(codeClipVertical.tokens.buildCodeClipXtraTokenKey(token));
         const clipXtra = rawClipXtra ? JSON.parse(rawClipXtra) : null;
 
         if (clipXtra) {
           return res.json(codeClipVertical.validation.buildCodeClipXtraValidationPayload(clipXtra));
-        }
-
-        const postgresClipXtra = await getCodeClipXtraRedemptionByToken(token);
-        if (postgresClipXtra) {
-          return res.json(codeClipVertical.validation.buildCodeClipXtraValidationPayload(postgresClipXtra));
         }
 
         return res.status(404).json({
