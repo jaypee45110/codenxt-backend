@@ -1,4 +1,5 @@
 const { normalizeCodeClipRewards, normalizeCodeClipXtra } = require("./rewards");
+const codeClipRoutes = require("./routes");
 const {
   CODECLIP_CLIP_XTRA_TOKEN_KEY_PREFIX,
   buildCodeClipXtraTokenKey,
@@ -39,4 +40,5 @@ module.exports = {
     readCodeClipXtraToken,
     validateCodeClipXtraToken,
   },
+  routes: codeClipRoutes,
 };

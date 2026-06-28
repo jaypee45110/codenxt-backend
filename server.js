@@ -873,8 +873,8 @@ if (normalizedPartnerReward) {
 if (normalizedDigitalSouvenir) {
   event.digitalSouvenir = normalizedDigitalSouvenir;
 }
-if (normalizedCodeClipRewards) {
-  event.rewards = normalizedCodeClipRewards;
+if (isCodeClipEvent) {
+  Object.assign(event, codeClipVertical.routes.attachCodeClipRewardsToEvent(event, rewards || {}));
 }
     const dailyDemoEvents = buildCodeDemoDailyDemoEvents(event, req.body);
     event.dailyDemoEvents = dailyDemoEvents;
@@ -928,8 +928,8 @@ if (normalizedPartnerReward) {
 if (normalizedDigitalSouvenir) {
   eventMeta.digitalSouvenir = JSON.stringify(normalizedDigitalSouvenir);
 }
-if (normalizedCodeClipRewards) {
-  eventMeta.rewards = JSON.stringify(normalizedCodeClipRewards);
+if (isCodeClipEvent) {
+  Object.assign(eventMeta, codeClipVertical.routes.attachCodeClipRewardsToEventMeta(eventMeta, rewards || {}));
 }
 await redis.hset(`event:${id}:meta`, eventMeta);
 
