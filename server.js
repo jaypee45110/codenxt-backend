@@ -776,7 +776,6 @@ const {
 	  bonusDetails,
 	  partnerReward,
 	  digitalSouvenir,
-	  rewards,
 	  defaultLang,
   lang,
   language,
@@ -802,20 +801,11 @@ const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory ||
 const normalizedRewardDelivery = normalizeRewardDelivery(rewardDelivery || {});
 const normalizedRedemptionLocation = String(redemptionLocation || "").trim();
 const normalizedBonusDetails = normalizeBonusDetails(bonusDetails || {});
-const codeClipRewardsAsDigitalSouvenir = rewards && typeof rewards === "object"
-  ? {
-      general: rewards.openClip || {},
-      silver: rewards.clip || {},
-      gold: rewards.clipPlus || {},
-      goldXtra: rewards.clipXtra || {},
-    }
+const normalizedPartnerReward = normalizedVertical === "codepod"
+  ? normalizeCodePodPartnerReward(partnerReward || {})
   : null;
-
-const normalizedPartnerReward = normalizedVertical === "codepod" || normalizedVertical === "codeclip"
-  ? normalizeCodePodPartnerReward(partnerReward || rewards?.clipXtra || {})
-  : null;
-const normalizedDigitalSouvenir = normalizedVertical === "codepod" || normalizedVertical === "codeclip"
-  ? normalizeCodePodDigitalSouvenir(digitalSouvenir || codeClipRewardsAsDigitalSouvenir || {})
+const normalizedDigitalSouvenir = normalizedVertical === "codepod"
+  ? normalizeCodePodDigitalSouvenir(digitalSouvenir || {})
   : null;
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
@@ -2735,7 +2725,7 @@ app.get("/codedemo/handshake-report/:parentEventCode", requireCodePerksAdmin, as
 app.post("/codepod/landing-track", async (req, res) => {
   try {
     const src = String(req.body?.src || "").trim();
-    if (!/^\d+$/.test(src)) {
+    if (!/^[1-5]$/.test(src)) {
       return res.json({ success: true });
     }
 
