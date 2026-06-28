@@ -31,6 +31,7 @@ const {
   getLatestCodeDemoExceptions,
   ensureCodePodGoldXtraRedemptionsTable,
   saveCodePodGoldXtraRedemption,
+  saveCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
   redeemCodePodGoldXtraRedemption
 } = require("./db");
@@ -4121,6 +4122,38 @@ if (vertical === "codeclip") {
   tier = assignedTier;
 
   await persistFinalScan(tier, { rewards: codeClipRewardAssignments });
+
+  if (codeClipRewardAssignments.clipXtra?.assigned) {
+    try {
+      await saveCodeClipXtraRedemption({
+        token: codeClipRewardAssignments.clipXtra.redemptionToken,
+        eventCode,
+        eventId,
+        scanId,
+        vertical: "codeclip",
+        rewardType: "clip_xtra",
+        tier: "clipXtra",
+        displayTier: "ClipXtra",
+        partnerName: codeClipRewardAssignments.clipXtra.partnerName,
+        rewardTitle: codeClipRewardAssignments.clipXtra.title,
+        redemptionLocation: codeClipRewardAssignments.clipXtra.redemptionLocation,
+        redemptionDeadline: codeClipRewardAssignments.clipXtra.redemptionDeadline,
+        redemptionInstructions: codeClipRewardAssignments.clipXtra.redemptionInstructions,
+        status: "assigned",
+        assignedAt: codeClipRewardAssignments.clipXtra.assignedAt,
+        rawPayload: {
+          eventCode,
+          eventId,
+          scanId,
+          tier,
+          rewardType: "clip_xtra",
+          clipXtra: codeClipRewardAssignments.clipXtra,
+        },
+      });
+    } catch (dbError) {
+      console.warn("codeClip ClipXtra Postgres save failed:", dbError.message);
+    }
+  }
 
   return res.json({
     success: true,
