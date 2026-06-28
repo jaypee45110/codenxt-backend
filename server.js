@@ -830,6 +830,7 @@ const {
 	  bonusDetails,
 	  partnerReward,
 	  digitalSouvenir,
+	  rewards,
 	  defaultLang,
   lang,
   language,
@@ -855,11 +856,17 @@ const normalizedBenefitInventory = normalizeBenefitInventory(benefitInventory ||
 const normalizedRewardDelivery = normalizeRewardDelivery(rewardDelivery || {});
 const normalizedRedemptionLocation = String(redemptionLocation || "").trim();
 const normalizedBonusDetails = normalizeBonusDetails(bonusDetails || {});
-const normalizedPartnerReward = normalizedVertical === "codepod"
+const isCodePodEvent = normalizedVertical === "codepod";
+const isCodeClipEvent = normalizedVertical === "codeclip";
+
+const normalizedPartnerReward = isCodePodEvent
   ? normalizeCodePodPartnerReward(partnerReward || {})
   : null;
-const normalizedDigitalSouvenir = normalizedVertical === "codepod"
+const normalizedDigitalSouvenir = isCodePodEvent
   ? normalizeCodePodDigitalSouvenir(digitalSouvenir || {})
+  : null;
+const normalizedCodeClipRewards = isCodeClipEvent
+  ? normalizeCodeClipRewards(rewards || {})
   : null;
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
@@ -919,6 +926,9 @@ if (normalizedPartnerReward) {
 if (normalizedDigitalSouvenir) {
   event.digitalSouvenir = normalizedDigitalSouvenir;
 }
+if (normalizedCodeClipRewards) {
+  event.rewards = normalizedCodeClipRewards;
+}
     const dailyDemoEvents = buildCodeDemoDailyDemoEvents(event, req.body);
     event.dailyDemoEvents = dailyDemoEvents;
     events[id] = event;
@@ -970,6 +980,9 @@ if (normalizedPartnerReward) {
 }
 if (normalizedDigitalSouvenir) {
   eventMeta.digitalSouvenir = JSON.stringify(normalizedDigitalSouvenir);
+}
+if (normalizedCodeClipRewards) {
+  eventMeta.rewards = JSON.stringify(normalizedCodeClipRewards);
 }
 await redis.hset(`event:${id}:meta`, eventMeta);
 
