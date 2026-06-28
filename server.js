@@ -1109,6 +1109,14 @@ if (meta && meta.digitalSouvenir && typeof meta.digitalSouvenir === "string") {
   }
 }
 
+if (meta && meta.rewards && typeof meta.rewards === "string") {
+  try {
+    meta.rewards = JSON.parse(meta.rewards);
+  } catch {
+    meta.rewards = {};
+  }
+}
+
 if (meta && meta.demoLocations) {
   try {
     meta.demoLocations = JSON.parse(meta.demoLocations);
@@ -1241,6 +1249,10 @@ rawScans,
 if (String(meta?.vertical || "").trim().toLowerCase() === "codepod") {
   normalizedMeta.partnerReward = normalizeCodePodPartnerReward(meta?.partnerReward || {});
   normalizedMeta.digitalSouvenir = normalizeCodePodDigitalSouvenir(meta?.digitalSouvenir || {});
+}
+
+if (String(meta?.vertical || "").trim().toLowerCase() === "codeclip") {
+  normalizedMeta.rewards = codeClipVertical.rewards.normalizeCodeClipRewards(meta?.rewards || {});
 }
 
   events[eventId] = normalizedMeta;
