@@ -4075,15 +4075,15 @@ if (process.env.REDIS_URL) {
   }
 }
 
-const persistFinalScan = async (finalTier, extraPayload = {}) => {
+const persistFinalScan = async (finalTier, extraPayload = {}, interaction = null) => {
   try {
     await saveEventScan({
-      eventCode,
-      eventId,
+      eventCode: interaction?.eventCode || eventCode,
+      eventId: interaction?.eventId || eventId,
       vertical,
-      scanId,
-      scanRank,
-      tier: finalTier,
+      scanId: interaction?.scanId || scanId,
+      scanRank: interaction?.scanRank ?? scanRank,
+      tier: interaction?.tier || finalTier,
       teamCode: event.teamCode || event.demoLocation?.teamCode || "",
       teamLabel: event.teamLabel || event.demoLocation?.teamLabel || "",
       dailyDemoCode: event.dailyDemoCode || event.code || eventCode,

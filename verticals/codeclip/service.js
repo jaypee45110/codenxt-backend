@@ -310,7 +310,7 @@ async function handleCodeClipScan({
   await persistFinalScan(interaction.tier, {
     rewards: interactionRewardAssignments,
     interaction: createScanPayloadInteraction(interaction),
-  });
+  }, interaction);
 
   if (saveCodeClipInteraction) {
     try {
