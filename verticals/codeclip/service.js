@@ -1,3 +1,21 @@
+const INTERACTION_STATES = {
+  EXPIRED: "expired",
+};
+
+const REWARD_ASSIGNMENT_STATES = {
+  ASSIGNED: "assigned",
+};
+
+const REDEMPTION_STATES = {
+  NOT_FOUND: "not_found",
+  REDEEMED: "redeemed",
+  ALREADY_REDEEMED: "already_redeemed",
+};
+
+const CODECLIP_FAILURE_REASONS = {
+  BONUS_WINDOW_EXPIRED: "bonus_window_expired",
+};
+
 async function validateClipXtraToken({
   token,
   redis,
@@ -28,7 +46,7 @@ async function validateClipXtraToken({
     found: false,
     payload: {
       ok: false,
-      status: "not_found",
+      status: REDEMPTION_STATES.NOT_FOUND,
     },
   };
 }
@@ -43,24 +61,24 @@ async function redeemClipXtraToken({
   const result = await redeemCodeClipXtraRedemption(token, redeemedBy);
   const row = result.row;
 
-  if (result.status === "not_found" || !row) {
+  if (result.status === REDEMPTION_STATES.NOT_FOUND || !row) {
     return {
       httpStatus: 404,
       payload: {
         ok: false,
-        status: "not_found",
+        status: REDEMPTION_STATES.NOT_FOUND,
       },
     };
   }
 
-  if (result.status === "already_redeemed") {
+  if (result.status === REDEMPTION_STATES.ALREADY_REDEEMED) {
     const refreshedRow = await getCodeClipXtraRedemptionByToken(token);
 
     return {
       httpStatus: 409,
       payload: {
         ok: false,
-        status: "already_redeemed",
+        status: REDEMPTION_STATES.ALREADY_REDEEMED,
         redeemedAt: (refreshedRow || row).redeemed_at || null,
       },
     };
@@ -71,7 +89,7 @@ async function redeemClipXtraToken({
     payload: {
       ...codeClipVertical.validation.buildCodeClipXtraValidationPayload(row),
       ok: true,
-      status: "redeemed",
+      status: REDEMPTION_STATES.REDEEMED,
     },
   };
 }
@@ -144,8 +162,8 @@ async function handleCodeClipScan({
   if (Date.now() > Date.parse(codeClipEvent.endAt)) {
     return buildInteractionResult(200, {
       success: false,
-      status: "expired",
-      error: "bonus_window_expired",
+      status: INTERACTION_STATES.EXPIRED,
+      error: CODECLIP_FAILURE_REASONS.BONUS_WINDOW_EXPIRED,
     });
   }
 
@@ -180,7 +198,7 @@ async function handleCodeClipScan({
         redemptionLocation: codeClipRewardAssignments.clipXtra.redemptionLocation,
         redemptionDeadline: codeClipRewardAssignments.clipXtra.redemptionDeadline,
         redemptionInstructions: codeClipRewardAssignments.clipXtra.redemptionInstructions,
-        status: "assigned",
+        status: REWARD_ASSIGNMENT_STATES.ASSIGNED,
         assignedAt: codeClipRewardAssignments.clipXtra.assignedAt,
         rawPayload: {
           eventCode: interactionContext.eventCode,

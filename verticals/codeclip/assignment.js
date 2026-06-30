@@ -3,6 +3,15 @@ const { createCodeClipXtraToken } = require("./tokens");
 
 const CODECLIP_REWARD_TIERS = ["clipPlus", "clip", "openClip"];
 
+const REWARD_ASSIGNMENT_STATES = {
+  ASSIGNED: "assigned",
+  UNAVAILABLE: "unavailable",
+};
+
+const CODECLIP_FAILURE_REASONS = {
+  REDIS_REQUIRED: "redis_required",
+};
+
 function buildCodeClipRewardAssignment(tier, reward = {}, assignedCount = 0, quantity = 0, unlimited = false) {
   return {
     assigned: true,
@@ -84,8 +93,8 @@ async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
     setRewardAssignment(rewardAssignmentResult, "clipXtra", {
       ...clipXtra,
       assigned: false,
-      status: "unavailable",
-      reason: "redis_required",
+      status: REWARD_ASSIGNMENT_STATES.UNAVAILABLE,
+      reason: CODECLIP_FAILURE_REASONS.REDIS_REQUIRED,
       requiresRedis: true,
     });
   }
@@ -106,7 +115,7 @@ async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
           tier: "clipXtra",
           displayTier: "ClipXtra",
           rewardType: "clip_xtra",
-          status: "assigned",
+          status: REWARD_ASSIGNMENT_STATES.ASSIGNED,
           assignedCount,
           assignedAt: new Date().toISOString(),
         });
