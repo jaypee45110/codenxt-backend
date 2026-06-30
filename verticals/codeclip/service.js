@@ -134,6 +134,27 @@ function buildRoutingMatch(interactionContext) {
   };
 }
 
+function createInteraction({
+  interactionContext,
+  routingOutcome,
+  tier = null,
+  rewardAssignments = null,
+}) {
+  return {
+    interactionId: null,
+    eventCode: interactionContext.eventCode,
+    eventId: interactionContext.eventId,
+    scanId: interactionContext.scanId,
+    rawScans: interactionContext.rawScans,
+    uniqueScans: interactionContext.uniqueScans,
+    scanRank: interactionContext.scanRank,
+    tier,
+    timestamp: new Date().toISOString(),
+    routingOutcome,
+    rewardAssignments,
+  };
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -179,6 +200,15 @@ async function handleCodeClipScan({
     codeClipRewardAssignments.clip?.assigned ? "clip" :
     codeClipRewardAssignments.openClip?.assigned ? "openClip" :
     "openClip";
+
+  const interaction = createInteraction({
+    interactionContext: routingOutcome.interactionContext,
+    routingOutcome: routingOutcome.outcome,
+    tier,
+    rewardAssignments: codeClipRewardAssignments,
+  });
+  // Observational only: persistence and public responses still use the existing values below.
+  void interaction;
 
   await persistFinalScan(tier, { rewards: codeClipRewardAssignments });
 
