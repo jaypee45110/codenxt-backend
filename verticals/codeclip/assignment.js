@@ -25,9 +25,17 @@ function calculateCodeClipRewardQuantity(tier, reward = {}) {
   return Math.max(0, Math.floor(Number(reward.quantity || 0) || 0));
 }
 
+function createRewardAssignmentResult() {
+  return {};
+}
+
+function setRewardAssignment(result, tier, assignment) {
+  result[tier] = assignment;
+}
+
 async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
   const inventory = normalizeCodeClipRewards(rewards || {});
-  const assigned = {};
+  const rewardAssignmentResult = createRewardAssignmentResult();
 
   for (const tier of CODECLIP_REWARD_TIERS) {
     const reward = inventory[tier];
@@ -37,7 +45,7 @@ async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
     const unlimited = tier === "openClip" && quantity === 0;
 
     if (!redis || !eventCode || !scanId || unlimited) {
-      assigned[tier] = buildCodeClipRewardAssignment(tier, reward, 0, quantity, unlimited);
+      setRewardAssignment(rewardAssignmentResult, tier, buildCodeClipRewardAssignment(tier, reward, 0, quantity, unlimited));
       continue;
     }
 
@@ -46,13 +54,13 @@ async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
 
     const storedScanAssignment = await redis.get(scanKey);
     if (storedScanAssignment) {
-      assigned[tier] = JSON.parse(storedScanAssignment);
+      setRewardAssignment(rewardAssignmentResult, tier, JSON.parse(storedScanAssignment));
       continue;
     }
 
     const assignedCount = Number(await redis.incr(assignedKey));
     if (quantity > 0 && assignedCount > quantity) {
-      assigned[tier] = {
+      setRewardAssignment(rewardAssignmentResult, tier, {
         assigned: false,
         tier,
         displayTier: tier === "clipPlus" ? "Clip+" : tier === "clip" ? "Clip" : "OpenClip",
@@ -61,25 +69,25 @@ async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
         quantity,
         assignedCount,
         remaining: 0,
-      };
+      });
       await redis.decr(assignedKey);
       continue;
     }
 
     const assignment = buildCodeClipRewardAssignment(tier, reward, assignedCount, quantity, unlimited);
     await redis.set(scanKey, JSON.stringify(assignment));
-    assigned[tier] = assignment;
+    setRewardAssignment(rewardAssignmentResult, tier, assignment);
   }
 
   const clipXtra = inventory.clipXtra;
   if (clipXtra?.active && clipXtra.quantity > 0 && (!redis || !eventCode || !scanId)) {
-    assigned.clipXtra = {
+    setRewardAssignment(rewardAssignmentResult, "clipXtra", {
       ...clipXtra,
       assigned: false,
       status: "unavailable",
       reason: "redis_required",
       requiresRedis: true,
-    };
+    });
   }
 
   if (clipXtra?.active && clipXtra.quantity > 0 && redis && eventCode && scanId) {
@@ -88,7 +96,7 @@ async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
 
     const storedClipXtra = await redis.get(scanKey);
     if (storedClipXtra) {
-      assigned.clipXtra = JSON.parse(storedClipXtra);
+      setRewardAssignment(rewardAssignmentResult, "clipXtra", JSON.parse(storedClipXtra));
     } else {
       const assignedCount = Number(await redis.incr(assignedKey));
       if (assignedCount <= clipXtra.quantity) {
@@ -103,7 +111,7 @@ async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
           assignedAt: new Date().toISOString(),
         });
 
-        assigned.clipXtra = {
+        const clipXtraAssignment = {
           ...clipXtra,
           assigned: true,
           redemptionToken,
@@ -111,14 +119,15 @@ async function assignCodeClipRewards({ redis, eventCode, scanId, rewards }) {
           remaining: Math.max(0, clipXtra.quantity - assignedCount),
           assignedAt: new Date().toISOString(),
         };
-        await redis.set(scanKey, JSON.stringify(assigned.clipXtra));
+        setRewardAssignment(rewardAssignmentResult, "clipXtra", clipXtraAssignment);
+        await redis.set(scanKey, JSON.stringify(clipXtraAssignment));
       } else {
         await redis.decr(assignedKey);
       }
     }
   }
 
-  return assigned;
+  return rewardAssignmentResult;
 }
 
 module.exports = {
