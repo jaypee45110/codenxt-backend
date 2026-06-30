@@ -3933,6 +3933,25 @@ app.post("/sms-inbound", async (req, res) => {
     res.status(500).json({ error: "Failed to store SMS join" });
   }
 });
+function buildAudienceEntry({
+  entryCode,
+  scanId,
+  requestedVertical,
+  userAgent,
+  ip,
+}) {
+  return {
+    entryCode,
+    scanId,
+    requestedVertical,
+    source: "scan",
+    transport: "http",
+    userAgent,
+    ip,
+    receivedAt: new Date().toISOString(),
+  };
+}
+
 app.post("/scan", async (req, res) => {
   try {
     const { eventCode, scanId } = req.body || {};
@@ -3946,6 +3965,15 @@ app.post("/scan", async (req, res) => {
       req.socket?.remoteAddress ||
       "unknown";
     const requestedVertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
+    const audienceEntry = buildAudienceEntry({
+      entryCode: eventCode,
+      scanId,
+      requestedVertical,
+      userAgent: req.get("user-agent") || "",
+      ip,
+    });
+    // First observational Audience Entry runtime anchor; retained without changing scan behavior.
+    void audienceEntry;
     let eventId = null;
     let event = null;
 
