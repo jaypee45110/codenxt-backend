@@ -161,17 +161,38 @@ function buildInteractionStateTransition({
   };
 }
 
-function resolveProcessedInteractionState() {
+function buildInteractionStateSnapshot(transitions, fallbackState = INTERACTION_STATES.PROCESSED) {
+  const lastTransition = transitions[transitions.length - 1] || null;
+
   return {
-    state: INTERACTION_STATES.PROCESSED,
-    transitions: [
-      buildInteractionStateTransition({
-        from: INTERACTION_STATES.REWARD_ASSIGNED,
-        to: INTERACTION_STATES.PROCESSED,
-        transition: INTERACTION_TRANSITIONS.COMPLETE,
-      }),
-    ],
+    state: lastTransition?.to || fallbackState,
+    transitions,
   };
+}
+
+function resolveSuccessfulScanInteractionState() {
+  return buildInteractionStateSnapshot([
+    buildInteractionStateTransition({
+      from: null,
+      to: INTERACTION_STATES.RECEIVED,
+      transition: INTERACTION_TRANSITIONS.RECEIVE,
+    }),
+    buildInteractionStateTransition({
+      from: INTERACTION_STATES.RECEIVED,
+      to: INTERACTION_STATES.ROUTED,
+      transition: INTERACTION_TRANSITIONS.ROUTE_MATCH,
+    }),
+    buildInteractionStateTransition({
+      from: INTERACTION_STATES.ROUTED,
+      to: INTERACTION_STATES.REWARD_ASSIGNED,
+      transition: INTERACTION_TRANSITIONS.ASSIGN_REWARD,
+    }),
+    buildInteractionStateTransition({
+      from: INTERACTION_STATES.REWARD_ASSIGNED,
+      to: INTERACTION_STATES.PROCESSED,
+      transition: INTERACTION_TRANSITIONS.COMPLETE,
+    }),
+  ]);
 }
 
 function createInteraction({
@@ -180,7 +201,7 @@ function createInteraction({
   tier = null,
   rewardAssignments = null,
 }) {
-  const interactionState = resolveProcessedInteractionState();
+  const interactionState = resolveSuccessfulScanInteractionState();
 
   return {
     interactionId: null,
