@@ -155,6 +155,20 @@ function createInteraction({
   };
 }
 
+function createScanPayloadInteraction(interaction) {
+  return {
+    eventCode: interaction.eventCode,
+    eventId: interaction.eventId,
+    scanId: interaction.scanId,
+    rawScans: interaction.rawScans,
+    uniqueScans: interaction.uniqueScans,
+    scanRank: interaction.scanRank,
+    tier: interaction.tier,
+    routingOutcome: interaction.routingOutcome,
+    rewardAssignments: interaction.rewardAssignments,
+  };
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -207,10 +221,11 @@ async function handleCodeClipScan({
     tier,
     rewardAssignments: codeClipRewardAssignments,
   });
-  // Observational only: persistence and public responses still use the existing values below.
-  void interaction;
 
-  await persistFinalScan(tier, { rewards: codeClipRewardAssignments });
+  await persistFinalScan(tier, {
+    rewards: codeClipRewardAssignments,
+    interaction: createScanPayloadInteraction(interaction),
+  });
 
   if (codeClipRewardAssignments.clipXtra?.assigned) {
     try {
