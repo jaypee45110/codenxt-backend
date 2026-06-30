@@ -290,7 +290,7 @@ async function handleCodeClipScan({
   });
   const interactionRewardAssignments = interaction.rewardAssignments;
 
-  await persistFinalScan(tier, {
+  await persistFinalScan(interaction.tier, {
     rewards: interactionRewardAssignments,
     interaction: createScanPayloadInteraction(interaction),
   });
@@ -307,9 +307,9 @@ async function handleCodeClipScan({
     try {
       await saveCodeClipXtraRedemption({
         token: interactionRewardAssignments.clipXtra.redemptionToken,
-        eventCode: interactionContext.eventCode,
-        eventId: interactionContext.eventId,
-        scanId: interactionContext.scanId,
+        eventCode: interaction.eventCode,
+        eventId: interaction.eventId,
+        scanId: interaction.scanId,
         vertical: "codeclip",
         rewardType: "clip_xtra",
         tier: "clipXtra",
@@ -322,10 +322,10 @@ async function handleCodeClipScan({
         status: REWARD_ASSIGNMENT_STATES.ASSIGNED,
         assignedAt: interactionRewardAssignments.clipXtra.assignedAt,
         rawPayload: {
-          eventCode: interactionContext.eventCode,
-          eventId: interactionContext.eventId,
-          scanId: interactionContext.scanId,
-          tier,
+          eventCode: interaction.eventCode,
+          eventId: interaction.eventId,
+          scanId: interaction.scanId,
+          tier: interaction.tier,
           rewardType: "clip_xtra",
           clipXtra: interactionRewardAssignments.clipXtra,
         },
@@ -337,12 +337,12 @@ async function handleCodeClipScan({
 
   return buildInteractionResult(200, {
     success: true,
-    eventCode: interactionContext.eventCode,
-    eventId: interactionContext.eventId,
-    rawScans: Number(interactionContext.rawScans || 0),
-    uniqueScans: Number(interactionContext.uniqueScans || 0),
-    scanRank: interactionContext.scanRank,
-    tier,
+    eventCode: interaction.eventCode,
+    eventId: interaction.eventId,
+    rawScans: Number(interaction.rawScans || 0),
+    uniqueScans: Number(interaction.uniqueScans || 0),
+    scanRank: interaction.scanRank,
+    tier: interaction.tier,
     rewards: interactionRewardAssignments,
     clipXtra: interactionRewardAssignments.clipXtra || null,
   });
