@@ -3,6 +3,7 @@ const INTERACTION_STATES = {
   ROUTED: "routed",
   REWARD_ASSIGNED: "reward_assigned",
   PROCESSED: "processed",
+  UNMATCHED: "unmatched",
   EXPIRED: "expired",
 };
 
@@ -176,6 +177,23 @@ function buildRoutingMatch(interactionContext) {
     outcome: ROUTING_OUTCOMES.MATCH,
     interactionContext,
   });
+}
+
+function buildNoCampaignMatchInteraction({
+  eventCode,
+  scanId,
+  audienceEntry,
+}) {
+  return {
+    interactionId: null,
+    eventCode,
+    eventId: null,
+    scanId,
+    audienceEntry: createAudienceEntrySnapshot(audienceEntry),
+    state: INTERACTION_STATES.UNMATCHED,
+    timestamp: new Date().toISOString(),
+    routingOutcome: ROUTING_OUTCOMES.NO_CAMPAIGN_MATCH,
+  };
 }
 
 function buildInteractionStateTransition({
@@ -387,5 +405,6 @@ async function handleCodeClipScan({
 module.exports = {
   validateClipXtraToken,
   redeemClipXtraToken,
+  buildNoCampaignMatchInteraction,
   handleCodeClipScan,
 };

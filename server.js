@@ -3996,6 +3996,15 @@ app.post("/scan", async (req, res) => {
     }
 
     if (!event || !eventId) {
+      if (requestedVertical === "codeclip") {
+        const noCampaignMatchInteraction = codeClipVertical.service.buildNoCampaignMatchInteraction({
+          eventCode,
+          scanId,
+          audienceEntry,
+        });
+        void noCampaignMatchInteraction;
+      }
+
       return res.status(404).json({ error: "Event not found" });
     }
 
