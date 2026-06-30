@@ -103,6 +103,19 @@ function buildInteractionResult(httpStatus, payload) {
   };
 }
 
+const ROUTING_OUTCOMES = {
+  MATCH: "MATCH",
+  NO_CAMPAIGN_MATCH: "NO_CAMPAIGN_MATCH",
+  ROUTING_CONFLICT: "ROUTING_CONFLICT",
+};
+
+function buildRoutingMatch(interactionContext) {
+  return {
+    outcome: ROUTING_OUTCOMES.MATCH,
+    interactionContext,
+  };
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -125,7 +138,8 @@ async function handleCodeClipScan({
     uniqueScans,
     scanRank,
   });
-  const codeClipEvent = codeClipVertical.routes.parseCodeClipRewardsMeta(interactionContext.event || {});
+  const routingOutcome = buildRoutingMatch(interactionContext);
+  const codeClipEvent = codeClipVertical.routes.parseCodeClipRewardsMeta(routingOutcome.interactionContext.event || {});
 
   if (Date.now() > Date.parse(codeClipEvent.endAt)) {
     return buildInteractionResult(200, {
@@ -137,8 +151,8 @@ async function handleCodeClipScan({
 
   const codeClipRewardAssignments = await codeClipVertical.assignment.assignCodeClipRewards({
     redis,
-    eventCode: interactionContext.eventCode,
-    scanId: interactionContext.scanId,
+    eventCode: routingOutcome.interactionContext.eventCode,
+    scanId: routingOutcome.interactionContext.scanId,
     rewards: codeClipEvent.rewards || {},
   });
 
