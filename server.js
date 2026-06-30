@@ -32,6 +32,7 @@ const {
   ensureCodePodGoldXtraRedemptionsTable,
   saveCodePodGoldXtraRedemption,
   saveCodeClipXtraRedemption,
+  saveCodeClipInteraction,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
@@ -4109,6 +4110,7 @@ if (vertical === "codeclip") {
     redis: process.env.REDIS_URL ? redis : null,
     codeClipVertical,
     persistFinalScan,
+    saveCodeClipInteraction,
     saveCodeClipXtraRedemption,
   });
 

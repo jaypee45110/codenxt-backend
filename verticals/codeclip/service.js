@@ -180,6 +180,7 @@ async function handleCodeClipScan({
   redis,
   codeClipVertical,
   persistFinalScan,
+  saveCodeClipInteraction,
   saveCodeClipXtraRedemption,
 }) {
   const interactionContext = buildInteractionContext({
@@ -226,6 +227,14 @@ async function handleCodeClipScan({
     rewards: codeClipRewardAssignments,
     interaction: createScanPayloadInteraction(interaction),
   });
+
+  if (saveCodeClipInteraction) {
+    try {
+      await saveCodeClipInteraction(interaction);
+    } catch (dbError) {
+      console.warn("codeClip Interaction Postgres save failed:", dbError.message);
+    }
+  }
 
   if (codeClipRewardAssignments.clipXtra?.assigned) {
     try {

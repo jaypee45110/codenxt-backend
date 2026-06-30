@@ -1027,6 +1027,105 @@ async function saveCodeClipXtraRedemption(record = {}) {
   return result.rows[0] || null;
 }
 
+async function ensureCodeClipInteractionsTable() {
+  if (!pool) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_interactions (
+      id BIGSERIAL PRIMARY KEY,
+      event_code TEXT NOT NULL,
+      event_id TEXT,
+      scan_id TEXT NOT NULL,
+      vertical TEXT NOT NULL DEFAULT 'codeclip',
+      routing_outcome TEXT NOT NULL DEFAULT 'MATCH',
+      tier TEXT,
+      scan_rank INTEGER,
+      raw_scans INTEGER,
+      unique_scans INTEGER,
+      reward_assignments JSONB,
+      raw_payload JSONB,
+      occurred_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (event_code, scan_id)
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_interactions_event_code_created_at_idx
+    ON codeclip_interactions (event_code, created_at DESC)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_interactions_routing_outcome_idx
+    ON codeclip_interactions (routing_outcome)
+  `);
+}
+
+async function saveCodeClipInteraction(interaction = {}) {
+  if (!pool || !interaction.eventCode || !interaction.scanId) return null;
+
+  await ensureCodeClipInteractionsTable();
+
+  const routingOutcome =
+    typeof interaction.routingOutcome === 'string'
+      ? interaction.routingOutcome
+      : interaction.routingOutcome?.status || interaction.routingOutcome?.type || 'MATCH';
+  const rewardAssignmentsPayload = interaction.rewardAssignments || {};
+  const rawInteractionPayload = interaction;
+
+  const result = await pool.query(
+    `
+      INSERT INTO codeclip_interactions (
+        event_code,
+        event_id,
+        scan_id,
+        vertical,
+        routing_outcome,
+        tier,
+        scan_rank,
+        raw_scans,
+        unique_scans,
+        reward_assignments,
+        raw_payload,
+        occurred_at,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,COALESCE($12::timestamptz,NOW()),NOW())
+      ON CONFLICT (event_code, scan_id)
+      DO UPDATE SET
+        event_id = COALESCE(EXCLUDED.event_id, codeclip_interactions.event_id),
+        vertical = EXCLUDED.vertical,
+        routing_outcome = EXCLUDED.routing_outcome,
+        tier = EXCLUDED.tier,
+        scan_rank = EXCLUDED.scan_rank,
+        raw_scans = EXCLUDED.raw_scans,
+        unique_scans = EXCLUDED.unique_scans,
+        reward_assignments = EXCLUDED.reward_assignments,
+        raw_payload = EXCLUDED.raw_payload,
+        occurred_at = COALESCE(codeclip_interactions.occurred_at, EXCLUDED.occurred_at),
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [
+      interaction.eventCode,
+      interaction.eventId ?? null,
+      interaction.scanId,
+      interaction.vertical || 'codeclip',
+      routingOutcome,
+      interaction.tier ?? null,
+      interaction.scanRank ?? null,
+      interaction.rawScans ?? null,
+      interaction.uniqueScans ?? null,
+      JSON.stringify(rewardAssignmentsPayload),
+      JSON.stringify(rawInteractionPayload),
+      interaction.timestamp || null,
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
 async function getCodeClipXtraRedemptionByToken(token) {
   if (!pool || !token) return null;
 
@@ -1162,6 +1261,8 @@ module.exports = {
   saveCodePodGoldXtraRedemption,
   ensureCodeClipXtraRedemptionsTable,
   saveCodeClipXtraRedemption,
+  ensureCodeClipInteractionsTable,
+  saveCodeClipInteraction,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
