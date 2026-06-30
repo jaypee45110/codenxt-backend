@@ -1,5 +1,6 @@
 const INTERACTION_STATES = {
   EXPIRED: "expired",
+  PROCESSED: "processed",
 };
 
 const REWARD_ASSIGNMENT_STATES = {
@@ -148,6 +149,7 @@ function createInteraction({
     rawScans: interactionContext.rawScans,
     uniqueScans: interactionContext.uniqueScans,
     scanRank: interactionContext.scanRank,
+    state: INTERACTION_STATES.PROCESSED,
     tier,
     timestamp: new Date().toISOString(),
     routingOutcome,
@@ -163,6 +165,7 @@ function createScanPayloadInteraction(interaction) {
     rawScans: interaction.rawScans,
     uniqueScans: interaction.uniqueScans,
     scanRank: interaction.scanRank,
+    state: interaction.state,
     tier: interaction.tier,
     routingOutcome: interaction.routingOutcome,
     rewardAssignments: interaction.rewardAssignments,

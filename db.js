@@ -1038,6 +1038,7 @@ async function ensureCodeClipInteractionsTable() {
       scan_id TEXT NOT NULL,
       vertical TEXT NOT NULL DEFAULT 'codeclip',
       routing_outcome TEXT NOT NULL DEFAULT 'MATCH',
+      interaction_state TEXT NOT NULL DEFAULT 'processed',
       tier TEXT,
       scan_rank INTEGER,
       raw_scans INTEGER,
@@ -1049,6 +1050,11 @@ async function ensureCodeClipInteractionsTable() {
       updated_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE (event_code, scan_id)
     )
+  `);
+
+  await pool.query(`
+    ALTER TABLE codeclip_interactions
+    ADD COLUMN IF NOT EXISTS interaction_state TEXT NOT NULL DEFAULT 'processed'
   `);
 
   await pool.query(`
@@ -1082,6 +1088,7 @@ async function saveCodeClipInteraction(interaction = {}) {
         scan_id,
         vertical,
         routing_outcome,
+        interaction_state,
         tier,
         scan_rank,
         raw_scans,
@@ -1091,12 +1098,13 @@ async function saveCodeClipInteraction(interaction = {}) {
         occurred_at,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,COALESCE($12::timestamptz,NOW()),NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,COALESCE($13::timestamptz,NOW()),NOW())
       ON CONFLICT (event_code, scan_id)
       DO UPDATE SET
         event_id = COALESCE(EXCLUDED.event_id, codeclip_interactions.event_id),
         vertical = EXCLUDED.vertical,
         routing_outcome = EXCLUDED.routing_outcome,
+        interaction_state = EXCLUDED.interaction_state,
         tier = EXCLUDED.tier,
         scan_rank = EXCLUDED.scan_rank,
         raw_scans = EXCLUDED.raw_scans,
@@ -1113,6 +1121,7 @@ async function saveCodeClipInteraction(interaction = {}) {
       interaction.scanId,
       interaction.vertical || 'codeclip',
       routingOutcome,
+      interaction.state || 'processed',
       interaction.tier ?? null,
       interaction.scanRank ?? null,
       interaction.rawScans ?? null,
