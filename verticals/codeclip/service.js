@@ -288,9 +288,10 @@ async function handleCodeClipScan({
     tier,
     rewardAssignments: codeClipRewardAssignments,
   });
+  const interactionRewardAssignments = interaction.rewardAssignments;
 
   await persistFinalScan(tier, {
-    rewards: codeClipRewardAssignments,
+    rewards: interactionRewardAssignments,
     interaction: createScanPayloadInteraction(interaction),
   });
 
@@ -302,10 +303,10 @@ async function handleCodeClipScan({
     }
   }
 
-  if (codeClipRewardAssignments.clipXtra?.assigned) {
+  if (interactionRewardAssignments.clipXtra?.assigned) {
     try {
       await saveCodeClipXtraRedemption({
-        token: codeClipRewardAssignments.clipXtra.redemptionToken,
+        token: interactionRewardAssignments.clipXtra.redemptionToken,
         eventCode: interactionContext.eventCode,
         eventId: interactionContext.eventId,
         scanId: interactionContext.scanId,
@@ -313,20 +314,20 @@ async function handleCodeClipScan({
         rewardType: "clip_xtra",
         tier: "clipXtra",
         displayTier: "ClipXtra",
-        partnerName: codeClipRewardAssignments.clipXtra.partnerName,
-        rewardTitle: codeClipRewardAssignments.clipXtra.title,
-        redemptionLocation: codeClipRewardAssignments.clipXtra.redemptionLocation,
-        redemptionDeadline: codeClipRewardAssignments.clipXtra.redemptionDeadline,
-        redemptionInstructions: codeClipRewardAssignments.clipXtra.redemptionInstructions,
+        partnerName: interactionRewardAssignments.clipXtra.partnerName,
+        rewardTitle: interactionRewardAssignments.clipXtra.title,
+        redemptionLocation: interactionRewardAssignments.clipXtra.redemptionLocation,
+        redemptionDeadline: interactionRewardAssignments.clipXtra.redemptionDeadline,
+        redemptionInstructions: interactionRewardAssignments.clipXtra.redemptionInstructions,
         status: REWARD_ASSIGNMENT_STATES.ASSIGNED,
-        assignedAt: codeClipRewardAssignments.clipXtra.assignedAt,
+        assignedAt: interactionRewardAssignments.clipXtra.assignedAt,
         rawPayload: {
           eventCode: interactionContext.eventCode,
           eventId: interactionContext.eventId,
           scanId: interactionContext.scanId,
           tier,
           rewardType: "clip_xtra",
-          clipXtra: codeClipRewardAssignments.clipXtra,
+          clipXtra: interactionRewardAssignments.clipXtra,
         },
       });
     } catch (dbError) {
@@ -342,8 +343,8 @@ async function handleCodeClipScan({
     uniqueScans: Number(interactionContext.uniqueScans || 0),
     scanRank: interactionContext.scanRank,
     tier,
-    rewards: codeClipRewardAssignments,
-    clipXtra: codeClipRewardAssignments.clipXtra || null,
+    rewards: interactionRewardAssignments,
+    clipXtra: interactionRewardAssignments.clipXtra || null,
   });
 }
 
