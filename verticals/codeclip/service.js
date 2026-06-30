@@ -76,6 +76,33 @@ async function redeemClipXtraToken({
   };
 }
 
+function buildInteractionContext({
+  event,
+  eventCode,
+  eventId,
+  scanId,
+  rawScans,
+  uniqueScans,
+  scanRank,
+}) {
+  return {
+    event,
+    eventCode,
+    eventId,
+    scanId,
+    rawScans,
+    uniqueScans,
+    scanRank,
+  };
+}
+
+function buildInteractionResult(httpStatus, payload) {
+  return {
+    httpStatus,
+    payload,
+  };
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -89,23 +116,29 @@ async function handleCodeClipScan({
   persistFinalScan,
   saveCodeClipXtraRedemption,
 }) {
-  const codeClipEvent = codeClipVertical.routes.parseCodeClipRewardsMeta(event || {});
+  const interactionContext = buildInteractionContext({
+    event,
+    eventCode,
+    eventId,
+    scanId,
+    rawScans,
+    uniqueScans,
+    scanRank,
+  });
+  const codeClipEvent = codeClipVertical.routes.parseCodeClipRewardsMeta(interactionContext.event || {});
 
   if (Date.now() > Date.parse(codeClipEvent.endAt)) {
-    return {
-      httpStatus: 200,
-      payload: {
-        success: false,
-        status: "expired",
-        error: "bonus_window_expired",
-      },
-    };
+    return buildInteractionResult(200, {
+      success: false,
+      status: "expired",
+      error: "bonus_window_expired",
+    });
   }
 
   const codeClipRewardAssignments = await codeClipVertical.assignment.assignCodeClipRewards({
     redis,
-    eventCode,
-    scanId,
+    eventCode: interactionContext.eventCode,
+    scanId: interactionContext.scanId,
     rewards: codeClipEvent.rewards || {},
   });
 
@@ -121,9 +154,9 @@ async function handleCodeClipScan({
     try {
       await saveCodeClipXtraRedemption({
         token: codeClipRewardAssignments.clipXtra.redemptionToken,
-        eventCode,
-        eventId,
-        scanId,
+        eventCode: interactionContext.eventCode,
+        eventId: interactionContext.eventId,
+        scanId: interactionContext.scanId,
         vertical: "codeclip",
         rewardType: "clip_xtra",
         tier: "clipXtra",
@@ -136,9 +169,9 @@ async function handleCodeClipScan({
         status: "assigned",
         assignedAt: codeClipRewardAssignments.clipXtra.assignedAt,
         rawPayload: {
-          eventCode,
-          eventId,
-          scanId,
+          eventCode: interactionContext.eventCode,
+          eventId: interactionContext.eventId,
+          scanId: interactionContext.scanId,
           tier,
           rewardType: "clip_xtra",
           clipXtra: codeClipRewardAssignments.clipXtra,
@@ -149,20 +182,17 @@ async function handleCodeClipScan({
     }
   }
 
-  return {
-    httpStatus: 200,
-    payload: {
-      success: true,
-      eventCode,
-      eventId,
-      rawScans: Number(rawScans || 0),
-      uniqueScans: Number(uniqueScans || 0),
-      scanRank,
-      tier,
-      rewards: codeClipRewardAssignments,
-      clipXtra: codeClipRewardAssignments.clipXtra || null,
-    },
-  };
+  return buildInteractionResult(200, {
+    success: true,
+    eventCode: interactionContext.eventCode,
+    eventId: interactionContext.eventId,
+    rawScans: Number(interactionContext.rawScans || 0),
+    uniqueScans: Number(interactionContext.uniqueScans || 0),
+    scanRank: interactionContext.scanRank,
+    tier,
+    rewards: codeClipRewardAssignments,
+    clipXtra: codeClipRewardAssignments.clipXtra || null,
+  });
 }
 
 module.exports = {
