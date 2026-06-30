@@ -114,6 +114,7 @@ function buildInteractionContext({
   rawScans,
   uniqueScans,
   scanRank,
+  audienceEntry,
 }) {
   return {
     event,
@@ -123,6 +124,20 @@ function buildInteractionContext({
     rawScans,
     uniqueScans,
     scanRank,
+    audienceEntry: createAudienceEntrySnapshot(audienceEntry),
+  };
+}
+
+function createAudienceEntrySnapshot(audienceEntry = null) {
+  if (!audienceEntry) return null;
+
+  return {
+    entryCode: audienceEntry.entryCode,
+    scanId: audienceEntry.scanId,
+    requestedVertical: audienceEntry.requestedVertical,
+    source: audienceEntry.source,
+    transport: audienceEntry.transport,
+    receivedAt: audienceEntry.receivedAt,
   };
 }
 
@@ -228,6 +243,7 @@ function createInteraction({
     rawScans: interactionContext.rawScans,
     uniqueScans: interactionContext.uniqueScans,
     scanRank: interactionContext.scanRank,
+    audienceEntry: interactionContext.audienceEntry,
     state: interactionState.state,
     stateTransitions: interactionState.transitions,
     tier,
@@ -245,6 +261,7 @@ function createScanPayloadInteraction(interaction) {
     rawScans: interaction.rawScans,
     uniqueScans: interaction.uniqueScans,
     scanRank: interaction.scanRank,
+    audienceEntry: interaction.audienceEntry,
     state: interaction.state,
     tier: interaction.tier,
     routingOutcome: interaction.routingOutcome,
@@ -260,6 +277,7 @@ async function handleCodeClipScan({
   rawScans,
   uniqueScans,
   scanRank,
+  audienceEntry,
   redis,
   codeClipVertical,
   persistFinalScan,
@@ -274,6 +292,7 @@ async function handleCodeClipScan({
     rawScans,
     uniqueScans,
     scanRank,
+    audienceEntry,
   });
   const routingOutcome = buildRoutingMatch(interactionContext);
   const codeClipEvent = codeClipVertical.routes.parseCodeClipRewardsMeta(routingOutcome.interactionContext.event || {});

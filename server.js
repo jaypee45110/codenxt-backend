@@ -3972,8 +3972,6 @@ app.post("/scan", async (req, res) => {
       userAgent: req.get("user-agent") || "",
       ip,
     });
-    // First observational Audience Entry runtime anchor; retained without changing scan behavior.
-    void audienceEntry;
     let eventId = null;
     let event = null;
 
@@ -4179,6 +4177,7 @@ if (vertical === "codeclip") {
     rawScans,
     uniqueScans,
     scanRank,
+    audienceEntry,
     redis: process.env.REDIS_URL ? redis : null,
     codeClipVertical,
     persistFinalScan,
