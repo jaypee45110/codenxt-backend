@@ -1,6 +1,17 @@
 const INTERACTION_STATES = {
-  EXPIRED: "expired",
+  RECEIVED: "received",
+  ROUTED: "routed",
+  REWARD_ASSIGNED: "reward_assigned",
   PROCESSED: "processed",
+  EXPIRED: "expired",
+};
+
+const INTERACTION_TRANSITIONS = {
+  RECEIVE: "receive",
+  ROUTE_MATCH: "route_match",
+  ASSIGN_REWARD: "assign_reward",
+  COMPLETE: "complete",
+  EXPIRE: "expire",
 };
 
 const REWARD_ASSIGNMENT_STATES = {
@@ -135,12 +146,42 @@ function buildRoutingMatch(interactionContext) {
   };
 }
 
+function buildInteractionStateTransition({
+  from = null,
+  to,
+  transition,
+  reason = null,
+}) {
+  return {
+    from,
+    to,
+    transition,
+    reason,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function resolveProcessedInteractionState() {
+  return {
+    state: INTERACTION_STATES.PROCESSED,
+    transitions: [
+      buildInteractionStateTransition({
+        from: INTERACTION_STATES.REWARD_ASSIGNED,
+        to: INTERACTION_STATES.PROCESSED,
+        transition: INTERACTION_TRANSITIONS.COMPLETE,
+      }),
+    ],
+  };
+}
+
 function createInteraction({
   interactionContext,
   routingOutcome,
   tier = null,
   rewardAssignments = null,
 }) {
+  const interactionState = resolveProcessedInteractionState();
+
   return {
     interactionId: null,
     eventCode: interactionContext.eventCode,
@@ -149,7 +190,8 @@ function createInteraction({
     rawScans: interactionContext.rawScans,
     uniqueScans: interactionContext.uniqueScans,
     scanRank: interactionContext.scanRank,
-    state: INTERACTION_STATES.PROCESSED,
+    state: interactionState.state,
+    stateTransitions: interactionState.transitions,
     tier,
     timestamp: new Date().toISOString(),
     routingOutcome,
