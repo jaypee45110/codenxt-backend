@@ -797,7 +797,10 @@ const {
   termsLanguage,
   termsAcceptedByName,
   termsAcceptedByEmail,
-  paymentAccepted
+  paymentAccepted,
+  activationMethod,
+  activationKeyword,
+  activationChannels
 } = req.body;
 
 const normalizedVertical = String(vertical || "codetone").trim().toLowerCase();
@@ -821,6 +824,14 @@ const normalizedCodeClipRewards = isCodeClipEvent
   : null;
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
+const rawActivationMethod = String(activationMethod || "").trim().toLowerCase();
+const normalizedActivationMethod = ["keyword", "qr", "both"].includes(rawActivationMethod)
+  ? rawActivationMethod
+  : "keyword";
+const normalizedActivationKeyword = String(activationKeyword || "").trim();
+const normalizedActivationChannels = Array.isArray(activationChannels)
+  ? activationChannels.map((channel) => String(channel || "").trim()).filter(Boolean)
+  : [];
 
     if (!name || !startAt || !unlockAt || !endAt) {
       return res.status(400).json({
@@ -870,6 +881,9 @@ maxClaims,
   termsAcceptedByName: termsAcceptedByName || "",
   termsAcceptedByEmail: termsAcceptedByEmail || "",
   paymentAccepted: !!paymentAccepted,
+  activationMethod: normalizedActivationMethod,
+  activationKeyword: normalizedActivationKeyword,
+  activationChannels: normalizedActivationChannels,
 };
 if (normalizedPartnerReward) {
   event.partnerReward = normalizedPartnerReward;
@@ -925,6 +939,9 @@ artistLogo: artistLogo || "",
   termsAcceptedByName: termsAcceptedByName || "",
   termsAcceptedByEmail: termsAcceptedByEmail || "",
   paymentAccepted: String(!!paymentAccepted),
+  activationMethod: normalizedActivationMethod,
+  activationKeyword: normalizedActivationKeyword,
+  activationChannels: JSON.stringify(normalizedActivationChannels),
 };
 if (normalizedPartnerReward) {
   eventMeta.partnerReward = JSON.stringify(normalizedPartnerReward);
@@ -1187,6 +1204,30 @@ if (process.env.REDIS_URL) {
   innerCircleJoinCount = Number(meta.innerCircleJoinCount || 0);
 }
 
+const normalizeActivationMethod = (value) => {
+  const method = String(value || "").trim().toLowerCase();
+  return ["keyword", "qr", "both"].includes(method) ? method : "keyword";
+};
+
+const normalizeActivationChannels = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((channel) => String(channel || "").trim()).filter(Boolean);
+  }
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.map((channel) => String(channel || "").trim()).filter(Boolean);
+      }
+    } catch {
+      return [];
+    }
+  }
+  return raw.split(",").map((channel) => channel.trim()).filter(Boolean);
+};
+
 const normalizedMeta = {
   id: meta?.id,
   code: meta?.code,
@@ -1207,6 +1248,9 @@ const normalizedMeta = {
   termsAcceptedByName: meta?.termsAcceptedByName || "",
   termsAcceptedByEmail: meta?.termsAcceptedByEmail || "",
   paymentAccepted: meta?.paymentAccepted === "true" || meta?.paymentAccepted === true,
+  activationMethod: normalizeActivationMethod(meta?.activationMethod),
+  activationKeyword: String(meta?.activationKeyword || "").trim(),
+  activationChannels: normalizeActivationChannels(meta?.activationChannels),
   maxClaims: Number(meta?.maxClaims || 0),
   status: meta?.status,
   defaultLang: meta?.defaultLang || meta?.lang || meta?.language || "en",
