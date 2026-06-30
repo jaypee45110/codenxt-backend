@@ -139,11 +139,28 @@ const ROUTING_OUTCOMES = {
   ROUTING_CONFLICT: "ROUTING_CONFLICT",
 };
 
-function buildRoutingMatch(interactionContext) {
-  return {
-    outcome: ROUTING_OUTCOMES.MATCH,
+function createRoutingOutcome({
+  outcome,
+  interactionContext,
+  reason = null,
+  candidates = [],
+}) {
+  const routingOutcome = {
+    outcome,
     interactionContext,
   };
+
+  if (reason) routingOutcome.reason = reason;
+  if (candidates.length) routingOutcome.candidates = candidates;
+
+  return routingOutcome;
+}
+
+function buildRoutingMatch(interactionContext) {
+  return createRoutingOutcome({
+    outcome: ROUTING_OUTCOMES.MATCH,
+    interactionContext,
+  });
 }
 
 function buildInteractionStateTransition({
