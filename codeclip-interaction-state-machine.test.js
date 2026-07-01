@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const codeClipService = require('./verticals/codeclip/service');
+const { getCodeClipInteractions } = require('./db');
 
 test('successful codeClip scan builds validated Interaction state machine data', async () => {
   const eventCode = 'CC-STATE-TEST';
@@ -129,4 +130,39 @@ test('codeClip no-match interaction uses unmatched state machine data', () => {
   assert.equal(interaction.audienceEntry.userAgent, undefined);
   assert.equal(interaction.audienceEntry.ip, undefined);
   assert.equal(interaction.rewardAssignments, undefined);
+});
+
+test('codeClip interaction read helper normalizes limit and raw payload shape', async () => {
+  const calls = [];
+  const fakeClient = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      return {
+        rows: [
+          {
+            event_code: params[0],
+            scan_id: 'scan-read-model-test',
+            routing_outcome: 'MATCH',
+            interaction_state: 'processed',
+            raw_payload: JSON.stringify({
+              eventCode: params[0],
+              scanId: 'scan-read-model-test',
+              state: 'processed',
+            }),
+          },
+        ],
+      };
+    },
+  };
+
+  const rows = await getCodeClipInteractions('CC-READ-MODEL-TEST', 999, fakeClient);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params[0], 'CC-READ-MODEL-TEST');
+  assert.equal(calls[0].params[1], 500);
+  assert.match(calls[0].sql, /ORDER BY created_at DESC/);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].event_code, 'CC-READ-MODEL-TEST');
+  assert.equal(rows[0].raw_payload.state, 'processed');
+  assert.equal(rows[0].rawPayload.scanId, 'scan-read-model-test');
 });

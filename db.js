@@ -1135,6 +1135,57 @@ async function saveCodeClipInteraction(interaction = {}) {
   return result.rows[0] || null;
 }
 
+function parseJsonPayload(value, fallback = null) {
+  if (!value) return fallback;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return fallback;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeCodeClipInteractionLimit(limit = 100) {
+  const parsed = Number.parseInt(String(limit || 100), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 100;
+  return Math.min(parsed, 500);
+}
+
+function formatCodeClipInteractionRow(row = {}) {
+  const rawPayload = parseJsonPayload(row.raw_payload, row.raw_payload || null);
+
+  return {
+    ...row,
+    raw_payload: rawPayload,
+    rawPayload,
+  };
+}
+
+async function getCodeClipInteractions(eventCode, limit = 100, queryClient = pool) {
+  if (!queryClient || !eventCode) return [];
+
+  const safeLimit = normalizeCodeClipInteractionLimit(limit);
+
+  if (queryClient === pool) {
+    await ensureCodeClipInteractionsTable();
+  }
+
+  const result = await queryClient.query(
+    `
+      SELECT *
+      FROM codeclip_interactions
+      WHERE event_code = $1
+      ORDER BY created_at DESC
+      LIMIT $2
+    `,
+    [eventCode, safeLimit]
+  );
+
+  return (result.rows || []).map(formatCodeClipInteractionRow);
+}
+
 async function getCodeClipXtraRedemptionByToken(token) {
   if (!pool || !token) return null;
 
@@ -1272,6 +1323,7 @@ module.exports = {
   saveCodeClipXtraRedemption,
   ensureCodeClipInteractionsTable,
   saveCodeClipInteraction,
+  getCodeClipInteractions,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
