@@ -4002,7 +4002,11 @@ app.post("/scan", async (req, res) => {
           scanId,
           audienceEntry,
         });
-        void noCampaignMatchInteraction;
+        try {
+          await saveCodeClipInteraction(noCampaignMatchInteraction);
+        } catch (dbError) {
+          console.warn("codeClip NO_CAMPAIGN_MATCH Interaction Postgres save failed:", dbError.message);
+        }
       }
 
       return res.status(404).json({ error: "Event not found" });

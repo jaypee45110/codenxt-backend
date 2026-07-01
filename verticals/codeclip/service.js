@@ -10,6 +10,7 @@ const INTERACTION_STATES = {
 const INTERACTION_TRANSITIONS = {
   RECEIVE: "receive",
   ROUTE_MATCH: "route_match",
+  NO_CAMPAIGN_MATCH: "no_campaign_match",
   ASSIGN_REWARD: "assign_reward",
   COMPLETE: "complete",
   EXPIRE: "expire",
@@ -21,6 +22,11 @@ const INTERACTION_STATE_MACHINE = {
       from: null,
       to: INTERACTION_STATES.RECEIVED,
       transition: INTERACTION_TRANSITIONS.RECEIVE,
+    },
+    {
+      from: INTERACTION_STATES.RECEIVED,
+      to: INTERACTION_STATES.UNMATCHED,
+      transition: INTERACTION_TRANSITIONS.NO_CAMPAIGN_MATCH,
     },
     {
       from: INTERACTION_STATES.RECEIVED,
@@ -209,13 +215,27 @@ function buildNoCampaignMatchInteraction({
   scanId,
   audienceEntry,
 }) {
+  const interactionState = buildInteractionStateSnapshot([
+    buildValidInteractionStateTransition({
+      from: null,
+      to: INTERACTION_STATES.RECEIVED,
+      transition: INTERACTION_TRANSITIONS.RECEIVE,
+    }),
+    buildValidInteractionStateTransition({
+      from: INTERACTION_STATES.RECEIVED,
+      to: INTERACTION_STATES.UNMATCHED,
+      transition: INTERACTION_TRANSITIONS.NO_CAMPAIGN_MATCH,
+    }),
+  ], INTERACTION_STATES.UNMATCHED);
+
   return {
     interactionId: null,
     eventCode,
     eventId: null,
     scanId,
     audienceEntry: createAudienceEntrySnapshot(audienceEntry),
-    state: INTERACTION_STATES.UNMATCHED,
+    state: interactionState.state,
+    stateTransitions: interactionState.transitions,
     timestamp: new Date().toISOString(),
     routingOutcome: ROUTING_OUTCOMES.NO_CAMPAIGN_MATCH,
   };

@@ -95,3 +95,38 @@ test('successful codeClip scan builds validated Interaction state machine data',
   assert.equal(eventScanPayload.extraPayload.interaction.audienceEntry.userAgent, undefined);
   assert.equal(eventScanPayload.extraPayload.interaction.audienceEntry.ip, undefined);
 });
+
+test('codeClip no-match interaction uses unmatched state machine data', () => {
+  const eventCode = 'CC-MISSING-STATE-TEST';
+  const scanId = 'scan-missing-state-test';
+
+  const interaction = codeClipService.buildNoCampaignMatchInteraction({
+    eventCode,
+    scanId,
+    audienceEntry: {
+      entryCode: eventCode,
+      scanId,
+      requestedVertical: 'codeclip',
+      source: 'scan',
+      transport: 'http',
+      userAgent: 'test-agent',
+      ip: '127.0.0.1',
+      receivedAt: '2026-07-01T00:00:00.000Z',
+    },
+  });
+
+  assert.equal(interaction.eventCode, eventCode);
+  assert.equal(interaction.eventId, null);
+  assert.equal(interaction.scanId, scanId);
+  assert.equal(interaction.state, 'unmatched');
+  assert.equal(interaction.routingOutcome, 'NO_CAMPAIGN_MATCH');
+  assert.ok(Array.isArray(interaction.stateTransitions));
+  assert.deepEqual(
+    interaction.stateTransitions.map((transition) => transition.to),
+    ['received', 'unmatched']
+  );
+  assert.equal(interaction.audienceEntry.entryCode, eventCode);
+  assert.equal(interaction.audienceEntry.userAgent, undefined);
+  assert.equal(interaction.audienceEntry.ip, undefined);
+  assert.equal(interaction.rewardAssignments, undefined);
+});
