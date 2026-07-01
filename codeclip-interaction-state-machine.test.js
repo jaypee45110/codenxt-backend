@@ -132,6 +132,104 @@ test('codeClip no-match interaction uses unmatched state machine data', () => {
   assert.equal(interaction.rewardAssignments, undefined);
 });
 
+test('codeClip RewardAssignment snapshot normalizes existing tier assignments', () => {
+  const openClipAssignment = {
+    assigned: true,
+    tier: 'openClip',
+    displayTier: 'OpenClip',
+    title: 'Open reward',
+    type: 'image',
+    contentUrl: 'https://example.test/open.png',
+    contentFileName: 'open.png',
+    assignedCount: 0,
+    quantity: 0,
+    remaining: null,
+    unlimited: true,
+    assignedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const exhaustedClipAssignment = {
+    assigned: false,
+    tier: 'clip',
+    displayTier: 'Clip',
+    exhausted: true,
+    noReward: true,
+    quantity: 2,
+    assignedCount: 3,
+    remaining: 0,
+  };
+  const clipXtraAssignment = {
+    active: true,
+    rewardType: 'clip_xtra',
+    tier: 'clipXtra',
+    displayTier: 'ClipXtra',
+    partnerName: 'Partner',
+    product: 'Product',
+    title: 'ClipXtra reward',
+    quantity: 5,
+    redemptionLocation: 'Desk',
+    redemptionDeadline: '2099-12-31',
+    redemptionInstructions: 'Show token',
+    partnerLogo: 'https://example.test/logo.png',
+    partnerLogoFileName: 'logo.png',
+    assigned: true,
+    redemptionToken: 'CX-TESTTOKEN',
+    assignedCount: 1,
+    remaining: 4,
+    assignedAt: '2026-07-01T00:01:00.000Z',
+  };
+
+  const snapshot = codeClipService.createRewardAssignmentSnapshot({
+    eventCode: 'CC-REWARD-SNAPSHOT',
+    eventId: 'event-reward-snapshot',
+    scanId: 'scan-reward-snapshot',
+    state: 'processed',
+    routingOutcome: 'MATCH',
+    rewardAssignments: {
+      openClip: openClipAssignment,
+      clip: exhaustedClipAssignment,
+      clipXtra: clipXtraAssignment,
+    },
+  });
+
+  assert.equal(snapshot.eventCode, 'CC-REWARD-SNAPSHOT');
+  assert.equal(snapshot.eventId, 'event-reward-snapshot');
+  assert.equal(snapshot.scanId, 'scan-reward-snapshot');
+  assert.equal(snapshot.interactionState, 'processed');
+  assert.equal(snapshot.routingOutcome, 'MATCH');
+  assert.equal(snapshot.assignments.length, 3);
+
+  const openClip = snapshot.assignments.find((assignment) => assignment.tier === 'openClip');
+  assert.equal(openClip.displayTier, 'OpenClip');
+  assert.equal(openClip.assigned, true);
+  assert.equal(openClip.type, 'image');
+  assert.equal(openClip.contentUrl, 'https://example.test/open.png');
+  assert.equal(openClip.unlimited, true);
+  assert.equal(openClip.remaining, null);
+  assert.equal(openClip.rawAssignment, openClipAssignment);
+
+  const clip = snapshot.assignments.find((assignment) => assignment.tier === 'clip');
+  assert.equal(clip.assigned, false);
+  assert.equal(clip.exhausted, true);
+  assert.equal(clip.noReward, true);
+  assert.equal(clip.quantity, 2);
+  assert.equal(clip.assignedCount, 3);
+  assert.equal(clip.remaining, 0);
+  assert.equal(clip.rawAssignment, exhaustedClipAssignment);
+
+  const clipXtra = snapshot.assignments.find((assignment) => assignment.tier === 'clipXtra');
+  assert.equal(clipXtra.assigned, true);
+  assert.equal(clipXtra.rewardType, 'clip_xtra');
+  assert.equal(clipXtra.redemptionToken, 'CX-TESTTOKEN');
+  assert.equal(clipXtra.partnerName, 'Partner');
+  assert.equal(clipXtra.product, 'Product');
+  assert.equal(clipXtra.redemptionLocation, 'Desk');
+  assert.equal(clipXtra.redemptionDeadline, '2099-12-31');
+  assert.equal(clipXtra.redemptionInstructions, 'Show token');
+  assert.equal(clipXtra.partnerLogo, 'https://example.test/logo.png');
+  assert.equal(clipXtra.partnerLogoFileName, 'logo.png');
+  assert.equal(clipXtra.rawAssignment, clipXtraAssignment);
+});
+
 test('codeClip interaction read helper normalizes limit and raw payload shape', async () => {
   const calls = [];
   const fakeClient = {

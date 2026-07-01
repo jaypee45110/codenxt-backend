@@ -346,6 +346,46 @@ function createScanPayloadInteraction(interaction) {
   };
 }
 
+function createRewardAssignmentSnapshot(interaction = {}) {
+  const rewardAssignments = interaction.rewardAssignments || {};
+
+  return {
+    eventCode: interaction.eventCode,
+    eventId: interaction.eventId,
+    scanId: interaction.scanId,
+    interactionState: interaction.state,
+    routingOutcome: interaction.routingOutcome,
+    assignments: Object.entries(rewardAssignments).map(([tier, assignment = {}]) => ({
+      tier,
+      displayTier: assignment.displayTier,
+      assigned: assignment.assigned,
+      status: assignment.status,
+      reason: assignment.reason,
+      rewardType: assignment.rewardType,
+      title: assignment.title,
+      type: assignment.type,
+      contentUrl: assignment.contentUrl,
+      contentFileName: assignment.contentFileName,
+      quantity: assignment.quantity,
+      assignedCount: assignment.assignedCount,
+      remaining: assignment.remaining,
+      unlimited: assignment.unlimited,
+      exhausted: assignment.exhausted,
+      noReward: assignment.noReward,
+      redemptionToken: assignment.redemptionToken,
+      partnerName: assignment.partnerName,
+      product: assignment.product,
+      redemptionLocation: assignment.redemptionLocation,
+      redemptionDeadline: assignment.redemptionDeadline,
+      redemptionInstructions: assignment.redemptionInstructions,
+      partnerLogo: assignment.partnerLogo,
+      partnerLogoFileName: assignment.partnerLogoFileName,
+      assignedAt: assignment.assignedAt,
+      rawAssignment: assignment,
+    })),
+  };
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -465,5 +505,6 @@ module.exports = {
   validateClipXtraToken,
   redeemClipXtraToken,
   buildNoCampaignMatchInteraction,
+  createRewardAssignmentSnapshot,
   handleCodeClipScan,
 };
