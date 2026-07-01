@@ -27,7 +27,15 @@ test('successful codeClip scan builds validated Interaction state machine data',
     event: {
       id: eventId,
       code: eventCode,
+      vertical: 'codeclip',
+      venue: 'Test Venue',
+      city: 'Oslo',
+      startAt: '2099-12-31T18:00:00.000Z',
+      unlockAt: '2099-12-31T18:30:00.000Z',
       endAt: '2099-12-31T23:59:59.000Z',
+      activationMethod: 'both',
+      activationKeyword: 'GOLD',
+      activationChannels: ['Instagram', 'Messenger'],
       rewards,
     },
     eventCode,
@@ -83,6 +91,35 @@ test('successful codeClip scan builds validated Interaction state machine data',
     persistedInteraction.stateTransitions.map((transition) => transition.to),
     ['received', 'routed', 'reward_assigned', 'processed']
   );
+  assert.ok(persistedInteraction.audienceContext);
+  assert.deepEqual(persistedInteraction.audienceContext.campaign, {
+    eventCode,
+    eventId,
+    vertical: 'codeclip',
+    venue: 'Test Venue',
+    city: 'Oslo',
+    startAt: '2099-12-31T18:00:00.000Z',
+    unlockAt: '2099-12-31T18:30:00.000Z',
+    endAt: '2099-12-31T23:59:59.000Z',
+  });
+  assert.deepEqual(persistedInteraction.audienceContext.activation, {
+    method: 'both',
+    keyword: 'GOLD',
+    channels: ['Instagram', 'Messenger'],
+  });
+  assert.deepEqual(persistedInteraction.audienceContext.entry, {
+    source: 'scan',
+    transport: 'http',
+    requestedVertical: 'codeclip',
+  });
+  assert.deepEqual(persistedInteraction.audienceContext.rewardContext, {
+    hasOpenClip: true,
+    hasClip: true,
+    hasClipPlus: true,
+    hasClipXtra: false,
+  });
+  assert.equal(persistedInteraction.audienceContext.entry.userAgent, undefined);
+  assert.equal(persistedInteraction.audienceContext.entry.ip, undefined);
   assert.equal(persistedInteraction.rewardAssignments, rewardAssignments);
   assert.ok(persistedInteraction.rewardAssignmentSnapshot);
   assert.equal(persistedInteraction.rewardAssignmentSnapshot.eventCode, eventCode);
@@ -103,6 +140,7 @@ test('successful codeClip scan builds validated Interaction state machine data',
     false
   );
   assert.equal(result.payload.rewardAssignmentSnapshot, undefined);
+  assert.equal(result.payload.audienceContext, undefined);
   assert.equal(result.payload.interaction, undefined);
 
   assert.ok(eventScanPayload, 'event scan payload should be built');

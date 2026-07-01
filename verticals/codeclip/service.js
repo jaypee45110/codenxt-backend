@@ -346,6 +346,40 @@ function createScanPayloadInteraction(interaction) {
   };
 }
 
+function createAudienceContextSnapshot(interactionContext = {}, codeClipEvent = {}) {
+  const rewards = codeClipEvent.rewards || {};
+  const audienceEntry = interactionContext.audienceEntry || {};
+
+  return {
+    campaign: {
+      eventCode: interactionContext.eventCode,
+      eventId: interactionContext.eventId,
+      vertical: codeClipEvent.vertical,
+      venue: codeClipEvent.venue,
+      city: codeClipEvent.city,
+      startAt: codeClipEvent.startAt,
+      unlockAt: codeClipEvent.unlockAt,
+      endAt: codeClipEvent.endAt,
+    },
+    activation: {
+      method: codeClipEvent.activationMethod,
+      keyword: codeClipEvent.activationKeyword,
+      channels: Array.isArray(codeClipEvent.activationChannels) ? codeClipEvent.activationChannels : [],
+    },
+    entry: {
+      source: audienceEntry.source,
+      transport: audienceEntry.transport,
+      requestedVertical: audienceEntry.requestedVertical,
+    },
+    rewardContext: {
+      hasOpenClip: !!rewards.openClip?.enabled,
+      hasClip: !!rewards.clip?.enabled,
+      hasClipPlus: !!rewards.clipPlus?.enabled,
+      hasClipXtra: !!rewards.clipXtra?.active,
+    },
+  };
+}
+
 function createRewardAssignmentSnapshot(interaction = {}) {
   const rewardAssignments = interaction.rewardAssignments || {};
 
@@ -441,6 +475,7 @@ async function handleCodeClipScan({
     tier,
     rewardAssignments: codeClipRewardAssignments,
   });
+  interaction.audienceContext = createAudienceContextSnapshot(routingOutcome.interactionContext, codeClipEvent);
   interaction.rewardAssignmentSnapshot = createRewardAssignmentSnapshot(interaction);
   const interactionRewardAssignments = interaction.rewardAssignments;
 
