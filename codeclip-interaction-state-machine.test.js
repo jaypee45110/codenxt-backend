@@ -709,3 +709,140 @@ test('codeClip report helper falls back to compatible empty rows without MATCH i
   assert.equal(report.metrics.uniqueScans, 2);
   assert.equal(report.metrics.goldXtraAssigned, 0);
 });
+
+test('codeClip report helper matches stable legacy report compatibility fields', async () => {
+  const legacyLikeReport = {
+    ok: true,
+    vertical: 'codepod',
+    eventCode: 'CC-REPORT-PARITY',
+    totalScans: 1,
+    uniqueScans: 1,
+    joins: 1,
+    registrationCount: 1,
+    rows: [
+      {
+        eventCode: 'CC-REPORT-PARITY',
+        eventId: 'event-report-parity',
+        scanId: 'scan-parity',
+        phone: '+4799999999',
+        scanRank: 4,
+        timestamp: '2026-07-01T11:00:00.000Z',
+        tier: 'clipPlus',
+        digitalSouvenirTier: 'clipPlus',
+        displayTier: 'ClipXtra',
+        rewardType: 'clip_xtra',
+        goldXtraAssigned: true,
+        redemptionToken: 'CX-PARITY',
+        redemptionStatus: '',
+        source: 'qr',
+      },
+    ],
+    registrations: [
+      {
+        eventCode: 'CC-REPORT-PARITY',
+        eventId: 'event-report-parity',
+        scanId: 'scan-parity',
+        phone: '+4799999999',
+        timestamp: '2026-07-01T11:01:00.000Z',
+        tier: '',
+        displayTier: '',
+        source: 'inside',
+      },
+    ],
+    metrics: {
+      scans: 1,
+      uniqueScans: 1,
+      joins: 1,
+      registrations: 1,
+      goldXtraAssigned: 1,
+    },
+  };
+  legacyLikeReport.scans = legacyLikeReport.rows;
+
+  const report = await buildCodeClipReport('CC-REPORT-PARITY', {
+    async getCodeClipInteractions() {
+      return [
+        {
+          event_code: 'CC-REPORT-PARITY',
+          event_id: 'event-report-parity',
+          scan_id: 'scan-parity',
+          scan_rank: 4,
+          tier: 'clipPlus',
+          routing_outcome: 'MATCH',
+          interaction_state: 'processed',
+          stateTransitions: [{ to: 'processed' }],
+          rawPayload: { stateTransitions: [{ to: 'processed' }] },
+          created_at: '2026-07-01T11:00:00.000Z',
+        },
+        {
+          event_code: 'CC-REPORT-PARITY',
+          scan_id: 'scan-no-match-parity',
+          routing_outcome: 'NO_CAMPAIGN_MATCH',
+          interaction_state: 'unmatched',
+          created_at: '2026-07-01T11:02:00.000Z',
+        },
+      ];
+    },
+    async getCodeClipRewardAssignments() {
+      return [
+        {
+          event_code: 'CC-REPORT-PARITY',
+          scan_id: 'scan-parity',
+          tier: 'clipXtra',
+          assigned: true,
+          reward_type: 'clip_xtra',
+          redemption_token: 'CX-PARITY',
+        },
+      ];
+    },
+    async getCodeClipRewardAssignmentSummary() {
+      return {
+        assignedByTier: { openClip: 1, clip: 1, clipPlus: 1, clipXtra: 1 },
+        clipXtraWithTokenCount: 1,
+      };
+    },
+    async getEventScanSummary() {
+      return { scans: 1, uniqueScans: 1 };
+    },
+    async getEventRegistrations() {
+      return [
+        {
+          event_code: 'CC-REPORT-PARITY',
+          event_id: 'event-report-parity',
+          scan_id: 'scan-parity',
+          phone: '+4799999999',
+          created_at: '2026-07-01T11:01:00.000Z',
+        },
+      ];
+    },
+    async getEventRegistrationSummary() {
+      return { registrations: 1 };
+    },
+  });
+
+  assert.equal(report.vertical, 'codeclip');
+  assert.equal(report.totalScans, legacyLikeReport.totalScans);
+  assert.equal(report.uniqueScans, legacyLikeReport.uniqueScans);
+  assert.equal(report.joins, legacyLikeReport.joins);
+  assert.equal(report.registrationCount, legacyLikeReport.registrationCount);
+  assert.equal(report.rows.length, legacyLikeReport.rows.length);
+  assert.equal(report.scans, report.rows);
+  assert.equal(report.metrics.scans, legacyLikeReport.metrics.scans);
+  assert.equal(report.metrics.uniqueScans, legacyLikeReport.metrics.uniqueScans);
+  assert.equal(report.metrics.joins, legacyLikeReport.metrics.joins);
+  assert.equal(report.metrics.goldXtraAssigned, legacyLikeReport.metrics.goldXtraAssigned);
+
+  const row = report.rows[0];
+  const legacyRow = legacyLikeReport.rows[0];
+  assert.equal(row.scanId, legacyRow.scanId);
+  assert.equal(row.tier, legacyRow.tier);
+  assert.equal(row.displayTier, legacyRow.displayTier);
+  assert.equal(row.rewardType, legacyRow.rewardType);
+  assert.equal(row.redemptionToken, legacyRow.redemptionToken);
+  assert.equal(report.rows.find((item) => item.scanId === 'scan-no-match-parity'), undefined);
+  assert.equal(row.rawPayload, undefined);
+  assert.equal(row.raw_payload, undefined);
+  assert.equal(row.interaction, undefined);
+  assert.equal(row.stateTransitions, undefined);
+  assert.equal(row.interaction_state, undefined);
+});
