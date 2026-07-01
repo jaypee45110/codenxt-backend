@@ -15,6 +15,31 @@ const INTERACTION_TRANSITIONS = {
   EXPIRE: "expire",
 };
 
+const INTERACTION_STATE_MACHINE = {
+  transitions: [
+    {
+      from: null,
+      to: INTERACTION_STATES.RECEIVED,
+      transition: INTERACTION_TRANSITIONS.RECEIVE,
+    },
+    {
+      from: INTERACTION_STATES.RECEIVED,
+      to: INTERACTION_STATES.ROUTED,
+      transition: INTERACTION_TRANSITIONS.ROUTE_MATCH,
+    },
+    {
+      from: INTERACTION_STATES.ROUTED,
+      to: INTERACTION_STATES.REWARD_ASSIGNED,
+      transition: INTERACTION_TRANSITIONS.ASSIGN_REWARD,
+    },
+    {
+      from: INTERACTION_STATES.REWARD_ASSIGNED,
+      to: INTERACTION_STATES.PROCESSED,
+      transition: INTERACTION_TRANSITIONS.COMPLETE,
+    },
+  ],
+};
+
 const REWARD_ASSIGNMENT_STATES = {
   ASSIGNED: "assigned",
 };
@@ -211,6 +236,20 @@ function buildInteractionStateTransition({
   };
 }
 
+function buildValidInteractionStateTransition(input) {
+  const isValidTransition = INTERACTION_STATE_MACHINE.transitions.some((allowed) => (
+    allowed.from === input.from &&
+    allowed.to === input.to &&
+    allowed.transition === input.transition
+  ));
+
+  if (!isValidTransition) {
+    throw new Error(`Invalid codeClip interaction state transition: ${input.transition}`);
+  }
+
+  return buildInteractionStateTransition(input);
+}
+
 function buildInteractionStateSnapshot(transitions, fallbackState = INTERACTION_STATES.PROCESSED) {
   const lastTransition = transitions[transitions.length - 1] || null;
 
@@ -222,22 +261,22 @@ function buildInteractionStateSnapshot(transitions, fallbackState = INTERACTION_
 
 function resolveSuccessfulScanInteractionState() {
   return buildInteractionStateSnapshot([
-    buildInteractionStateTransition({
+    buildValidInteractionStateTransition({
       from: null,
       to: INTERACTION_STATES.RECEIVED,
       transition: INTERACTION_TRANSITIONS.RECEIVE,
     }),
-    buildInteractionStateTransition({
+    buildValidInteractionStateTransition({
       from: INTERACTION_STATES.RECEIVED,
       to: INTERACTION_STATES.ROUTED,
       transition: INTERACTION_TRANSITIONS.ROUTE_MATCH,
     }),
-    buildInteractionStateTransition({
+    buildValidInteractionStateTransition({
       from: INTERACTION_STATES.ROUTED,
       to: INTERACTION_STATES.REWARD_ASSIGNED,
       transition: INTERACTION_TRANSITIONS.ASSIGN_REWARD,
     }),
-    buildInteractionStateTransition({
+    buildValidInteractionStateTransition({
       from: INTERACTION_STATES.REWARD_ASSIGNED,
       to: INTERACTION_STATES.PROCESSED,
       transition: INTERACTION_TRANSITIONS.COMPLETE,
