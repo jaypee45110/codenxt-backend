@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const codeClipService = require('./verticals/codeclip/service');
+const { buildCodeClipReport } = require('./verticals/codeclip/report');
 const {
   getCodeClipInteractions,
   getCodeClipInteractionSummary,
@@ -586,4 +587,125 @@ test('codeClip interaction summary helper returns routing and state counts', asy
     unmatched: 2,
   });
   assert.equal(summary.latestInteractionAt, latestInteractionAt);
+});
+
+test('codeClip report helper builds compatible rows from MATCH interactions only', async () => {
+  const report = await buildCodeClipReport('CC-REPORT-TEST', {
+    async getCodeClipInteractions() {
+      return [
+        {
+          event_code: 'CC-REPORT-TEST',
+          event_id: 'event-report-test',
+          scan_id: 'scan-match',
+          scan_rank: 7,
+          tier: 'clipPlus',
+          routing_outcome: 'MATCH',
+          interaction_state: 'processed',
+          stateTransitions: [{ to: 'processed' }],
+          rawPayload: {
+            interaction: { shouldNotLeak: true },
+            stateTransitions: [{ to: 'processed' }],
+          },
+          created_at: '2026-07-01T10:00:00.000Z',
+        },
+        {
+          event_code: 'CC-REPORT-TEST',
+          scan_id: 'scan-no-match',
+          routing_outcome: 'NO_CAMPAIGN_MATCH',
+          interaction_state: 'unmatched',
+          created_at: '2026-07-01T10:01:00.000Z',
+        },
+      ];
+    },
+    async getCodeClipRewardAssignments() {
+      return [
+        {
+          event_code: 'CC-REPORT-TEST',
+          scan_id: 'scan-match',
+          tier: 'clipXtra',
+          assigned: true,
+          reward_type: 'clip_xtra',
+          redemption_token: 'CX-REPORT-TEST',
+          rawPayload: {
+            scanId: 'scan-match',
+            assignment: { tier: 'clipXtra', redemptionToken: 'CX-REPORT-TEST' },
+          },
+        },
+      ];
+    },
+    async getCodeClipRewardAssignmentSummary() {
+      return {
+        assignedByTier: { openClip: 1, clip: 1, clipPlus: 1, clipXtra: 1 },
+        clipXtraWithTokenCount: 1,
+      };
+    },
+    async getEventScanSummary() {
+      return { scans: 99, uniqueScans: 88 };
+    },
+    async getEventRegistrations() {
+      return [{ event_code: 'CC-REPORT-TEST', scan_id: 'scan-match', phone: '+4712345678' }];
+    },
+    async getEventRegistrationSummary() {
+      return { registrations: 1 };
+    },
+  });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.vertical, 'codeclip');
+  assert.equal(report.rows.length, 1);
+  assert.equal(report.scans, report.rows);
+  assert.equal(report.rows[0].scanId, 'scan-match');
+  assert.equal(report.rows[0].phone, '+4712345678');
+  assert.equal(report.rows[0].goldXtraAssigned, true);
+  assert.equal(report.rows[0].redemptionToken, 'CX-REPORT-TEST');
+  assert.equal(report.rows[0].displayTier, 'ClipXtra');
+  assert.equal(report.metrics.scans, 1);
+  assert.equal(report.metrics.uniqueScans, 1);
+  assert.equal(report.metrics.goldXtraAssigned, 1);
+  assert.equal(report.metrics.clipXtraAssigned, 1);
+  assert.equal(report.rows[0].rawPayload, undefined);
+  assert.equal(report.rows[0].raw_payload, undefined);
+  assert.equal(report.rows[0].interaction, undefined);
+  assert.equal(report.rows[0].stateTransitions, undefined);
+  assert.equal(report.rows[0].interaction_state, undefined);
+});
+
+test('codeClip report helper falls back to compatible empty rows without MATCH interactions', async () => {
+  const report = await buildCodeClipReport('CC-REPORT-FALLBACK', {
+    async getCodeClipInteractions() {
+      return [
+        {
+          event_code: 'CC-REPORT-FALLBACK',
+          scan_id: 'scan-no-match',
+          routing_outcome: 'NO_CAMPAIGN_MATCH',
+          interaction_state: 'unmatched',
+        },
+      ];
+    },
+    async getCodeClipRewardAssignments() {
+      return [];
+    },
+    async getCodeClipRewardAssignmentSummary() {
+      return {};
+    },
+    async getEventScanSummary() {
+      return { scans: 3, uniqueScans: 2 };
+    },
+    async getEventRegistrations() {
+      return [];
+    },
+    async getEventRegistrationSummary() {
+      return { registrations: 0 };
+    },
+  });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.vertical, 'codeclip');
+  assert.deepEqual(report.rows, []);
+  assert.deepEqual(report.scans, []);
+  assert.equal(report.totalScans, 3);
+  assert.equal(report.uniqueScans, 2);
+  assert.equal(report.metrics.scans, 3);
+  assert.equal(report.metrics.uniqueScans, 2);
+  assert.equal(report.metrics.goldXtraAssigned, 0);
 });
