@@ -2,7 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const codeClipService = require('./verticals/codeclip/service');
-const { getCodeClipInteractions, getCodeClipInteractionSummary } = require('./db');
+const {
+  getCodeClipInteractions,
+  getCodeClipInteractionSummary,
+  saveCodeClipRewardAssignments,
+} = require('./db');
 
 test('successful codeClip scan builds validated Interaction state machine data', async () => {
   const eventCode = 'CC-STATE-TEST';
@@ -287,6 +291,97 @@ test('codeClip RewardAssignment snapshot normalizes existing tier assignments', 
   assert.equal(clipXtra.partnerLogo, 'https://example.test/logo.png');
   assert.equal(clipXtra.partnerLogoFileName, 'logo.png');
   assert.equal(clipXtra.rawAssignment, clipXtraAssignment);
+});
+
+test('saveCodeClipRewardAssignments persists normalized assignment rows with idempotency shape', async () => {
+  const calls = [];
+  const fakeClient = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      return {
+        rows: [
+          {
+            event_code: params[0],
+            scan_id: params[2],
+            tier: params[6],
+            redemption_token: params[22],
+            raw_payload: params[31],
+          },
+        ],
+      };
+    },
+  };
+  const snapshot = {
+    eventCode: 'CC-REWARD-PERSIST',
+    eventId: 'event-reward-persist',
+    scanId: 'scan-reward-persist',
+    interactionState: 'processed',
+    routingOutcome: 'MATCH',
+    assignments: [
+      {
+        tier: 'openClip',
+        displayTier: 'OpenClip',
+        assigned: true,
+        title: 'Open reward',
+        quantity: 0,
+        assignedCount: 0,
+        remaining: null,
+        unlimited: true,
+        assignedAt: '2026-07-01T00:00:00.000Z',
+        rawAssignment: { tier: 'openClip', assigned: true },
+      },
+      {
+        tier: 'clipXtra',
+        displayTier: 'ClipXtra',
+        assigned: true,
+        rewardType: 'clip_xtra',
+        redemptionToken: 'CX-REWARD-PERSIST',
+        partnerName: 'Partner',
+        title: 'ClipXtra reward',
+        assignedAt: '2026-07-01T00:01:00.000Z',
+        rawAssignment: { tier: 'clipXtra', assigned: true },
+      },
+    ],
+  };
+
+  assert.deepEqual(await saveCodeClipRewardAssignments({}, fakeClient), []);
+  assert.deepEqual(await saveCodeClipRewardAssignments({ eventCode: 'CC-MISSING-SCAN' }, fakeClient), []);
+  assert.deepEqual(await saveCodeClipRewardAssignments({
+    eventCode: 'CC-EMPTY-ASSIGNMENTS',
+    scanId: 'scan-empty-assignments',
+    assignments: [],
+  }, fakeClient), []);
+
+  const rows = await saveCodeClipRewardAssignments(snapshot, fakeClient);
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].sql, /INSERT INTO codeclip_reward_assignments/);
+  assert.match(calls[0].sql, /ON CONFLICT \(event_code, scan_id, tier\)/);
+  assert.match(calls[0].sql, /\$32::jsonb/);
+  assert.equal(calls[0].params[0], 'CC-REWARD-PERSIST');
+  assert.equal(calls[0].params[1], 'event-reward-persist');
+  assert.equal(calls[0].params[2], 'scan-reward-persist');
+  assert.equal(calls[0].params[4], 'processed');
+  assert.equal(calls[0].params[5], 'MATCH');
+  assert.equal(calls[0].params[6], 'openClip');
+  assert.equal(calls[0].params[8], true);
+  assert.equal(calls[0].params[16], 0);
+  assert.equal(calls[0].params[18], null);
+  assert.equal(calls[0].params[19], true);
+
+  assert.equal(calls[1].params[6], 'clipXtra');
+  assert.equal(calls[1].params[11], 'clip_xtra');
+  assert.equal(calls[1].params[22], 'CX-REWARD-PERSIST');
+  assert.equal(calls[1].params[23], 'Partner');
+
+  const clipXtraRawPayload = JSON.parse(calls[1].params[31]);
+  assert.equal(clipXtraRawPayload.eventCode, 'CC-REWARD-PERSIST');
+  assert.equal(clipXtraRawPayload.scanId, 'scan-reward-persist');
+  assert.equal(clipXtraRawPayload.assignment.redemptionToken, 'CX-REWARD-PERSIST');
+  assert.equal(clipXtraRawPayload.assignment.rawAssignment.tier, 'clipXtra');
+
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1].redemption_token, 'CX-REWARD-PERSIST');
 });
 
 test('codeClip interaction read helper normalizes limit and raw payload shape', async () => {

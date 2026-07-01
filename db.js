@@ -1227,6 +1227,203 @@ async function getCodeClipInteractionSummary(eventCode, queryClient = pool) {
   };
 }
 
+async function ensureCodeClipRewardAssignmentsTable() {
+  if (!pool) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_reward_assignments (
+      id BIGSERIAL PRIMARY KEY,
+      event_code TEXT NOT NULL,
+      event_id TEXT,
+      scan_id TEXT NOT NULL,
+      vertical TEXT NOT NULL DEFAULT 'codeclip',
+      interaction_state TEXT,
+      routing_outcome TEXT,
+      tier TEXT NOT NULL,
+      display_tier TEXT,
+      assigned BOOLEAN,
+      status TEXT,
+      reason TEXT,
+      reward_type TEXT,
+      title TEXT,
+      type TEXT,
+      content_url TEXT,
+      content_file_name TEXT,
+      quantity INTEGER,
+      assigned_count INTEGER,
+      remaining INTEGER,
+      unlimited BOOLEAN,
+      exhausted BOOLEAN,
+      no_reward BOOLEAN,
+      redemption_token TEXT,
+      partner_name TEXT,
+      product TEXT,
+      redemption_location TEXT,
+      redemption_deadline TEXT,
+      redemption_instructions TEXT,
+      partner_logo TEXT,
+      partner_logo_file_name TEXT,
+      assigned_at TIMESTAMPTZ,
+      raw_payload JSONB,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (event_code, scan_id, tier)
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_reward_assignments_event_code_created_at_idx
+    ON codeclip_reward_assignments (event_code, created_at DESC)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_reward_assignments_tier_idx
+    ON codeclip_reward_assignments (tier)
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_reward_assignments_redemption_token_idx
+    ON codeclip_reward_assignments (redemption_token)
+  `);
+}
+
+async function saveCodeClipRewardAssignments(snapshot = {}, queryClient = pool) {
+  if (!queryClient || !snapshot.eventCode || !snapshot.scanId) return [];
+
+  const assignments = Array.isArray(snapshot.assignments) ? snapshot.assignments : [];
+  if (!assignments.length) return [];
+
+  if (queryClient === pool) {
+    await ensureCodeClipRewardAssignmentsTable();
+  }
+
+  const rows = [];
+  for (const assignment of assignments) {
+    if (!assignment?.tier) continue;
+
+    const rawPayload = {
+      eventCode: snapshot.eventCode,
+      eventId: snapshot.eventId ?? null,
+      scanId: snapshot.scanId,
+      interactionState: snapshot.interactionState,
+      routingOutcome: snapshot.routingOutcome,
+      assignment,
+    };
+
+    const result = await queryClient.query(
+      `
+        INSERT INTO codeclip_reward_assignments (
+          event_code,
+          event_id,
+          scan_id,
+          vertical,
+          interaction_state,
+          routing_outcome,
+          tier,
+          display_tier,
+          assigned,
+          status,
+          reason,
+          reward_type,
+          title,
+          type,
+          content_url,
+          content_file_name,
+          quantity,
+          assigned_count,
+          remaining,
+          unlimited,
+          exhausted,
+          no_reward,
+          redemption_token,
+          partner_name,
+          product,
+          redemption_location,
+          redemption_deadline,
+          redemption_instructions,
+          partner_logo,
+          partner_logo_file_name,
+          assigned_at,
+          raw_payload,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31::timestamptz,$32::jsonb,NOW())
+        ON CONFLICT (event_code, scan_id, tier)
+        DO UPDATE SET
+          event_id = COALESCE(EXCLUDED.event_id, codeclip_reward_assignments.event_id),
+          vertical = EXCLUDED.vertical,
+          interaction_state = EXCLUDED.interaction_state,
+          routing_outcome = EXCLUDED.routing_outcome,
+          display_tier = EXCLUDED.display_tier,
+          assigned = EXCLUDED.assigned,
+          status = EXCLUDED.status,
+          reason = EXCLUDED.reason,
+          reward_type = EXCLUDED.reward_type,
+          title = EXCLUDED.title,
+          type = EXCLUDED.type,
+          content_url = EXCLUDED.content_url,
+          content_file_name = EXCLUDED.content_file_name,
+          quantity = EXCLUDED.quantity,
+          assigned_count = EXCLUDED.assigned_count,
+          remaining = EXCLUDED.remaining,
+          unlimited = EXCLUDED.unlimited,
+          exhausted = EXCLUDED.exhausted,
+          no_reward = EXCLUDED.no_reward,
+          redemption_token = EXCLUDED.redemption_token,
+          partner_name = EXCLUDED.partner_name,
+          product = EXCLUDED.product,
+          redemption_location = EXCLUDED.redemption_location,
+          redemption_deadline = EXCLUDED.redemption_deadline,
+          redemption_instructions = EXCLUDED.redemption_instructions,
+          partner_logo = EXCLUDED.partner_logo,
+          partner_logo_file_name = EXCLUDED.partner_logo_file_name,
+          assigned_at = COALESCE(codeclip_reward_assignments.assigned_at, EXCLUDED.assigned_at),
+          raw_payload = EXCLUDED.raw_payload,
+          updated_at = NOW()
+        RETURNING *
+      `,
+      [
+        snapshot.eventCode,
+        snapshot.eventId ?? null,
+        snapshot.scanId,
+        'codeclip',
+        snapshot.interactionState || null,
+        snapshot.routingOutcome || null,
+        assignment.tier,
+        assignment.displayTier || null,
+        assignment.assigned ?? null,
+        assignment.status || null,
+        assignment.reason || null,
+        assignment.rewardType || null,
+        assignment.title || null,
+        assignment.type || null,
+        assignment.contentUrl || null,
+        assignment.contentFileName || null,
+        assignment.quantity ?? null,
+        assignment.assignedCount ?? null,
+        assignment.remaining ?? null,
+        assignment.unlimited ?? null,
+        assignment.exhausted ?? null,
+        assignment.noReward ?? null,
+        assignment.redemptionToken || null,
+        assignment.partnerName || null,
+        assignment.product || null,
+        assignment.redemptionLocation || null,
+        assignment.redemptionDeadline || null,
+        assignment.redemptionInstructions || null,
+        assignment.partnerLogo || null,
+        assignment.partnerLogoFileName || null,
+        assignment.assignedAt || null,
+        JSON.stringify(rawPayload),
+      ]
+    );
+
+    if (result.rows?.[0]) rows.push(result.rows[0]);
+  }
+
+  return rows;
+}
+
 async function getCodeClipXtraRedemptionByToken(token) {
   if (!pool || !token) return null;
 
@@ -1366,6 +1563,8 @@ module.exports = {
   saveCodeClipInteraction,
   getCodeClipInteractions,
   getCodeClipInteractionSummary,
+  ensureCodeClipRewardAssignmentsTable,
+  saveCodeClipRewardAssignments,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
