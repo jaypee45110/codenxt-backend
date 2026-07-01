@@ -441,6 +441,7 @@ async function handleCodeClipScan({
     tier,
     rewardAssignments: codeClipRewardAssignments,
   });
+  interaction.rewardAssignmentSnapshot = createRewardAssignmentSnapshot(interaction);
   const interactionRewardAssignments = interaction.rewardAssignments;
 
   await persistFinalScan(interaction.tier, {

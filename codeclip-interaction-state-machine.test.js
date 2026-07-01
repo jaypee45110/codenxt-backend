@@ -83,6 +83,27 @@ test('successful codeClip scan builds validated Interaction state machine data',
     persistedInteraction.stateTransitions.map((transition) => transition.to),
     ['received', 'routed', 'reward_assigned', 'processed']
   );
+  assert.equal(persistedInteraction.rewardAssignments, rewardAssignments);
+  assert.ok(persistedInteraction.rewardAssignmentSnapshot);
+  assert.equal(persistedInteraction.rewardAssignmentSnapshot.eventCode, eventCode);
+  assert.equal(persistedInteraction.rewardAssignmentSnapshot.eventId, eventId);
+  assert.equal(persistedInteraction.rewardAssignmentSnapshot.scanId, scanId);
+  assert.equal(persistedInteraction.rewardAssignmentSnapshot.interactionState, 'processed');
+  assert.equal(persistedInteraction.rewardAssignmentSnapshot.routingOutcome, 'MATCH');
+  assert.deepEqual(
+    persistedInteraction.rewardAssignmentSnapshot.assignments.map((assignment) => assignment.tier),
+    ['openClip', 'clip', 'clipPlus', 'clipXtra']
+  );
+  assert.equal(
+    persistedInteraction.rewardAssignmentSnapshot.assignments.find((assignment) => assignment.tier === 'clipPlus').assigned,
+    true
+  );
+  assert.equal(
+    persistedInteraction.rewardAssignmentSnapshot.assignments.find((assignment) => assignment.tier === 'clipXtra').assigned,
+    false
+  );
+  assert.equal(result.payload.rewardAssignmentSnapshot, undefined);
+  assert.equal(result.payload.interaction, undefined);
 
   assert.ok(eventScanPayload, 'event scan payload should be built');
   assert.equal(eventScanPayload.finalTier, 'clipPlus');
