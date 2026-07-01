@@ -846,3 +846,113 @@ test('codeClip report helper matches stable legacy report compatibility fields',
   assert.equal(row.stateTransitions, undefined);
   assert.equal(row.interaction_state, undefined);
 });
+
+test('codeClip report helper keeps codePod legacy report data isolated', async () => {
+  const legacyCodePodReport = {
+    ok: true,
+    vertical: 'codepod',
+    eventCode: 'CP-REPORT-ISOLATION',
+    totalScans: 1,
+    uniqueScans: 1,
+    joins: 0,
+    registrationCount: 0,
+    rows: [
+      {
+        eventCode: 'CP-REPORT-ISOLATION',
+        scanId: 'scan-codepod-isolation',
+        tier: 'gold',
+        displayTier: 'GoldXtra',
+        rewardType: 'partner_reward',
+        goldXtraAssigned: true,
+        redemptionToken: 'GX-ISOLATION',
+      },
+    ],
+    metrics: {
+      scans: 1,
+      uniqueScans: 1,
+      joins: 0,
+      goldXtraAssigned: 1,
+    },
+  };
+  legacyCodePodReport.scans = legacyCodePodReport.rows;
+
+  const codeClipReport = await buildCodeClipReport('CC-REPORT-ISOLATION', {
+    async getCodeClipInteractions() {
+      return [
+        {
+          event_code: 'CC-REPORT-ISOLATION',
+          event_id: 'event-codeclip-isolation',
+          scan_id: 'scan-codeclip-isolation',
+          scan_rank: 1,
+          tier: 'clipPlus',
+          routing_outcome: 'MATCH',
+          interaction_state: 'processed',
+          rawPayload: {
+            interaction: { shouldNotLeak: true },
+            stateTransitions: [{ to: 'processed' }],
+          },
+          created_at: '2026-07-01T12:00:00.000Z',
+        },
+        {
+          event_code: 'CC-REPORT-ISOLATION',
+          scan_id: 'scan-codeclip-no-match',
+          routing_outcome: 'NO_CAMPAIGN_MATCH',
+          interaction_state: 'unmatched',
+          created_at: '2026-07-01T12:01:00.000Z',
+        },
+      ];
+    },
+    async getCodeClipRewardAssignments() {
+      return [
+        {
+          event_code: 'CC-REPORT-ISOLATION',
+          scan_id: 'scan-codeclip-isolation',
+          tier: 'clipXtra',
+          assigned: true,
+          reward_type: 'clip_xtra',
+          redemption_token: 'CX-ISOLATION',
+        },
+      ];
+    },
+    async getCodeClipRewardAssignmentSummary() {
+      return {
+        assignedByTier: { openClip: 1, clip: 1, clipPlus: 1, clipXtra: 1 },
+        clipXtraWithTokenCount: 1,
+      };
+    },
+    async getEventScanSummary() {
+      return { scans: 1, uniqueScans: 1 };
+    },
+    async getEventRegistrations() {
+      return [];
+    },
+    async getEventRegistrationSummary() {
+      return { registrations: 0 };
+    },
+  });
+
+  assert.equal(codeClipReport.vertical, 'codeclip');
+  assert.equal(codeClipReport.eventCode, 'CC-REPORT-ISOLATION');
+  assert.equal(codeClipReport.rows.length, 1);
+  assert.equal(codeClipReport.scans, codeClipReport.rows);
+  assert.ok(codeClipReport.metrics);
+  assert.equal(codeClipReport.metrics.scans, 1);
+  assert.equal(codeClipReport.metrics.uniqueScans, 1);
+  assert.equal(codeClipReport.metrics.goldXtraAssigned, 1);
+  assert.equal(codeClipReport.rows[0].scanId, 'scan-codeclip-isolation');
+  assert.equal(codeClipReport.rows[0].redemptionToken, 'CX-ISOLATION');
+  assert.equal(codeClipReport.rows.find((row) => row.scanId === 'scan-codeclip-no-match'), undefined);
+  assert.equal(codeClipReport.rows.find((row) => row.scanId === legacyCodePodReport.rows[0].scanId), undefined);
+  assert.equal(codeClipReport.rows[0].rawPayload, undefined);
+  assert.equal(codeClipReport.rows[0].raw_payload, undefined);
+  assert.equal(codeClipReport.rows[0].interaction, undefined);
+  assert.equal(codeClipReport.rows[0].stateTransitions, undefined);
+  assert.equal(codeClipReport.rows[0].interaction_state, undefined);
+
+  assert.equal(legacyCodePodReport.vertical, 'codepod');
+  assert.equal(legacyCodePodReport.eventCode, 'CP-REPORT-ISOLATION');
+  assert.equal(legacyCodePodReport.rows.length, 1);
+  assert.equal(legacyCodePodReport.scans, legacyCodePodReport.rows);
+  assert.equal(legacyCodePodReport.rows[0].redemptionToken, 'GX-ISOLATION');
+  assert.equal(legacyCodePodReport.metrics.goldXtraAssigned, 1);
+});
