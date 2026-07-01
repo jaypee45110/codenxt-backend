@@ -26,6 +26,7 @@ test('successful codeClip scan builds validated Interaction state machine data',
 
   let eventScanPayload = null;
   let persistedInteraction = null;
+  let persistedRewardAssignmentSnapshot = null;
 
   const result = await codeClipService.handleCodeClipScan({
     event: {
@@ -77,6 +78,10 @@ test('successful codeClip scan builds validated Interaction state machine data',
     async saveCodeClipInteraction(interaction) {
       persistedInteraction = interaction;
       return { id: 1, interaction_state: interaction.state, routing_outcome: interaction.routingOutcome };
+    },
+    async saveCodeClipRewardAssignments(snapshot) {
+      persistedRewardAssignmentSnapshot = snapshot;
+      return snapshot.assignments;
     },
     async saveCodeClipXtraRedemption() {
       throw new Error('ClipXtra should not be persisted when not assigned');
@@ -143,6 +148,7 @@ test('successful codeClip scan builds validated Interaction state machine data',
     persistedInteraction.rewardAssignmentSnapshot.assignments.find((assignment) => assignment.tier === 'clipXtra').assigned,
     false
   );
+  assert.equal(persistedRewardAssignmentSnapshot, persistedInteraction.rewardAssignmentSnapshot);
   assert.equal(result.payload.rewardAssignmentSnapshot, undefined);
   assert.equal(result.payload.audienceContext, undefined);
   assert.equal(result.payload.interaction, undefined);

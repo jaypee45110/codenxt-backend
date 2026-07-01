@@ -33,6 +33,7 @@ const {
   saveCodePodGoldXtraRedemption,
   saveCodeClipXtraRedemption,
   saveCodeClipInteraction,
+  saveCodeClipRewardAssignments,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
@@ -4195,6 +4196,7 @@ if (vertical === "codeclip") {
     codeClipVertical,
     persistFinalScan,
     saveCodeClipInteraction,
+    saveCodeClipRewardAssignments,
     saveCodeClipXtraRedemption,
   });
 

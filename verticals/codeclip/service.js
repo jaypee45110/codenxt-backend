@@ -433,6 +433,7 @@ async function handleCodeClipScan({
   codeClipVertical,
   persistFinalScan,
   saveCodeClipInteraction,
+  saveCodeClipRewardAssignments,
   saveCodeClipXtraRedemption,
 }) {
   const interactionContext = buildInteractionContext({
@@ -489,6 +490,14 @@ async function handleCodeClipScan({
       await saveCodeClipInteraction(interaction);
     } catch (dbError) {
       console.warn("codeClip Interaction Postgres save failed:", dbError.message);
+    }
+  }
+
+  if (saveCodeClipRewardAssignments) {
+    try {
+      await saveCodeClipRewardAssignments(interaction.rewardAssignmentSnapshot);
+    } catch (dbError) {
+      console.warn("codeClip RewardAssignment Postgres save failed:", dbError.message);
     }
   }
 
