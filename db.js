@@ -1186,6 +1186,47 @@ async function getCodeClipInteractions(eventCode, limit = 100, queryClient = poo
   return (result.rows || []).map(formatCodeClipInteractionRow);
 }
 
+async function getCodeClipInteractionSummary(eventCode, queryClient = pool) {
+  if (!queryClient || !eventCode) {
+    return {
+      routingOutcomes: { MATCH: 0, NO_CAMPAIGN_MATCH: 0 },
+      interactionStates: { processed: 0, unmatched: 0 },
+      latestInteractionAt: null,
+    };
+  }
+
+  if (queryClient === pool) {
+    await ensureCodeClipInteractionsTable();
+  }
+
+  const result = await queryClient.query(
+    `
+      SELECT
+        COUNT(*) FILTER (WHERE routing_outcome = 'MATCH')::INTEGER AS match_count,
+        COUNT(*) FILTER (WHERE routing_outcome = 'NO_CAMPAIGN_MATCH')::INTEGER AS no_campaign_match_count,
+        COUNT(*) FILTER (WHERE interaction_state = 'processed')::INTEGER AS processed_count,
+        COUNT(*) FILTER (WHERE interaction_state = 'unmatched')::INTEGER AS unmatched_count,
+        MAX(created_at) AS latest_interaction_at
+      FROM codeclip_interactions
+      WHERE event_code = $1
+    `,
+    [eventCode]
+  );
+  const row = result.rows?.[0] || {};
+
+  return {
+    routingOutcomes: {
+      MATCH: Number(row.match_count || 0),
+      NO_CAMPAIGN_MATCH: Number(row.no_campaign_match_count || 0),
+    },
+    interactionStates: {
+      processed: Number(row.processed_count || 0),
+      unmatched: Number(row.unmatched_count || 0),
+    },
+    latestInteractionAt: row.latest_interaction_at || null,
+  };
+}
+
 async function getCodeClipXtraRedemptionByToken(token) {
   if (!pool || !token) return null;
 
@@ -1324,6 +1365,7 @@ module.exports = {
   ensureCodeClipInteractionsTable,
   saveCodeClipInteraction,
   getCodeClipInteractions,
+  getCodeClipInteractionSummary,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,

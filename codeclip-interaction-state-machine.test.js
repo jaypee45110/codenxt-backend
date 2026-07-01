@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const codeClipService = require('./verticals/codeclip/service');
-const { getCodeClipInteractions } = require('./db');
+const { getCodeClipInteractions, getCodeClipInteractionSummary } = require('./db');
 
 test('successful codeClip scan builds validated Interaction state machine data', async () => {
   const eventCode = 'CC-STATE-TEST';
@@ -165,4 +165,41 @@ test('codeClip interaction read helper normalizes limit and raw payload shape', 
   assert.equal(rows[0].event_code, 'CC-READ-MODEL-TEST');
   assert.equal(rows[0].raw_payload.state, 'processed');
   assert.equal(rows[0].rawPayload.scanId, 'scan-read-model-test');
+});
+
+test('codeClip interaction summary helper returns routing and state counts', async () => {
+  const calls = [];
+  const latestInteractionAt = new Date('2026-07-01T12:00:00.000Z');
+  const fakeClient = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      return {
+        rows: [
+          {
+            match_count: 3,
+            no_campaign_match_count: 2,
+            processed_count: 3,
+            unmatched_count: 2,
+            latest_interaction_at: latestInteractionAt,
+          },
+        ],
+      };
+    },
+  };
+
+  const summary = await getCodeClipInteractionSummary('CC-SUMMARY-TEST', fakeClient);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params[0], 'CC-SUMMARY-TEST');
+  assert.match(calls[0].sql, /COUNT\(\*\) FILTER \(WHERE routing_outcome = 'MATCH'\)/);
+  assert.match(calls[0].sql, /MAX\(created_at\) AS latest_interaction_at/);
+  assert.deepEqual(summary.routingOutcomes, {
+    MATCH: 3,
+    NO_CAMPAIGN_MATCH: 2,
+  });
+  assert.deepEqual(summary.interactionStates, {
+    processed: 3,
+    unmatched: 2,
+  });
+  assert.equal(summary.latestInteractionAt, latestInteractionAt);
 });
