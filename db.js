@@ -1424,6 +1424,124 @@ async function saveCodeClipRewardAssignments(snapshot = {}, queryClient = pool) 
   return rows;
 }
 
+function normalizeCodeClipRewardAssignmentLimit(limit = 100) {
+  return normalizeCodeClipInteractionLimit(limit);
+}
+
+function formatCodeClipRewardAssignmentRow(row = {}) {
+  const rawPayload = parseJsonPayload(row.raw_payload, row.raw_payload || null);
+
+  return {
+    ...row,
+    raw_payload: rawPayload,
+    rawPayload,
+  };
+}
+
+async function getCodeClipRewardAssignments(eventCode, limit = 100, queryClient = pool) {
+  if (!queryClient || !eventCode) return [];
+
+  const safeLimit = normalizeCodeClipRewardAssignmentLimit(limit);
+
+  if (queryClient === pool) {
+    await ensureCodeClipRewardAssignmentsTable();
+  }
+
+  const result = await queryClient.query(
+    `
+      SELECT *
+      FROM codeclip_reward_assignments
+      WHERE event_code = $1
+      ORDER BY created_at DESC
+      LIMIT $2
+    `,
+    [eventCode, safeLimit]
+  );
+
+  return (result.rows || []).map(formatCodeClipRewardAssignmentRow);
+}
+
+function createEmptyCodeClipRewardAssignmentSummary() {
+  return {
+    totalAssignments: 0,
+    assignedCount: 0,
+    unassignedCount: 0,
+    exhaustedCount: 0,
+    noRewardCount: 0,
+    tiers: {
+      openClip: 0,
+      clip: 0,
+      clipPlus: 0,
+      clipXtra: 0,
+    },
+    assignedByTier: {
+      openClip: 0,
+      clip: 0,
+      clipPlus: 0,
+      clipXtra: 0,
+    },
+    clipXtraWithTokenCount: 0,
+    latestAssignmentAt: null,
+  };
+}
+
+async function getCodeClipRewardAssignmentSummary(eventCode, queryClient = pool) {
+  if (!queryClient || !eventCode) {
+    return createEmptyCodeClipRewardAssignmentSummary();
+  }
+
+  if (queryClient === pool) {
+    await ensureCodeClipRewardAssignmentsTable();
+  }
+
+  const result = await queryClient.query(
+    `
+      SELECT
+        COUNT(*)::INTEGER AS total_count,
+        COUNT(*) FILTER (WHERE assigned = TRUE)::INTEGER AS assigned_count,
+        COUNT(*) FILTER (WHERE assigned = FALSE)::INTEGER AS unassigned_count,
+        COUNT(*) FILTER (WHERE exhausted = TRUE)::INTEGER AS exhausted_count,
+        COUNT(*) FILTER (WHERE no_reward = TRUE)::INTEGER AS no_reward_count,
+        COUNT(*) FILTER (WHERE tier = 'openClip')::INTEGER AS open_clip_count,
+        COUNT(*) FILTER (WHERE tier = 'clip')::INTEGER AS clip_count,
+        COUNT(*) FILTER (WHERE tier = 'clipPlus')::INTEGER AS clip_plus_count,
+        COUNT(*) FILTER (WHERE tier = 'clipXtra')::INTEGER AS clip_xtra_count,
+        COUNT(*) FILTER (WHERE tier = 'openClip' AND assigned = TRUE)::INTEGER AS open_clip_assigned_count,
+        COUNT(*) FILTER (WHERE tier = 'clip' AND assigned = TRUE)::INTEGER AS clip_assigned_count,
+        COUNT(*) FILTER (WHERE tier = 'clipPlus' AND assigned = TRUE)::INTEGER AS clip_plus_assigned_count,
+        COUNT(*) FILTER (WHERE tier = 'clipXtra' AND assigned = TRUE)::INTEGER AS clip_xtra_assigned_count,
+        COUNT(*) FILTER (WHERE tier = 'clipXtra' AND redemption_token IS NOT NULL)::INTEGER AS clip_xtra_with_token_count,
+        MAX(created_at) AS latest_assignment_at
+      FROM codeclip_reward_assignments
+      WHERE event_code = $1
+    `,
+    [eventCode]
+  );
+  const row = result.rows?.[0] || {};
+
+  return {
+    totalAssignments: Number(row.total_count || 0),
+    assignedCount: Number(row.assigned_count || 0),
+    unassignedCount: Number(row.unassigned_count || 0),
+    exhaustedCount: Number(row.exhausted_count || 0),
+    noRewardCount: Number(row.no_reward_count || 0),
+    tiers: {
+      openClip: Number(row.open_clip_count || 0),
+      clip: Number(row.clip_count || 0),
+      clipPlus: Number(row.clip_plus_count || 0),
+      clipXtra: Number(row.clip_xtra_count || 0),
+    },
+    assignedByTier: {
+      openClip: Number(row.open_clip_assigned_count || 0),
+      clip: Number(row.clip_assigned_count || 0),
+      clipPlus: Number(row.clip_plus_assigned_count || 0),
+      clipXtra: Number(row.clip_xtra_assigned_count || 0),
+    },
+    clipXtraWithTokenCount: Number(row.clip_xtra_with_token_count || 0),
+    latestAssignmentAt: row.latest_assignment_at || null,
+  };
+}
+
 async function getCodeClipXtraRedemptionByToken(token) {
   if (!pool || !token) return null;
 
@@ -1565,6 +1683,8 @@ module.exports = {
   getCodeClipInteractionSummary,
   ensureCodeClipRewardAssignmentsTable,
   saveCodeClipRewardAssignments,
+  getCodeClipRewardAssignments,
+  getCodeClipRewardAssignmentSummary,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,

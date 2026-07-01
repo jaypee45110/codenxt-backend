@@ -6,6 +6,8 @@ const {
   getCodeClipInteractions,
   getCodeClipInteractionSummary,
   saveCodeClipRewardAssignments,
+  getCodeClipRewardAssignments,
+  getCodeClipRewardAssignmentSummary,
 } = require('./db');
 
 test('successful codeClip scan builds validated Interaction state machine data', async () => {
@@ -388,6 +390,130 @@ test('saveCodeClipRewardAssignments persists normalized assignment rows with ide
 
   assert.equal(rows.length, 2);
   assert.equal(rows[1].redemption_token, 'CX-REWARD-PERSIST');
+});
+
+test('codeClip reward assignment read helper normalizes limit and raw payload shape', async () => {
+  const calls = [];
+  const fakeClient = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      return {
+        rows: [
+          {
+            event_code: params[0],
+            scan_id: 'scan-reward-read-test',
+            tier: 'clipXtra',
+            assigned: true,
+            redemption_token: 'CX-READ-TEST',
+            raw_payload: JSON.stringify({
+              eventCode: params[0],
+              scanId: 'scan-reward-read-test',
+              assignment: {
+                tier: 'clipXtra',
+                redemptionToken: 'CX-READ-TEST',
+              },
+            }),
+          },
+        ],
+      };
+    },
+  };
+
+  assert.deepEqual(await getCodeClipRewardAssignments('', 100, fakeClient), []);
+
+  const rows = await getCodeClipRewardAssignments('CC-REWARD-READ-TEST', 999, fakeClient);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params[0], 'CC-REWARD-READ-TEST');
+  assert.equal(calls[0].params[1], 500);
+  assert.match(calls[0].sql, /FROM codeclip_reward_assignments/);
+  assert.match(calls[0].sql, /ORDER BY created_at DESC/);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].event_code, 'CC-REWARD-READ-TEST');
+  assert.equal(rows[0].tier, 'clipXtra');
+  assert.equal(rows[0].raw_payload.assignment.redemptionToken, 'CX-READ-TEST');
+  assert.equal(rows[0].rawPayload.scanId, 'scan-reward-read-test');
+});
+
+test('codeClip reward assignment summary helper returns assignment counts', async () => {
+  const calls = [];
+  const latestAssignmentAt = new Date('2026-07-01T13:00:00.000Z');
+  const fakeClient = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      return {
+        rows: [
+          {
+            total_count: 6,
+            assigned_count: 4,
+            unassigned_count: 2,
+            exhausted_count: 1,
+            no_reward_count: 1,
+            open_clip_count: 2,
+            clip_count: 1,
+            clip_plus_count: 1,
+            clip_xtra_count: 2,
+            open_clip_assigned_count: 2,
+            clip_assigned_count: 0,
+            clip_plus_assigned_count: 1,
+            clip_xtra_assigned_count: 1,
+            clip_xtra_with_token_count: 1,
+            latest_assignment_at: latestAssignmentAt,
+          },
+        ],
+      };
+    },
+  };
+
+  assert.deepEqual(await getCodeClipRewardAssignmentSummary('', fakeClient), {
+    totalAssignments: 0,
+    assignedCount: 0,
+    unassignedCount: 0,
+    exhaustedCount: 0,
+    noRewardCount: 0,
+    tiers: {
+      openClip: 0,
+      clip: 0,
+      clipPlus: 0,
+      clipXtra: 0,
+    },
+    assignedByTier: {
+      openClip: 0,
+      clip: 0,
+      clipPlus: 0,
+      clipXtra: 0,
+    },
+    clipXtraWithTokenCount: 0,
+    latestAssignmentAt: null,
+  });
+
+  const summary = await getCodeClipRewardAssignmentSummary('CC-REWARD-SUMMARY-TEST', fakeClient);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params[0], 'CC-REWARD-SUMMARY-TEST');
+  assert.match(calls[0].sql, /COUNT\(\*\) FILTER \(WHERE assigned = TRUE\)/);
+  assert.match(calls[0].sql, /FROM codeclip_reward_assignments/);
+  assert.deepEqual(summary, {
+    totalAssignments: 6,
+    assignedCount: 4,
+    unassignedCount: 2,
+    exhaustedCount: 1,
+    noRewardCount: 1,
+    tiers: {
+      openClip: 2,
+      clip: 1,
+      clipPlus: 1,
+      clipXtra: 2,
+    },
+    assignedByTier: {
+      openClip: 2,
+      clip: 0,
+      clipPlus: 1,
+      clipXtra: 1,
+    },
+    clipXtraWithTokenCount: 1,
+    latestAssignmentAt,
+  });
 });
 
 test('codeClip interaction read helper normalizes limit and raw payload shape', async () => {
