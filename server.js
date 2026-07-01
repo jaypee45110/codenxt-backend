@@ -6143,14 +6143,18 @@ app.get("/reward-claims/:eventCode", requireCodePerksAdmin, limitRewardClaimsRea
 });
 
 
-app.listen(PORT, () => {
-  console.log(`Backend running on port ${PORT}`);
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Backend running on port ${PORT}`);
 
-  if (process.env.REDIS_URL) {
-    testRedisConnection().catch((err) => {
-      console.error("Redis test failed:", err.message);
-    });
-  } else {
-    console.log("Redis disabled - running in memory mode");
-  }
-});
+    if (process.env.REDIS_URL) {
+      testRedisConnection().catch((err) => {
+        console.error("Redis test failed:", err.message);
+      });
+    } else {
+      console.log("Redis disabled - running in memory mode");
+    }
+  });
+}
+
+module.exports = { app };
