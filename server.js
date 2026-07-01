@@ -34,6 +34,9 @@ const {
   saveCodeClipXtraRedemption,
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
+  getCodeClipInteractions,
+  getCodeClipRewardAssignments,
+  getCodeClipRewardAssignmentSummary,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
@@ -3068,6 +3071,79 @@ app.get("/codepod/report/:eventCode", async (req, res) => {
   } catch (err) {
     console.error("Get codePod report failed:", err.message);
     return res.status(500).json({ ok: false, error: "Failed to get codePod report" });
+  }
+});
+
+app.get("/codeclip/report/:eventCode", async (req, res) => {
+  try {
+    const eventCode = String(req.params.eventCode || "").trim();
+    if (!eventCode) {
+      return res.status(400).json({ ok: false, error: "Missing event code" });
+    }
+
+    let eventId = null;
+    let meta = Object.values(events).find(
+      (item) => item?.code === eventCode && String(item?.vertical || "").trim().toLowerCase() === "codeclip"
+    ) || null;
+
+    if (meta?.id) eventId = meta.id;
+
+    if ((!meta || !eventId) && process.env.REDIS_URL) {
+      const resolvedId =
+        await redis.get(`eventcode:codeclip:${eventCode}`) ||
+        await redis.get(`eventcode:${eventCode}`);
+
+      if (resolvedId) {
+        eventId = resolvedId;
+        const redisMeta = await redis.hgetall(`event:${resolvedId}:meta`);
+        if (redisMeta && redisMeta.id && String(redisMeta.vertical || "").trim().toLowerCase() === "codeclip") {
+          meta = redisMeta;
+        }
+      }
+    }
+
+    if ((!meta || !meta.id) && getCampaignByCode) {
+      const campaign = await getCampaignByCode(eventCode);
+      const rawEvent = campaign?.raw_event || null;
+      const campaignVertical = String(campaign?.vertical || rawEvent?.vertical || "").trim().toLowerCase();
+
+      if (campaign && campaignVertical === "codeclip") {
+        meta = rawEvent || campaign;
+        eventId = meta.id || campaign.id || eventId;
+      }
+    }
+
+    if (!meta) {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    const report = await codeClipVertical.report.buildCodeClipReport(eventCode, {
+      getCodeClipInteractions,
+      getCodeClipRewardAssignments,
+      getCodeClipRewardAssignmentSummary,
+      getEventScanSummary,
+      getEventRegistrations,
+      getEventRegistrationSummary,
+    });
+
+    return res.json({
+      ...report,
+      event: {
+        ...report.event,
+        eventCode,
+        eventId: eventId || meta.id || "",
+        podcastName: meta.podcastName || meta.artistName || meta.name || "",
+        episodeTitle: meta.episodeTitle || meta.title || meta.venue || "",
+        startAt: meta.startAt || "",
+        endAt: meta.endAt || "",
+        activationMethod: normalizeActivationMethod(meta.activationMethod),
+        activationKeyword: String(meta.activationKeyword || "").trim(),
+        activationChannels: normalizeActivationChannels(meta.activationChannels),
+      },
+    });
+  } catch (err) {
+    console.error("Get codeClip report failed:", err.message);
+    return res.status(500).json({ ok: false, error: "Failed to get codeClip report" });
   }
 });
 
