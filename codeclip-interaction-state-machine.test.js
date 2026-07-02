@@ -198,6 +198,88 @@ test('successful codeClip scan builds validated Interaction state machine data',
   assert.equal(eventScanPayload.extraPayload.interaction.audienceEntry.ip, undefined);
 });
 
+test('codeClip scan records internal persistence status when COAS persistence fails', async () => {
+  const eventCode = 'CC-PERSISTENCE-STATUS';
+  const eventId = 'event-persistence-status';
+  const scanId = 'scan-persistence-status';
+  const rewardAssignments = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipXtra: { assigned: false },
+  };
+
+  let eventScanPayload = null;
+  let rewardAssignmentPersistenceAttempted = false;
+
+  const result = await codeClipService.handleCodeClipScan({
+    event: {
+      id: eventId,
+      code: eventCode,
+      vertical: 'codeclip',
+      startAt: '2099-12-31T18:00:00.000Z',
+      endAt: '2099-12-31T23:59:59.000Z',
+      rewards: {
+        openClip: { enabled: true },
+      },
+    },
+    eventCode,
+    eventId,
+    scanId,
+    rawScans: 1,
+    uniqueScans: 1,
+    scanRank: 1,
+    audienceEntry: {
+      entryCode: eventCode,
+      scanId,
+      requestedVertical: 'codeclip',
+      source: 'scan',
+      transport: 'http',
+      receivedAt: '2026-07-01T00:00:00.000Z',
+    },
+    redis: null,
+    codeClipVertical: {
+      routes: {
+        parseCodeClipRewardsMeta(event) {
+          return event;
+        },
+      },
+      assignment: {
+        async assignCodeClipRewards() {
+          return rewardAssignments;
+        },
+      },
+    },
+    async persistFinalScan(finalTier, extraPayload, interaction) {
+      eventScanPayload = { finalTier, extraPayload, interaction };
+    },
+    async saveCodeClipInteraction() {
+      throw new Error('interaction persistence failed');
+    },
+    async saveCodeClipRewardAssignments() {
+      rewardAssignmentPersistenceAttempted = true;
+      throw new Error('reward assignment persistence failed');
+    },
+    async saveCodeClipXtraRedemption() {
+      throw new Error('ClipXtra should not be persisted when not assigned');
+    },
+  });
+
+  assert.equal(result.httpStatus, 200);
+  assert.equal(result.payload.success, true);
+  assert.equal(result.payload.persistenceStatus, undefined);
+  assert.equal(rewardAssignmentPersistenceAttempted, true);
+  assert.ok(eventScanPayload?.interaction?.persistenceStatus);
+  assert.deepEqual(eventScanPayload.interaction.persistenceStatus.interaction, {
+    attempted: true,
+    ok: false,
+    error: 'interaction persistence failed',
+  });
+  assert.deepEqual(eventScanPayload.interaction.persistenceStatus.rewardAssignments, {
+    attempted: true,
+    ok: false,
+    error: 'reward assignment persistence failed',
+  });
+});
+
 test('successful codeClip keyword entry builds internal Interaction without event scan persistence', async () => {
   const eventCode = 'CC-KEYWORD-RUNTIME';
   const eventId = 'event-keyword-runtime';
