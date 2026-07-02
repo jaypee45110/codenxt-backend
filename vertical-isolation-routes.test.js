@@ -173,6 +173,58 @@ test('POST /scan does not expose codeClip COAS adapter internals', async () => {
   });
 });
 
+test('POST /codeclip/keyword-entry accepts internal keyword entry without exposing COAS internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-KEYWORD-ENTRY-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip keyword entry route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'keyword',
+        activationKeyword: 'GOLD',
+        activationChannels: ['Instagram'],
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const keywordResponse = await fetch(`${baseUrl}/codeclip/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: code,
+        keyword: ' GOLD ',
+        messageId: `message-${Date.now()}`,
+      }),
+    });
+    const keywordEntry = await keywordResponse.json();
+
+    assert.equal(keywordResponse.ok, true);
+    assert.equal(keywordEntry.success, true);
+    assert.equal(keywordEntry.eventCode, code);
+    assert.equal(typeof keywordEntry.messageId, 'string');
+    assert.notEqual(keywordEntry.messageId.trim(), '');
+    assert.equal(Object.hasOwn(keywordEntry, 'audienceEntry'), false);
+    assert.equal(Object.hasOwn(keywordEntry, 'audienceIntent'), false);
+    assert.equal(Object.hasOwn(keywordEntry, 'audienceContext'), false);
+    assert.equal(Object.hasOwn(keywordEntry, 'rewardAssignmentSnapshot'), false);
+    assert.equal(Object.hasOwn(keywordEntry, 'warnings'), false);
+    assert.equal(Object.hasOwn(keywordEntry, 'errors'), false);
+  });
+});
+
 test('POST /scan uses stored codePod event vertical when request vertical is missing', async () => {
   await withTestServer(async (baseUrl) => {
     const code = `CP-STORED-VERTICAL-${Date.now()}`;

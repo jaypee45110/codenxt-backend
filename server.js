@@ -3147,6 +3147,72 @@ app.get("/codeclip/report/:eventCode", async (req, res) => {
   }
 });
 
+app.post("/codeclip/keyword-entry", async (req, res) => {
+  try {
+    const eventCode = String(req.body?.eventCode || "").trim();
+    const keyword = String(req.body?.keyword || "").trim();
+    const messageId = String(req.body?.messageId || "").trim();
+
+    if (!eventCode || !keyword || !messageId) {
+      return res.status(400).json({ ok: false, error: "eventCode, keyword and messageId are required" });
+    }
+
+    let eventId = null;
+    let meta = Object.values(events).find(
+      (item) => item?.code === eventCode && String(item?.vertical || "").trim().toLowerCase() === "codeclip"
+    ) || null;
+
+    if (meta?.id) eventId = meta.id;
+
+    if ((!meta || !eventId) && process.env.REDIS_URL) {
+      const resolvedId =
+        await redis.get(`eventcode:codeclip:${eventCode}`) ||
+        await redis.get(`eventcode:${eventCode}`);
+
+      if (resolvedId) {
+        eventId = resolvedId;
+        const redisMeta = await redis.hgetall(`event:${resolvedId}:meta`);
+        if (redisMeta && redisMeta.id && String(redisMeta.vertical || "").trim().toLowerCase() === "codeclip") {
+          meta = redisMeta;
+        }
+      }
+    }
+
+    if ((!meta || !meta.id) && getCampaignByCode) {
+      const campaign = await getCampaignByCode(eventCode);
+      const rawEvent = campaign?.raw_event || null;
+      const campaignVertical = String(campaign?.vertical || rawEvent?.vertical || "").trim().toLowerCase();
+
+      if (campaign && campaignVertical === "codeclip") {
+        meta = rawEvent || campaign;
+        eventId = meta.id || campaign.id || eventId;
+      }
+    }
+
+    if (!meta || String(meta.vertical || "").trim().toLowerCase() !== "codeclip") {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    const result = await codeClipVertical.service.handleCodeClipKeywordEntry({
+      event: meta,
+      eventCode,
+      eventId: eventId || meta.id || "",
+      keyword,
+      messageId,
+      requestedVertical: "codeclip",
+      redis: process.env.REDIS_URL ? redis : null,
+      codeClipVertical,
+      saveCodeClipInteraction,
+      saveCodeClipRewardAssignments,
+    });
+
+    return res.status(result.httpStatus).json(result.payload);
+  } catch (err) {
+    console.error("codeClip keyword entry failed:", err.message);
+    return res.status(500).json({ ok: false, error: "Failed to process keyword entry" });
+  }
+});
+
 app.get("/report/:eventCode", requireCodePerksAdmin, async (req, res) => {
   try {
     let { eventCode } = req.params;
