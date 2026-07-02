@@ -3215,14 +3215,14 @@ app.post("/codeclip/keyword-entry", async (req, res) => {
 
 app.post("/codeclip/test-provider/keyword", async (req, res) => {
   try {
-    const eventCode = String(req.body?.eventCode || "").trim();
-    const keyword = String(req.body?.text || "").trim();
-    const messageId = String(req.body?.messageId || "").trim();
+    const { normalizeTestProviderKeyword } = require("./verticals/codeclip/provider-adapters");
+    const normalizedProviderInput = normalizeTestProviderKeyword(req.body || {});
 
-    if (!eventCode || !keyword || !messageId) {
+    if (!normalizedProviderInput.ok) {
       return res.status(400).json({ ok: false, error: "eventCode, text and messageId are required" });
     }
 
+    const { eventCode, keyword, messageId } = normalizedProviderInput;
     let eventId = null;
     let meta = Object.values(events).find(
       (item) => item?.code === eventCode && String(item?.vertical || "").trim().toLowerCase() === "codeclip"
