@@ -172,3 +172,42 @@ test('POST /scan uses stored codePod event vertical when request vertical is mis
     assert.equal(Object.hasOwn(scan, 'tierLimits'), false);
   });
 });
+
+test('codeDemo handshake route resolves a stored codeDemo event', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CDM-HANDSHAKE-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codedemo',
+        code,
+        name: 'codeDemo handshake route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const handshakeResponse = await fetch(`${baseUrl}/codedemo/handshake`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: code,
+        relevance: 7,
+        understanding: 7,
+        trust: 7,
+        safety: 7,
+        insight: 7,
+      }),
+    });
+    const handshakeBody = await handshakeResponse.json();
+
+    assert.equal(handshakeResponse.ok, true);
+    assert.ok(handshakeBody.handshake);
+    assert.equal(handshakeBody.handshake.vertical, 'codedemo');
+    assert.equal(handshakeBody.handshake.eventCode, code);
+  });
+});
