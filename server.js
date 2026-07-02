@@ -4049,7 +4049,7 @@ app.post("/scan", async (req, res) => {
       userAgent: req.get("user-agent") || "",
       ip,
     });
-    const normalizedScanAudienceEntry = codeClipVertical.service.normalizeScanAudienceEntry({
+    const normalizedScanAudienceEntry = codeClipVertical.service.normalizeAudienceEntry("scan", {
       entryCode: eventCode,
       scanId,
       requestedVertical,
