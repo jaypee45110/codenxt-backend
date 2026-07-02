@@ -239,6 +239,67 @@ function normalizeScanAudienceEntry(input = {}) {
   };
 }
 
+function createKeywordAudienceIntentSnapshot(audienceEntry = null) {
+  if (!audienceEntry) return null;
+
+  return {
+    type: "keyword",
+    entryCode: audienceEntry.entryCode,
+    keyword: audienceEntry.keyword,
+    requestedVertical: audienceEntry.requestedVertical,
+    source: "keyword",
+    transport: "message",
+  };
+}
+
+function normalizeKeywordAudienceEntry(input = {}) {
+  const entryCode = String(input.entryCode || "").trim();
+  const keyword = String(input.keyword || "").trim();
+  const errors = [];
+  const warnings = [];
+
+  if (!entryCode) {
+    errors.push({ code: "ENTRY_CODE_REQUIRED" });
+  }
+
+  if (!keyword) {
+    errors.push({ code: "KEYWORD_REQUIRED" });
+  }
+
+  if (errors.length) {
+    return {
+      ok: false,
+      audienceEntry: null,
+      audienceIntent: null,
+      warnings,
+      errors,
+    };
+  }
+
+  const requestedVertical = String(input.requestedVertical || "").trim().toLowerCase();
+
+  if (requestedVertical && !KNOWN_REQUESTED_VERTICALS.has(requestedVertical)) {
+    warnings.push({ code: "UNKNOWN_VERTICAL" });
+  }
+
+  const audienceEntry = {
+    entryCode,
+    keyword,
+    requestedVertical,
+    source: "keyword",
+    transport: "message",
+    receivedAt: input.receivedAt || new Date().toISOString(),
+  };
+
+  return {
+    ok: true,
+    audienceEntry,
+    audienceIntent: createKeywordAudienceIntentSnapshot(audienceEntry),
+    warnings,
+    errors,
+  };
+}
+
 function buildInteractionResult(httpStatus, payload) {
   return {
     httpStatus,
@@ -632,6 +693,7 @@ module.exports = {
   redeemClipXtraToken,
   buildNoCampaignMatchInteraction,
   normalizeScanAudienceEntry,
+  normalizeKeywordAudienceEntry,
   createRewardAssignmentSnapshot,
   handleCodeClipScan,
 };

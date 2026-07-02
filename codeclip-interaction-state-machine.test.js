@@ -322,6 +322,99 @@ test('codeClip scan EntryAdapter normalizes sanitized AudienceEntry and Audience
   );
 });
 
+test('codeClip keyword EntryAdapter normalizes sanitized AudienceEntry and AudienceIntent', () => {
+  const valid = codeClipService.normalizeKeywordAudienceEntry({
+    entryCode: ' CC-KEYWORD-ADAPTER ',
+    keyword: '  GOLD  ',
+    requestedVertical: ' codeclip ',
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    rawPayload: { text: 'GOLD', provider: 'test' },
+    messageBody: 'GOLD',
+    phone: '+4712345678',
+    email: 'participant@example.com',
+    handle: '@participant',
+    profileId: 'profile-123',
+    receivedAt: '2026-07-01T00:00:00.000Z',
+  });
+
+  assert.equal(valid.ok, true);
+  assert.deepEqual(valid.errors, []);
+  assert.deepEqual(valid.warnings, []);
+  assert.deepEqual(valid.audienceEntry, {
+    entryCode: 'CC-KEYWORD-ADAPTER',
+    keyword: 'GOLD',
+    requestedVertical: 'codeclip',
+    source: 'keyword',
+    transport: 'message',
+    receivedAt: '2026-07-01T00:00:00.000Z',
+  });
+  assert.deepEqual(valid.audienceIntent, {
+    type: 'keyword',
+    entryCode: 'CC-KEYWORD-ADAPTER',
+    keyword: 'GOLD',
+    requestedVertical: 'codeclip',
+    source: 'keyword',
+    transport: 'message',
+  });
+  assert.equal(valid.audienceEntry.ip, undefined);
+  assert.equal(valid.audienceEntry.userAgent, undefined);
+  assert.equal(valid.audienceEntry.rawPayload, undefined);
+  assert.equal(valid.audienceEntry.messageBody, undefined);
+  assert.equal(valid.audienceEntry.phone, undefined);
+  assert.equal(valid.audienceEntry.email, undefined);
+  assert.equal(valid.audienceEntry.handle, undefined);
+  assert.equal(valid.audienceEntry.profileId, undefined);
+  assert.equal(valid.audienceIntent.ip, undefined);
+  assert.equal(valid.audienceIntent.userAgent, undefined);
+  assert.equal(valid.audienceIntent.rawPayload, undefined);
+  assert.equal(valid.audienceIntent.messageBody, undefined);
+  assert.equal(valid.audienceIntent.phone, undefined);
+  assert.equal(valid.audienceIntent.email, undefined);
+  assert.equal(valid.audienceIntent.handle, undefined);
+  assert.equal(valid.audienceIntent.profileId, undefined);
+
+  const missingEntryCode = codeClipService.normalizeKeywordAudienceEntry({
+    keyword: 'GOLD',
+    requestedVertical: 'codeclip',
+  });
+
+  assert.equal(missingEntryCode.ok, false);
+  assert.equal(missingEntryCode.audienceEntry, null);
+  assert.equal(missingEntryCode.audienceIntent, null);
+  assert.deepEqual(
+    missingEntryCode.errors.map((error) => error.code),
+    ['ENTRY_CODE_REQUIRED']
+  );
+
+  const missingKeyword = codeClipService.normalizeKeywordAudienceEntry({
+    entryCode: 'CC-MISSING-KEYWORD',
+    requestedVertical: 'codeclip',
+  });
+
+  assert.equal(missingKeyword.ok, false);
+  assert.equal(missingKeyword.audienceEntry, null);
+  assert.equal(missingKeyword.audienceIntent, null);
+  assert.deepEqual(
+    missingKeyword.errors.map((error) => error.code),
+    ['KEYWORD_REQUIRED']
+  );
+
+  const unknownVertical = codeClipService.normalizeKeywordAudienceEntry({
+    entryCode: 'CC-UNKNOWN-KEYWORD-VERTICAL',
+    keyword: 'GOLD',
+    requestedVertical: 'mysteryVertical',
+  });
+
+  assert.equal(unknownVertical.ok, true);
+  assert.equal(unknownVertical.audienceEntry.requestedVertical, 'mysteryvertical');
+  assert.equal(unknownVertical.audienceIntent.requestedVertical, 'mysteryvertical');
+  assert.deepEqual(
+    unknownVertical.warnings.map((warning) => warning.code),
+    ['UNKNOWN_VERTICAL']
+  );
+});
+
 test('codeClip RewardAssignment snapshot normalizes existing tier assignments', () => {
   const openClipAssignment = {
     assigned: true,
