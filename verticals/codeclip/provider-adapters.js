@@ -60,7 +60,39 @@ function normalizeSmsKeywordProvider(input = {}) {
   };
 }
 
+const KEYWORD_PROVIDER_ADAPTERS = {
+  sms: normalizeSmsKeywordProvider,
+  test: normalizeTestProviderKeyword,
+};
+
+function emptyProviderKeywordResult(errors = []) {
+  return {
+    ok: false,
+    eventCode: "",
+    keyword: "",
+    messageId: "",
+    warnings: [],
+    errors,
+  };
+}
+
+function normalizeProviderKeywordIngress(provider, input = {}) {
+  const normalizedProvider = String(provider || "").trim().toLowerCase();
+
+  if (!normalizedProvider) {
+    return emptyProviderKeywordResult([{ code: "PROVIDER_REQUIRED" }]);
+  }
+
+  const adapter = KEYWORD_PROVIDER_ADAPTERS[normalizedProvider];
+  if (!adapter) {
+    return emptyProviderKeywordResult([{ code: "PROVIDER_ADAPTER_NOT_FOUND" }]);
+  }
+
+  return adapter(input);
+}
+
 module.exports = {
+  normalizeProviderKeywordIngress,
   normalizeSmsKeywordProvider,
   normalizeTestProviderKeyword,
 };
