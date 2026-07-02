@@ -162,6 +162,42 @@ test('buildPersistenceAction maps persistence guarantee policy to internal actio
   });
 });
 
+test('recordPersistenceAction creates structured internal observability event', () => {
+  const logs = [];
+  const event = codeClipService.recordPersistenceAction(
+    {
+      action: 'continue_with_internal_warning',
+      logLevel: 'warn',
+      retry: true,
+      escalate: true,
+      reason: 'persistence_degraded',
+    },
+    {
+      interactionId: 'interaction-1',
+      eventCode: 'CC-OBSERVABILITY',
+      persistenceGuaranteePolicy: { severity: 'degraded' },
+    },
+    {
+      warn(message, payload) {
+        logs.push({ message, payload });
+      },
+    }
+  );
+
+  assert.deepEqual(event, {
+    interactionId: 'interaction-1',
+    eventCode: 'CC-OBSERVABILITY',
+    severity: 'degraded',
+    action: 'continue_with_internal_warning',
+    retry: true,
+    escalate: true,
+    reason: 'persistence_degraded',
+  });
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].message, 'codeClip COAS persistence action');
+  assert.deepEqual(logs[0].payload, event);
+});
+
 test('successful codeClip scan builds validated Interaction state machine data', async () => {
   const eventCode = 'CC-STATE-TEST';
   const eventId = 'event-state-test';
@@ -181,6 +217,7 @@ test('successful codeClip scan builds validated Interaction state machine data',
   let eventScanPayload = null;
   let persistedInteraction = null;
   let persistedRewardAssignmentSnapshot = null;
+  let persistenceActionEvent = null;
 
   const result = await codeClipService.handleCodeClipScan({
     event: {
@@ -247,6 +284,9 @@ test('successful codeClip scan builds validated Interaction state machine data',
     },
     async saveCodeClipXtraRedemption() {
       throw new Error('ClipXtra should not be persisted when not assigned');
+    },
+    recordPersistenceAction(action, interaction) {
+      persistenceActionEvent = { action, interaction };
     },
   });
 
@@ -317,6 +357,10 @@ test('successful codeClip scan builds validated Interaction state machine data',
     escalate: false,
     reason: 'persistence_ok',
   });
+  assert.deepEqual(persistenceActionEvent, {
+    action: persistedInteraction.persistenceAction,
+    interaction: persistedInteraction,
+  });
   assert.ok(persistedInteraction.rewardAssignmentSnapshot);
   assert.equal(persistedInteraction.rewardAssignmentSnapshot.eventCode, eventCode);
   assert.equal(persistedInteraction.rewardAssignmentSnapshot.eventId, eventId);
@@ -369,6 +413,7 @@ test('codeClip scan records internal persistence status when COAS persistence fa
 
   let eventScanPayload = null;
   let rewardAssignmentPersistenceAttempted = false;
+  let persistenceActionEvent = null;
 
   const result = await codeClipService.handleCodeClipScan({
     event: {
@@ -421,6 +466,9 @@ test('codeClip scan records internal persistence status when COAS persistence fa
     async saveCodeClipXtraRedemption() {
       throw new Error('ClipXtra should not be persisted when not assigned');
     },
+    recordPersistenceAction(action, interaction) {
+      persistenceActionEvent = { action, interaction };
+    },
   });
 
   assert.equal(result.httpStatus, 200);
@@ -461,6 +509,10 @@ test('codeClip scan records internal persistence status when COAS persistence fa
     escalate: true,
     reason: 'persistence_critical',
   });
+  assert.deepEqual(persistenceActionEvent, {
+    action: eventScanPayload.interaction.persistenceAction,
+    interaction: eventScanPayload.interaction,
+  });
 });
 
 test('successful codeClip keyword entry builds internal Interaction without event scan persistence', async () => {
@@ -480,6 +532,7 @@ test('successful codeClip keyword entry builds internal Interaction without even
   let eventScanWriteAttempted = false;
   let persistedInteraction = null;
   let persistedRewardAssignmentSnapshot = null;
+  let persistenceActionEvent = null;
 
   const result = await codeClipService.handleCodeClipKeywordEntry({
     event: {
@@ -532,6 +585,9 @@ test('successful codeClip keyword entry builds internal Interaction without even
     },
     async saveCodeClipXtraRedemption() {
       throw new Error('ClipXtra should not be persisted when not assigned');
+    },
+    recordPersistenceAction(action, interaction) {
+      persistenceActionEvent = { action, interaction };
     },
   });
 
@@ -595,6 +651,10 @@ test('successful codeClip keyword entry builds internal Interaction without even
     retry: false,
     escalate: false,
     reason: 'persistence_ok',
+  });
+  assert.deepEqual(persistenceActionEvent, {
+    action: persistedInteraction.persistenceAction,
+    interaction: persistedInteraction,
   });
   assert.deepEqual(
     persistedInteraction.rewardAssignmentSnapshot.assignments.map((assignment) => assignment.tier),

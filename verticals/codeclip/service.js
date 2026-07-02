@@ -730,6 +730,26 @@ function buildPersistenceAction(policy = {}) {
   };
 }
 
+function recordPersistenceAction(action = {}, interaction = {}, logger = console) {
+  const event = {
+    interactionId: interaction.interactionId || null,
+    eventCode: interaction.eventCode || "",
+    severity: interaction.persistenceGuaranteePolicy?.severity || "",
+    action: action.action || "",
+    retry: Boolean(action.retry),
+    escalate: Boolean(action.escalate),
+    reason: action.reason || "",
+  };
+
+  if (action.logLevel === "warn" && logger?.warn) {
+    logger.warn("codeClip COAS persistence action", event);
+  } else if (action.logLevel === "error" && logger?.error) {
+    logger.error("codeClip COAS persistence action", event);
+  }
+
+  return event;
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -746,6 +766,7 @@ async function handleCodeClipScan({
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
   saveCodeClipXtraRedemption,
+  recordPersistenceAction: recordPersistenceActionHandler = recordPersistenceAction,
 }) {
   const interactionContext = buildInteractionContext({
     event,
@@ -856,6 +877,7 @@ async function handleCodeClipScan({
   interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
   interaction.persistenceGuaranteePolicy = applyPersistenceGuaranteePolicy(interaction.persistenceDecision);
   interaction.persistenceAction = buildPersistenceAction(interaction.persistenceGuaranteePolicy);
+  recordPersistenceActionHandler(interaction.persistenceAction, interaction);
 
   return buildInteractionResult(200, {
     success: true,
@@ -882,6 +904,7 @@ async function handleCodeClipKeywordEntry({
   codeClipVertical,
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
+  recordPersistenceAction: recordPersistenceActionHandler = recordPersistenceAction,
 }) {
   const normalizedKeywordEntry = normalizeAudienceEntry("keyword", {
     entryCode: eventCode,
@@ -967,6 +990,7 @@ async function handleCodeClipKeywordEntry({
   interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
   interaction.persistenceGuaranteePolicy = applyPersistenceGuaranteePolicy(interaction.persistenceDecision);
   interaction.persistenceAction = buildPersistenceAction(interaction.persistenceGuaranteePolicy);
+  recordPersistenceActionHandler(interaction.persistenceAction, interaction);
 
   return buildInteractionResult(200, {
     success: true,
@@ -990,6 +1014,7 @@ module.exports = {
   buildPersistenceDecision,
   applyPersistenceGuaranteePolicy,
   buildPersistenceAction,
+  recordPersistenceAction,
   handleCodeClipScan,
   handleCodeClipKeywordEntry,
 };
