@@ -246,3 +246,33 @@ test('legacy codePerks redemption token validates through unprefixed fallback', 
     assert.equal(redemption.claimId, claimBody.claim.id);
   });
 });
+
+test('unknown redemption tokens stay isolated by prefix routing', async () => {
+  await withTestServer(async (baseUrl) => {
+    const cxResponse = await fetch(`${baseUrl}/redemption/CX-UNKNOWN-${Date.now()}`);
+    const gxResponse = await fetch(`${baseUrl}/redemption/GX-UNKNOWN-${Date.now()}`);
+    const legacyResponse = await fetch(`${baseUrl}/redemption/unknownlegacy${Date.now()}`);
+
+    const cx = await cxResponse.json();
+    const gx = await gxResponse.json();
+    const legacy = await legacyResponse.json();
+
+    assert.equal(cxResponse.status, 404);
+    assert.equal(cx.ok, false);
+    assert.equal(cx.status, 'not_found');
+    assert.equal(Object.hasOwn(cx, 'valid'), false);
+    assert.equal(Object.hasOwn(cx, 'error'), false);
+
+    assert.equal(gxResponse.status, 404);
+    assert.equal(gx.ok, false);
+    assert.equal(gx.status, 'not_found');
+    assert.equal(Object.hasOwn(gx, 'valid'), false);
+    assert.equal(Object.hasOwn(gx, 'error'), false);
+
+    assert.equal(legacyResponse.status, 404);
+    assert.equal(legacy.ok, false);
+    assert.equal(legacy.valid, false);
+    assert.equal(typeof legacy.error, 'string');
+    assert.equal(Object.hasOwn(legacy, 'status'), false);
+  });
+});
