@@ -1307,6 +1307,7 @@ async function saveCodeClipRewardAssignments(snapshot = {}, queryClient = pool) 
       scanId: snapshot.scanId,
       interactionState: snapshot.interactionState,
       routingOutcome: snapshot.routingOutcome,
+      audienceContext: snapshot.audienceContext || null,
       assignment,
     };
 

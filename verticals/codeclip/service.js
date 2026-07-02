@@ -566,6 +566,7 @@ function createRewardAssignmentSnapshot(interaction = {}) {
     scanId: interaction.scanId,
     interactionState: interaction.state,
     routingOutcome: interaction.routingOutcome,
+    audienceContext: interaction.audienceContext || null,
     assignments: Object.entries(rewardAssignments).map(([tier, assignment = {}]) => ({
       tier,
       displayTier: assignment.displayTier,

@@ -649,6 +649,18 @@ test('saveCodeClipRewardAssignments persists normalized assignment rows with ide
     scanId: 'scan-reward-persist',
     interactionState: 'processed',
     routingOutcome: 'MATCH',
+    audienceContext: {
+      entry: {
+        source: 'scan',
+        transport: 'http',
+        requestedVertical: 'codeclip',
+      },
+      activation: {
+        method: 'both',
+        keyword: 'GOLD',
+        channels: ['Instagram'],
+      },
+    },
     assignments: [
       {
         tier: 'openClip',
@@ -709,6 +721,16 @@ test('saveCodeClipRewardAssignments persists normalized assignment rows with ide
   const clipXtraRawPayload = JSON.parse(calls[1].params[31]);
   assert.equal(clipXtraRawPayload.eventCode, 'CC-REWARD-PERSIST');
   assert.equal(clipXtraRawPayload.scanId, 'scan-reward-persist');
+  assert.deepEqual(clipXtraRawPayload.audienceContext.entry, {
+    source: 'scan',
+    transport: 'http',
+    requestedVertical: 'codeclip',
+  });
+  assert.deepEqual(clipXtraRawPayload.audienceContext.activation, {
+    method: 'both',
+    keyword: 'GOLD',
+    channels: ['Instagram'],
+  });
   assert.equal(clipXtraRawPayload.assignment.redemptionToken, 'CX-REWARD-PERSIST');
   assert.equal(clipXtraRawPayload.assignment.rawAssignment.tier, 'clipXtra');
 
