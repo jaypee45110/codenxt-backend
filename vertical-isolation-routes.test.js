@@ -128,3 +128,47 @@ test('POST /scan uses stored codeClip event vertical when request vertical is mi
     assert.ok(Object.hasOwn(scan, 'clipXtra'));
   });
 });
+
+test('POST /scan uses stored codePod event vertical when request vertical is missing', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CP-STORED-VERTICAL-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code,
+        name: 'codePod stored vertical route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        digitalSouvenir: {
+          general: {
+            enabled: true,
+            title: 'General souvenir',
+          },
+        },
+      }),
+    });
+    const created = await createResponse.json();
+
+    assert.equal(createResponse.ok, true);
+    assert.equal(created.event.vertical, 'codepod');
+
+    const scanResponse = await fetch(`${baseUrl}/scan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: code,
+        scanId: `scan-${Date.now()}`,
+      }),
+    });
+    const scan = await scanResponse.json();
+
+    assert.equal(scanResponse.ok, true);
+    assert.equal(scan.success, true);
+    assert.equal(scan.eventCode, code);
+    assert.ok(scan.digitalSouvenir && typeof scan.digitalSouvenir === 'object');
+    assert.equal(Object.hasOwn(scan, 'tierLimits'), false);
+  });
+});
