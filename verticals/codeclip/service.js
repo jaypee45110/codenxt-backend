@@ -300,6 +300,39 @@ function normalizeKeywordAudienceEntry(input = {}) {
   };
 }
 
+const AUDIENCE_ENTRY_ADAPTERS = {
+  scan: normalizeScanAudienceEntry,
+  keyword: normalizeKeywordAudienceEntry,
+};
+
+function normalizeAudienceEntry(entryType, input = {}) {
+  const normalizedEntryType = String(entryType || "").trim().toLowerCase();
+
+  if (!normalizedEntryType) {
+    return {
+      ok: false,
+      audienceEntry: null,
+      audienceIntent: null,
+      warnings: [],
+      errors: [{ code: "ENTRY_TYPE_REQUIRED" }],
+    };
+  }
+
+  const adapter = AUDIENCE_ENTRY_ADAPTERS[normalizedEntryType];
+
+  if (!adapter) {
+    return {
+      ok: false,
+      audienceEntry: null,
+      audienceIntent: null,
+      warnings: [],
+      errors: [{ code: "ENTRY_ADAPTER_NOT_FOUND" }],
+    };
+  }
+
+  return adapter(input);
+}
+
 function buildInteractionResult(httpStatus, payload) {
   return {
     httpStatus,
@@ -694,6 +727,7 @@ module.exports = {
   buildNoCampaignMatchInteraction,
   normalizeScanAudienceEntry,
   normalizeKeywordAudienceEntry,
+  normalizeAudienceEntry,
   createRewardAssignmentSnapshot,
   handleCodeClipScan,
 };

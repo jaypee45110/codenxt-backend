@@ -415,6 +415,110 @@ test('codeClip keyword EntryAdapter normalizes sanitized AudienceEntry and Audie
   );
 });
 
+test('codeClip EntryAdapter registry normalizes known entry types and rejects unknown types', () => {
+  const scan = codeClipService.normalizeAudienceEntry(' scan ', {
+    entryCode: 'CC-REGISTRY-SCAN',
+    scanId: 'scan-registry',
+    requestedVertical: ' codeclip ',
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    rawPayload: { ignored: true },
+    receivedAt: '2026-07-01T00:00:00.000Z',
+  });
+
+  assert.equal(scan.ok, true);
+  assert.deepEqual(scan.errors, []);
+  assert.deepEqual(scan.warnings, []);
+  assert.deepEqual(scan.audienceEntry, {
+    entryCode: 'CC-REGISTRY-SCAN',
+    scanId: 'scan-registry',
+    requestedVertical: 'codeclip',
+    source: 'scan',
+    transport: 'http',
+    receivedAt: '2026-07-01T00:00:00.000Z',
+  });
+  assert.deepEqual(scan.audienceIntent, {
+    type: 'scan',
+    entryCode: 'CC-REGISTRY-SCAN',
+    scanId: 'scan-registry',
+    requestedVertical: 'codeclip',
+    source: 'scan',
+    transport: 'http',
+  });
+  assert.equal(scan.audienceEntry.ip, undefined);
+  assert.equal(scan.audienceEntry.userAgent, undefined);
+  assert.equal(scan.audienceEntry.rawPayload, undefined);
+  assert.equal(scan.audienceIntent.ip, undefined);
+  assert.equal(scan.audienceIntent.userAgent, undefined);
+  assert.equal(scan.audienceIntent.rawPayload, undefined);
+
+  const keyword = codeClipService.normalizeAudienceEntry(' KEYWORD ', {
+    entryCode: 'CC-REGISTRY-KEYWORD',
+    keyword: '  GOLD  ',
+    requestedVertical: ' codeclip ',
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    rawPayload: { ignored: true },
+    messageBody: 'GOLD',
+    handle: '@participant',
+    receivedAt: '2026-07-01T00:00:00.000Z',
+  });
+
+  assert.equal(keyword.ok, true);
+  assert.deepEqual(keyword.errors, []);
+  assert.deepEqual(keyword.warnings, []);
+  assert.deepEqual(keyword.audienceEntry, {
+    entryCode: 'CC-REGISTRY-KEYWORD',
+    keyword: 'GOLD',
+    requestedVertical: 'codeclip',
+    source: 'keyword',
+    transport: 'message',
+    receivedAt: '2026-07-01T00:00:00.000Z',
+  });
+  assert.deepEqual(keyword.audienceIntent, {
+    type: 'keyword',
+    entryCode: 'CC-REGISTRY-KEYWORD',
+    keyword: 'GOLD',
+    requestedVertical: 'codeclip',
+    source: 'keyword',
+    transport: 'message',
+  });
+  assert.equal(keyword.audienceEntry.ip, undefined);
+  assert.equal(keyword.audienceEntry.userAgent, undefined);
+  assert.equal(keyword.audienceEntry.rawPayload, undefined);
+  assert.equal(keyword.audienceEntry.messageBody, undefined);
+  assert.equal(keyword.audienceEntry.handle, undefined);
+  assert.equal(keyword.audienceIntent.ip, undefined);
+  assert.equal(keyword.audienceIntent.userAgent, undefined);
+  assert.equal(keyword.audienceIntent.rawPayload, undefined);
+  assert.equal(keyword.audienceIntent.messageBody, undefined);
+  assert.equal(keyword.audienceIntent.handle, undefined);
+
+  const unknown = codeClipService.normalizeAudienceEntry('link', {
+    entryCode: 'CC-UNKNOWN-ENTRY',
+  });
+
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.audienceEntry, null);
+  assert.equal(unknown.audienceIntent, null);
+  assert.deepEqual(
+    unknown.errors.map((error) => error.code),
+    ['ENTRY_ADAPTER_NOT_FOUND']
+  );
+
+  const missing = codeClipService.normalizeAudienceEntry('', {
+    entryCode: 'CC-MISSING-ENTRY-TYPE',
+  });
+
+  assert.equal(missing.ok, false);
+  assert.equal(missing.audienceEntry, null);
+  assert.equal(missing.audienceIntent, null);
+  assert.deepEqual(
+    missing.errors.map((error) => error.code),
+    ['ENTRY_TYPE_REQUIRED']
+  );
+});
+
 test('codeClip RewardAssignment snapshot normalizes existing tier assignments', () => {
   const openClipAssignment = {
     assigned: true,
