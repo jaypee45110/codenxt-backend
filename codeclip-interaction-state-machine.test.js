@@ -247,6 +247,81 @@ test('codeClip no-match interaction uses unmatched state machine data', () => {
   assert.equal(interaction.rewardAssignments, undefined);
 });
 
+test('codeClip scan EntryAdapter normalizes sanitized AudienceEntry and AudienceIntent', () => {
+  const valid = codeClipService.normalizeScanAudienceEntry({
+    entryCode: 'CC-ENTRY-ADAPTER',
+    scanId: 'scan-entry-adapter',
+    requestedVertical: ' codeclip ',
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    receivedAt: '2026-07-01T00:00:00.000Z',
+  });
+
+  assert.equal(valid.ok, true);
+  assert.deepEqual(valid.errors, []);
+  assert.deepEqual(valid.warnings, []);
+  assert.deepEqual(valid.audienceEntry, {
+    entryCode: 'CC-ENTRY-ADAPTER',
+    scanId: 'scan-entry-adapter',
+    requestedVertical: 'codeclip',
+    source: 'scan',
+    transport: 'http',
+    receivedAt: '2026-07-01T00:00:00.000Z',
+  });
+  assert.deepEqual(valid.audienceIntent, {
+    type: 'scan',
+    entryCode: 'CC-ENTRY-ADAPTER',
+    scanId: 'scan-entry-adapter',
+    requestedVertical: 'codeclip',
+    source: 'scan',
+    transport: 'http',
+  });
+  assert.equal(valid.audienceEntry.ip, undefined);
+  assert.equal(valid.audienceEntry.userAgent, undefined);
+  assert.equal(valid.audienceIntent.ip, undefined);
+  assert.equal(valid.audienceIntent.userAgent, undefined);
+
+  const missingEntryCode = codeClipService.normalizeScanAudienceEntry({
+    scanId: 'scan-missing-entry-code',
+    requestedVertical: 'codeclip',
+  });
+
+  assert.equal(missingEntryCode.ok, false);
+  assert.equal(missingEntryCode.audienceEntry, null);
+  assert.equal(missingEntryCode.audienceIntent, null);
+  assert.deepEqual(
+    missingEntryCode.errors.map((error) => error.code),
+    ['ENTRY_CODE_REQUIRED']
+  );
+
+  const missingScanId = codeClipService.normalizeScanAudienceEntry({
+    entryCode: 'CC-MISSING-SCAN-ID',
+    requestedVertical: 'codeclip',
+  });
+
+  assert.equal(missingScanId.ok, true);
+  assert.equal(missingScanId.audienceEntry.scanId, '');
+  assert.equal(missingScanId.audienceIntent.scanId, '');
+  assert.deepEqual(
+    missingScanId.warnings.map((warning) => warning.code),
+    ['SCAN_ID_MISSING']
+  );
+
+  const unknownVertical = codeClipService.normalizeScanAudienceEntry({
+    entryCode: 'CC-UNKNOWN-VERTICAL',
+    scanId: 'scan-unknown-vertical',
+    requestedVertical: 'mysteryVertical',
+  });
+
+  assert.equal(unknownVertical.ok, true);
+  assert.equal(unknownVertical.audienceEntry.requestedVertical, 'mysteryvertical');
+  assert.equal(unknownVertical.audienceIntent.requestedVertical, 'mysteryvertical');
+  assert.deepEqual(
+    unknownVertical.warnings.map((warning) => warning.code),
+    ['UNKNOWN_VERTICAL']
+  );
+});
+
 test('codeClip RewardAssignment snapshot normalizes existing tier assignments', () => {
   const openClipAssignment = {
     assigned: true,

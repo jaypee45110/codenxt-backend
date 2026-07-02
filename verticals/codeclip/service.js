@@ -60,6 +60,14 @@ const CODECLIP_FAILURE_REASONS = {
   BONUS_WINDOW_EXPIRED: "bonus_window_expired",
 };
 
+const KNOWN_REQUESTED_VERTICALS = new Set([
+  "codeclip",
+  "codepod",
+  "codeperks",
+  "codedemo",
+  "codetone",
+]);
+
 async function validateClipXtraToken({
   token,
   redis,
@@ -184,6 +192,50 @@ function createAudienceIntentSnapshot(audienceEntry = null) {
     requestedVertical: audienceEntry.requestedVertical,
     source: "scan",
     transport: "http",
+  };
+}
+
+function normalizeScanAudienceEntry(input = {}) {
+  const entryCode = String(input.entryCode || "").trim();
+  const errors = [];
+  const warnings = [];
+
+  if (!entryCode) {
+    return {
+      ok: false,
+      audienceEntry: null,
+      audienceIntent: null,
+      warnings,
+      errors: [{ code: "ENTRY_CODE_REQUIRED" }],
+    };
+  }
+
+  const scanId = String(input.scanId || "").trim();
+  const requestedVertical = String(input.requestedVertical || "").trim().toLowerCase();
+
+  if (!scanId) {
+    warnings.push({ code: "SCAN_ID_MISSING" });
+  }
+
+  if (requestedVertical && !KNOWN_REQUESTED_VERTICALS.has(requestedVertical)) {
+    warnings.push({ code: "UNKNOWN_VERTICAL" });
+  }
+
+  const audienceEntry = {
+    entryCode,
+    scanId,
+    requestedVertical,
+    source: "scan",
+    transport: "http",
+    receivedAt: input.receivedAt || new Date().toISOString(),
+  };
+
+  return {
+    ok: true,
+    audienceEntry,
+    audienceIntent: createAudienceIntentSnapshot(audienceEntry),
+    warnings,
+    errors,
   };
 }
 
@@ -579,6 +631,7 @@ module.exports = {
   validateClipXtraToken,
   redeemClipXtraToken,
   buildNoCampaignMatchInteraction,
+  normalizeScanAudienceEntry,
   createRewardAssignmentSnapshot,
   handleCodeClipScan,
 };
