@@ -61,3 +61,26 @@ test('codeClip and codePod report routes are both available for missing events',
     assertApplicationMissingEventResponse(codePodBody);
   });
 });
+
+test('POST /event defaults missing vertical to codeTone', async () => {
+  await withTestServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        code: `CT-DEFAULT-${Date.now()}`,
+        name: 'codeTone default vertical test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+      }),
+    });
+
+    const body = await response.json();
+
+    assert.equal(response.ok, true);
+    assert.equal(body.success, true);
+    assert.ok(body.event);
+    assert.equal(body.event.vertical, 'codetone');
+  });
+});
