@@ -62,11 +62,14 @@ test('successful codeClip scan builds validated Interaction state machine data',
       ip: '127.0.0.1',
       receivedAt: '2026-07-01T00:00:00.000Z',
     },
-    audienceIntent: codeClipService.normalizeAudienceEntry('scan', {
+    audienceIntent: {
+      type: 'scan',
       entryCode: eventCode,
       scanId,
-      requestedVertical: 'codeclip',
-    }).audienceIntent,
+      requestedVertical: 'codeclip-intent',
+      source: 'scan-intent',
+      transport: 'http-intent',
+    },
     redis: null,
     codeClipVertical: {
       routes: {
@@ -125,17 +128,17 @@ test('successful codeClip scan builds validated Interaction state machine data',
     channels: ['Instagram', 'Messenger'],
   });
   assert.deepEqual(persistedInteraction.audienceContext.entry, {
-    source: 'scan',
-    transport: 'http',
-    requestedVertical: 'codeclip',
+    source: 'scan-intent',
+    transport: 'http-intent',
+    requestedVertical: 'codeclip-intent',
   });
   assert.deepEqual(persistedInteraction.audienceIntent, {
     type: 'scan',
     entryCode: eventCode,
     scanId,
-    requestedVertical: 'codeclip',
-    source: 'scan',
-    transport: 'http',
+    requestedVertical: 'codeclip-intent',
+    source: 'scan-intent',
+    transport: 'http-intent',
   });
   assert.equal(persistedInteraction.audienceIntent.userAgent, undefined);
   assert.equal(persistedInteraction.audienceIntent.ip, undefined);

@@ -525,6 +525,7 @@ function createScanPayloadInteraction(interaction) {
 function createAudienceContextSnapshot(interactionContext = {}, codeClipEvent = {}) {
   const rewards = codeClipEvent.rewards || {};
   const audienceEntry = interactionContext.audienceEntry || {};
+  const audienceIntent = interactionContext.audienceIntent || {};
 
   return {
     campaign: {
@@ -543,9 +544,9 @@ function createAudienceContextSnapshot(interactionContext = {}, codeClipEvent = 
       channels: Array.isArray(codeClipEvent.activationChannels) ? codeClipEvent.activationChannels : [],
     },
     entry: {
-      source: audienceEntry.source,
-      transport: audienceEntry.transport,
-      requestedVertical: audienceEntry.requestedVertical,
+      source: audienceIntent.source || audienceEntry.source,
+      transport: audienceIntent.transport || audienceEntry.transport,
+      requestedVertical: audienceIntent.requestedVertical || audienceEntry.requestedVertical,
     },
     rewardContext: {
       hasOpenClip: !!rewards.openClip?.enabled,
