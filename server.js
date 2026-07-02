@@ -4049,6 +4049,14 @@ app.post("/scan", async (req, res) => {
       userAgent: req.get("user-agent") || "",
       ip,
     });
+    const normalizedScanAudienceEntry = codeClipVertical.service.normalizeScanAudienceEntry({
+      entryCode: eventCode,
+      scanId,
+      requestedVertical,
+    });
+    const codeClipAudienceEntry = normalizedScanAudienceEntry.ok
+      ? normalizedScanAudienceEntry.audienceEntry
+      : audienceEntry;
     let eventId = null;
     let event = null;
 
@@ -4077,7 +4085,7 @@ app.post("/scan", async (req, res) => {
         const noCampaignMatchInteraction = codeClipVertical.service.buildNoCampaignMatchInteraction({
           eventCode,
           scanId,
-          audienceEntry,
+          audienceEntry: codeClipAudienceEntry,
         });
         try {
           await saveCodeClipInteraction(noCampaignMatchInteraction);
@@ -4267,7 +4275,7 @@ if (vertical === "codeclip") {
     rawScans,
     uniqueScans,
     scanRank,
-    audienceEntry,
+    audienceEntry: codeClipAudienceEntry,
     redis: process.env.REDIS_URL ? redis : null,
     codeClipVertical,
     persistFinalScan,
