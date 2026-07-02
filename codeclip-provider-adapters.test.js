@@ -6,6 +6,17 @@ const {
   normalizeTestProviderKeyword,
 } = require('./verticals/codeclip/provider-adapters');
 
+function assertProviderKeywordContract(result) {
+  assert.ok(Object.hasOwn(result, 'ok'));
+  assert.ok(Object.hasOwn(result, 'eventCode'));
+  assert.ok(Object.hasOwn(result, 'keyword'));
+  assert.ok(Object.hasOwn(result, 'messageId'));
+  assert.ok(Object.hasOwn(result, 'warnings'));
+  assert.ok(Object.hasOwn(result, 'errors'));
+  assert.ok(Array.isArray(result.warnings));
+  assert.ok(Array.isArray(result.errors));
+}
+
 test('codeClip test ProviderAdapter normalizes keyword provider input', () => {
   const valid = normalizeTestProviderKeyword({
     eventCode: ' CC ',
@@ -20,6 +31,7 @@ test('codeClip test ProviderAdapter normalizes keyword provider input', () => {
     ip: '127.0.0.1',
   });
 
+  assertProviderKeywordContract(valid);
   assert.equal(valid.ok, true);
   assert.equal(valid.eventCode, 'CC');
   assert.equal(valid.keyword, 'GOLD');
@@ -38,6 +50,7 @@ test('codeClip test ProviderAdapter normalizes keyword provider input', () => {
     text: 'GOLD',
     messageId: 'msg-1',
   });
+  assertProviderKeywordContract(missingEventCode);
   assert.equal(missingEventCode.ok, false);
   assert.deepEqual(
     missingEventCode.errors.map((error) => error.code),
@@ -48,6 +61,7 @@ test('codeClip test ProviderAdapter normalizes keyword provider input', () => {
     eventCode: 'CC',
     messageId: 'msg-1',
   });
+  assertProviderKeywordContract(missingKeyword);
   assert.equal(missingKeyword.ok, false);
   assert.deepEqual(
     missingKeyword.errors.map((error) => error.code),
@@ -58,6 +72,7 @@ test('codeClip test ProviderAdapter normalizes keyword provider input', () => {
     eventCode: 'CC',
     text: 'GOLD',
   });
+  assertProviderKeywordContract(missingMessageId);
   assert.equal(missingMessageId.ok, false);
   assert.deepEqual(
     missingMessageId.errors.map((error) => error.code),
@@ -76,6 +91,7 @@ test('codeClip SMS ProviderAdapter normalizes keyword provider input', () => {
     rawPayload: { Body: 'GOLD' },
   });
 
+  assertProviderKeywordContract(valid);
   assert.equal(valid.ok, true);
   assert.equal(valid.eventCode, 'CC');
   assert.equal(valid.keyword, 'GOLD');
@@ -92,6 +108,7 @@ test('codeClip SMS ProviderAdapter normalizes keyword provider input', () => {
     body: 'SILVER',
     messageId: 'sms-2',
   });
+  assertProviderKeywordContract(bodyFallback);
   assert.equal(bodyFallback.ok, true);
   assert.equal(bodyFallback.keyword, 'SILVER');
   assert.equal(bodyFallback.messageId, 'sms-2');
@@ -101,6 +118,7 @@ test('codeClip SMS ProviderAdapter normalizes keyword provider input', () => {
     text: 'BRONZE',
     messageId: 'sms-3',
   });
+  assertProviderKeywordContract(textFallback);
   assert.equal(textFallback.ok, true);
   assert.equal(textFallback.keyword, 'BRONZE');
   assert.equal(textFallback.messageId, 'sms-3');
@@ -109,6 +127,7 @@ test('codeClip SMS ProviderAdapter normalizes keyword provider input', () => {
     Body: 'GOLD',
     MessageSid: 'sms-1',
   });
+  assertProviderKeywordContract(missingEventCode);
   assert.equal(missingEventCode.ok, false);
   assert.deepEqual(
     missingEventCode.errors.map((error) => error.code),
@@ -119,6 +138,7 @@ test('codeClip SMS ProviderAdapter normalizes keyword provider input', () => {
     eventCode: 'CC',
     MessageSid: 'sms-1',
   });
+  assertProviderKeywordContract(missingKeyword);
   assert.equal(missingKeyword.ok, false);
   assert.deepEqual(
     missingKeyword.errors.map((error) => error.code),
@@ -129,6 +149,7 @@ test('codeClip SMS ProviderAdapter normalizes keyword provider input', () => {
     eventCode: 'CC',
     Body: 'GOLD',
   });
+  assertProviderKeywordContract(missingMessageId);
   assert.equal(missingMessageId.ok, false);
   assert.deepEqual(
     missingMessageId.errors.map((error) => error.code),
