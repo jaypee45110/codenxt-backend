@@ -812,6 +812,7 @@ async function handleCodeClipScan({
   }
 
   interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
+  interaction.persistenceGuaranteePolicy = applyPersistenceGuaranteePolicy(interaction.persistenceDecision);
 
   return buildInteractionResult(200, {
     success: true,
@@ -921,6 +922,7 @@ async function handleCodeClipKeywordEntry({
   }
 
   interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
+  interaction.persistenceGuaranteePolicy = applyPersistenceGuaranteePolicy(interaction.persistenceDecision);
 
   return buildInteractionResult(200, {
     success: true,
