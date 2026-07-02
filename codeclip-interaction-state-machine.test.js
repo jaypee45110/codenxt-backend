@@ -124,6 +124,16 @@ test('successful codeClip scan builds validated Interaction state machine data',
     transport: 'http',
     requestedVertical: 'codeclip',
   });
+  assert.deepEqual(persistedInteraction.audienceIntent, {
+    type: 'scan',
+    entryCode: eventCode,
+    scanId,
+    requestedVertical: 'codeclip',
+    source: 'scan',
+    transport: 'http',
+  });
+  assert.equal(persistedInteraction.audienceIntent.userAgent, undefined);
+  assert.equal(persistedInteraction.audienceIntent.ip, undefined);
   assert.deepEqual(persistedInteraction.audienceContext.rewardContext, {
     hasOpenClip: true,
     hasClip: true,
@@ -154,6 +164,7 @@ test('successful codeClip scan builds validated Interaction state machine data',
   assert.equal(persistedRewardAssignmentSnapshot, persistedInteraction.rewardAssignmentSnapshot);
   assert.equal(result.payload.rewardAssignmentSnapshot, undefined);
   assert.equal(result.payload.audienceContext, undefined);
+  assert.equal(result.payload.audienceIntent, undefined);
   assert.equal(result.payload.interaction, undefined);
 
   assert.ok(eventScanPayload, 'event scan payload should be built');
@@ -201,6 +212,16 @@ test('codeClip no-match interaction uses unmatched state machine data', () => {
   assert.equal(interaction.audienceEntry.entryCode, eventCode);
   assert.equal(interaction.audienceEntry.userAgent, undefined);
   assert.equal(interaction.audienceEntry.ip, undefined);
+  assert.deepEqual(interaction.audienceIntent, {
+    type: 'scan',
+    entryCode: eventCode,
+    scanId,
+    requestedVertical: 'codeclip',
+    source: 'scan',
+    transport: 'http',
+  });
+  assert.equal(interaction.audienceIntent.userAgent, undefined);
+  assert.equal(interaction.audienceIntent.ip, undefined);
   assert.equal(interaction.rewardAssignments, undefined);
 });
 

@@ -157,6 +157,7 @@ function buildInteractionContext({
     uniqueScans,
     scanRank,
     audienceEntry: createAudienceEntrySnapshot(audienceEntry),
+    audienceIntent: createAudienceIntentSnapshot(audienceEntry),
   };
 }
 
@@ -170,6 +171,19 @@ function createAudienceEntrySnapshot(audienceEntry = null) {
     source: audienceEntry.source,
     transport: audienceEntry.transport,
     receivedAt: audienceEntry.receivedAt,
+  };
+}
+
+function createAudienceIntentSnapshot(audienceEntry = null) {
+  if (!audienceEntry) return null;
+
+  return {
+    type: "scan",
+    entryCode: audienceEntry.entryCode,
+    scanId: audienceEntry.scanId,
+    requestedVertical: audienceEntry.requestedVertical,
+    source: "scan",
+    transport: "http",
   };
 }
 
@@ -234,6 +248,7 @@ function buildNoCampaignMatchInteraction({
     eventId: null,
     scanId,
     audienceEntry: createAudienceEntrySnapshot(audienceEntry),
+    audienceIntent: createAudienceIntentSnapshot(audienceEntry),
     state: interactionState.state,
     stateTransitions: interactionState.transitions,
     timestamp: new Date().toISOString(),
@@ -321,6 +336,7 @@ function createInteraction({
     uniqueScans: interactionContext.uniqueScans,
     scanRank: interactionContext.scanRank,
     audienceEntry: interactionContext.audienceEntry,
+    audienceIntent: interactionContext.audienceIntent,
     state: interactionState.state,
     stateTransitions: interactionState.transitions,
     tier,
