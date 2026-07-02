@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const codeClipService = require('./verticals/codeclip/service');
+const codeClipProviderAdapters = require('./verticals/codeclip/provider-adapters');
 const { buildCodeClipReport } = require('./verticals/codeclip/report');
 const {
   getCodeClipInteractions,
@@ -705,6 +706,65 @@ test('codeClip EntryAdapter registry normalizes known entry types and rejects un
   assert.deepEqual(
     missing.errors.map((error) => error.code),
     ['ENTRY_TYPE_REQUIRED']
+  );
+});
+
+test('codeClip test ProviderAdapter normalizes keyword provider input', () => {
+  const valid = codeClipProviderAdapters.normalizeTestProviderKeyword({
+    eventCode: ' CC ',
+    text: ' GOLD ',
+    messageId: ' msg-1 ',
+    rawPayload: { text: 'GOLD' },
+    handle: '@participant',
+    profileId: 'profile-123',
+    phone: '+4712345678',
+    email: 'participant@example.com',
+    userAgent: 'test-agent',
+    ip: '127.0.0.1',
+  });
+
+  assert.equal(valid.ok, true);
+  assert.equal(valid.eventCode, 'CC');
+  assert.equal(valid.keyword, 'GOLD');
+  assert.equal(valid.messageId, 'msg-1');
+  assert.deepEqual(valid.warnings, []);
+  assert.deepEqual(valid.errors, []);
+  assert.equal(valid.rawPayload, undefined);
+  assert.equal(valid.handle, undefined);
+  assert.equal(valid.profileId, undefined);
+  assert.equal(valid.phone, undefined);
+  assert.equal(valid.email, undefined);
+  assert.equal(valid.userAgent, undefined);
+  assert.equal(valid.ip, undefined);
+
+  const missingEventCode = codeClipProviderAdapters.normalizeTestProviderKeyword({
+    text: 'GOLD',
+    messageId: 'msg-1',
+  });
+  assert.equal(missingEventCode.ok, false);
+  assert.deepEqual(
+    missingEventCode.errors.map((error) => error.code),
+    ['EVENT_CODE_REQUIRED']
+  );
+
+  const missingKeyword = codeClipProviderAdapters.normalizeTestProviderKeyword({
+    eventCode: 'CC',
+    messageId: 'msg-1',
+  });
+  assert.equal(missingKeyword.ok, false);
+  assert.deepEqual(
+    missingKeyword.errors.map((error) => error.code),
+    ['KEYWORD_REQUIRED']
+  );
+
+  const missingMessageId = codeClipProviderAdapters.normalizeTestProviderKeyword({
+    eventCode: 'CC',
+    text: 'GOLD',
+  });
+  assert.equal(missingMessageId.ok, false);
+  assert.deepEqual(
+    missingMessageId.errors.map((error) => error.code),
+    ['MESSAGE_ID_REQUIRED']
   );
 });
 
