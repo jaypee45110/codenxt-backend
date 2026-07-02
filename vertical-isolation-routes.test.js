@@ -211,3 +211,38 @@ test('codeDemo handshake route resolves a stored codeDemo event', async () => {
     assert.equal(handshakeBody.handshake.eventCode, code);
   });
 });
+
+test('legacy codePerks redemption token validates through unprefixed fallback', async () => {
+  await withTestServer(async (baseUrl) => {
+    const certificateId = `CERT-${Date.now()}`;
+    const claimResponse = await fetch(`${baseUrl}/reward-claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: 'CPK-LEGACY-TEST',
+        certificateId,
+        claimant: {
+          fullName: 'Legacy Token Tester',
+          email: 'legacy-token@example.com',
+        },
+      }),
+    });
+    const claimBody = await claimResponse.json();
+    const token = claimBody.claim?.redemptionToken || '';
+
+    assert.equal(claimResponse.ok, true);
+    assert.ok(token);
+    assert.equal(token.toUpperCase().startsWith('CX-'), false);
+    assert.equal(token.toUpperCase().startsWith('GX-'), false);
+    assert.equal(token.toUpperCase().startsWith('CPK-'), false);
+
+    const redemptionResponse = await fetch(`${baseUrl}/redemption/${encodeURIComponent(token)}`);
+    const redemption = await redemptionResponse.json();
+
+    assert.equal(redemptionResponse.ok, true);
+    assert.equal(redemption.ok, true);
+    assert.equal(redemption.valid, true);
+    assert.equal(redemption.certificateId, certificateId);
+    assert.equal(redemption.claimId, claimBody.claim.id);
+  });
+});
