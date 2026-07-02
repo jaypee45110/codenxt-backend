@@ -11,6 +11,15 @@ const {
   getCodeClipRewardAssignmentSummary,
 } = require('./db');
 
+function assertAudienceIntentContract(intent, expectedType) {
+  assert.ok(intent, 'audienceIntent should exist');
+  assert.equal(intent.type, expectedType);
+  assert.ok(intent.source, 'audienceIntent.source should exist');
+  assert.ok(intent.transport, 'audienceIntent.transport should exist');
+  assert.ok(intent.requestedVertical, 'audienceIntent.requestedVertical should exist');
+  assert.equal(intent.metadata, undefined);
+}
+
 test('successful codeClip scan builds validated Interaction state machine data', async () => {
   const eventCode = 'CC-STATE-TEST';
   const eventId = 'event-state-test';
@@ -132,6 +141,7 @@ test('successful codeClip scan builds validated Interaction state machine data',
     transport: 'http-intent',
     requestedVertical: 'codeclip-intent',
   });
+  assertAudienceIntentContract(persistedInteraction.audienceIntent, 'scan');
   assert.deepEqual(persistedInteraction.audienceIntent, {
     type: 'scan',
     entryCode: eventCode,
@@ -278,6 +288,7 @@ test('successful codeClip keyword entry builds internal Interaction without even
     transport: 'message',
     receivedAt: persistedInteraction.audienceEntry.receivedAt,
   });
+  assertAudienceIntentContract(persistedInteraction.audienceIntent, 'keyword');
   assert.deepEqual(persistedInteraction.audienceIntent, {
     type: 'keyword',
     entryCode: eventCode,
@@ -401,6 +412,7 @@ test('codeClip no-match interaction uses unmatched state machine data', () => {
   assert.equal(interaction.audienceEntry.entryCode, eventCode);
   assert.equal(interaction.audienceEntry.userAgent, undefined);
   assert.equal(interaction.audienceEntry.ip, undefined);
+  assertAudienceIntentContract(interaction.audienceIntent, 'scan');
   assert.deepEqual(interaction.audienceIntent, {
     type: 'scan',
     entryCode: eventCode,
@@ -457,6 +469,7 @@ test('codeClip scan EntryAdapter normalizes sanitized AudienceEntry and Audience
     transport: 'http',
     receivedAt: '2026-07-01T00:00:00.000Z',
   });
+  assertAudienceIntentContract(valid.audienceIntent, 'scan');
   assert.deepEqual(valid.audienceIntent, {
     type: 'scan',
     entryCode: 'CC-ENTRY-ADAPTER',
@@ -490,6 +503,7 @@ test('codeClip scan EntryAdapter normalizes sanitized AudienceEntry and Audience
 
   assert.equal(missingScanId.ok, true);
   assert.equal(missingScanId.audienceEntry.scanId, '');
+  assertAudienceIntentContract(missingScanId.audienceIntent, 'scan');
   assert.equal(missingScanId.audienceIntent.scanId, '');
   assert.deepEqual(
     missingScanId.warnings.map((warning) => warning.code),
@@ -504,6 +518,7 @@ test('codeClip scan EntryAdapter normalizes sanitized AudienceEntry and Audience
 
   assert.equal(unknownVertical.ok, true);
   assert.equal(unknownVertical.audienceEntry.requestedVertical, 'mysteryvertical');
+  assertAudienceIntentContract(unknownVertical.audienceIntent, 'scan');
   assert.equal(unknownVertical.audienceIntent.requestedVertical, 'mysteryvertical');
   assert.deepEqual(
     unknownVertical.warnings.map((warning) => warning.code),
@@ -538,6 +553,7 @@ test('codeClip keyword EntryAdapter normalizes sanitized AudienceEntry and Audie
     transport: 'message',
     receivedAt: '2026-07-01T00:00:00.000Z',
   });
+  assertAudienceIntentContract(valid.audienceIntent, 'keyword');
   assert.deepEqual(valid.audienceIntent, {
     type: 'keyword',
     entryCode: 'CC-KEYWORD-ADAPTER',
@@ -597,6 +613,7 @@ test('codeClip keyword EntryAdapter normalizes sanitized AudienceEntry and Audie
 
   assert.equal(unknownVertical.ok, true);
   assert.equal(unknownVertical.audienceEntry.requestedVertical, 'mysteryvertical');
+  assertAudienceIntentContract(unknownVertical.audienceIntent, 'keyword');
   assert.equal(unknownVertical.audienceIntent.requestedVertical, 'mysteryvertical');
   assert.deepEqual(
     unknownVertical.warnings.map((warning) => warning.code),
@@ -626,6 +643,7 @@ test('codeClip EntryAdapter registry normalizes known entry types and rejects un
     transport: 'http',
     receivedAt: '2026-07-01T00:00:00.000Z',
   });
+  assertAudienceIntentContract(scan.audienceIntent, 'scan');
   assert.deepEqual(scan.audienceIntent, {
     type: 'scan',
     entryCode: 'CC-REGISTRY-SCAN',
@@ -664,6 +682,7 @@ test('codeClip EntryAdapter registry normalizes known entry types and rejects un
     transport: 'message',
     receivedAt: '2026-07-01T00:00:00.000Z',
   });
+  assertAudienceIntentContract(keyword.audienceIntent, 'keyword');
   assert.deepEqual(keyword.audienceIntent, {
     type: 'keyword',
     entryCode: 'CC-REGISTRY-KEYWORD',
