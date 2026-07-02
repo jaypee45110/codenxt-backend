@@ -20,6 +20,64 @@ function assertAudienceIntentContract(intent, expectedType) {
   assert.equal(intent.metadata, undefined);
 }
 
+
+test('buildPersistenceDecision classifies COAS persistence status', () => {
+  assert.deepEqual(codeClipService.buildPersistenceDecision({
+    interaction: { attempted: true, ok: true, error: null },
+    rewardAssignments: { attempted: true, ok: true, error: null },
+    clipXtraRedemption: { attempted: false, ok: null, error: null },
+  }), {
+    ok: true,
+    severity: 'ok',
+    failedSteps: [],
+    criticalFailures: [],
+  });
+
+  assert.deepEqual(codeClipService.buildPersistenceDecision({
+    interaction: { attempted: true, ok: true, error: null },
+    rewardAssignments: { attempted: true, ok: false, error: 'reward failed' },
+    clipXtraRedemption: { attempted: false, ok: null, error: null },
+  }), {
+    ok: false,
+    severity: 'degraded',
+    failedSteps: ['rewardAssignments'],
+    criticalFailures: [],
+  });
+
+  assert.deepEqual(codeClipService.buildPersistenceDecision({
+    interaction: { attempted: true, ok: false, error: 'interaction failed' },
+    rewardAssignments: { attempted: true, ok: true, error: null },
+    clipXtraRedemption: { attempted: false, ok: null, error: null },
+  }), {
+    ok: false,
+    severity: 'critical',
+    failedSteps: ['interaction'],
+    criticalFailures: ['interaction'],
+  });
+
+  assert.deepEqual(codeClipService.buildPersistenceDecision({
+    interaction: { attempted: true, ok: true, error: null },
+    rewardAssignments: { attempted: true, ok: true, error: null },
+    clipXtraRedemption: { attempted: true, ok: false, error: 'redemption failed' },
+  }), {
+    ok: false,
+    severity: 'critical',
+    failedSteps: ['clipXtraRedemption'],
+    criticalFailures: ['clipXtraRedemption'],
+  });
+
+  assert.deepEqual(codeClipService.buildPersistenceDecision({
+    interaction: { attempted: true, ok: false, error: 'interaction failed' },
+    rewardAssignments: { attempted: true, ok: false, error: 'reward failed' },
+    clipXtraRedemption: { attempted: false, ok: null, error: null },
+  }), {
+    ok: false,
+    severity: 'critical',
+    failedSteps: ['interaction', 'rewardAssignments'],
+    criticalFailures: ['interaction'],
+  });
+});
+
 test('successful codeClip scan builds validated Interaction state machine data', async () => {
   const eventCode = 'CC-STATE-TEST';
   const eventId = 'event-state-test';
@@ -266,6 +324,7 @@ test('codeClip scan records internal persistence status when COAS persistence fa
   assert.equal(result.httpStatus, 200);
   assert.equal(result.payload.success, true);
   assert.equal(result.payload.persistenceStatus, undefined);
+  assert.equal(result.payload.persistenceDecision, undefined);
   assert.equal(rewardAssignmentPersistenceAttempted, true);
   assert.ok(eventScanPayload?.interaction?.persistenceStatus);
   assert.deepEqual(eventScanPayload.interaction.persistenceStatus.interaction, {
@@ -277,6 +336,12 @@ test('codeClip scan records internal persistence status when COAS persistence fa
     attempted: true,
     ok: false,
     error: 'reward assignment persistence failed',
+  });
+  assert.deepEqual(eventScanPayload.interaction.persistenceDecision, {
+    ok: false,
+    severity: 'critical',
+    failedSteps: ['interaction', 'rewardAssignments'],
+    criticalFailures: ['interaction'],
   });
 });
 

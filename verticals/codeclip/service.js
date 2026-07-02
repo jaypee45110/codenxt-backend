@@ -625,6 +625,27 @@ function recordPersistenceStep(status, step, ok, error = null) {
   };
 }
 
+function buildPersistenceDecision(status = {}) {
+  const failedSteps = Object.entries(status)
+    .filter(([, stepStatus]) => stepStatus?.attempted && stepStatus.ok === false)
+    .map(([step]) => step);
+  const criticalFailures = failedSteps.filter((step) =>
+    step === "interaction" || step === "clipXtraRedemption"
+  );
+  const severity = criticalFailures.length
+    ? "critical"
+    : failedSteps.length
+      ? "degraded"
+      : "ok";
+
+  return {
+    ok: failedSteps.length === 0,
+    severity,
+    failedSteps,
+    criticalFailures,
+  };
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -748,6 +769,8 @@ async function handleCodeClipScan({
     }
   }
 
+  interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
+
   return buildInteractionResult(200, {
     success: true,
     eventCode: interaction.eventCode,
@@ -855,6 +878,8 @@ async function handleCodeClipKeywordEntry({
     }
   }
 
+  interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
+
   return buildInteractionResult(200, {
     success: true,
     eventCode: interaction.eventCode,
@@ -874,6 +899,7 @@ module.exports = {
   normalizeKeywordAudienceEntry,
   normalizeAudienceEntry,
   createRewardAssignmentSnapshot,
+  buildPersistenceDecision,
   handleCodeClipScan,
   handleCodeClipKeywordEntry,
 };
