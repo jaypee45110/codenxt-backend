@@ -4057,6 +4057,9 @@ app.post("/scan", async (req, res) => {
     const codeClipAudienceEntry = normalizedScanAudienceEntry.ok
       ? normalizedScanAudienceEntry.audienceEntry
       : audienceEntry;
+    const codeClipAudienceIntent = normalizedScanAudienceEntry.ok
+      ? normalizedScanAudienceEntry.audienceIntent
+      : null;
     let eventId = null;
     let event = null;
 
@@ -4276,6 +4279,7 @@ if (vertical === "codeclip") {
     uniqueScans,
     scanRank,
     audienceEntry: codeClipAudienceEntry,
+    audienceIntent: codeClipAudienceIntent,
     redis: process.env.REDIS_URL ? redis : null,
     codeClipVertical,
     persistFinalScan,

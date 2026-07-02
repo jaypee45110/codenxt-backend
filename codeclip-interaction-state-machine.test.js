@@ -62,6 +62,11 @@ test('successful codeClip scan builds validated Interaction state machine data',
       ip: '127.0.0.1',
       receivedAt: '2026-07-01T00:00:00.000Z',
     },
+    audienceIntent: codeClipService.normalizeAudienceEntry('scan', {
+      entryCode: eventCode,
+      scanId,
+      requestedVertical: 'codeclip',
+    }).audienceIntent,
     redis: null,
     codeClipVertical: {
       routes: {
