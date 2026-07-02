@@ -382,6 +382,11 @@ function buildNoCampaignMatchInteraction({
     eventId: null,
     audienceEntry: audienceEntrySnapshot,
   };
+  const routingOutcome = createRoutingOutcome({
+    outcome: ROUTING_OUTCOMES.NO_CAMPAIGN_MATCH,
+    interactionContext,
+    reason: "event_not_found",
+  });
   const interactionState = buildInteractionStateSnapshot([
     buildValidInteractionStateTransition({
       from: null,
@@ -412,7 +417,7 @@ function buildNoCampaignMatchInteraction({
     state: interactionState.state,
     stateTransitions: interactionState.transitions,
     timestamp: new Date().toISOString(),
-    routingOutcome: ROUTING_OUTCOMES.NO_CAMPAIGN_MATCH,
+    routingOutcome: routingOutcome.outcome,
   };
 }
 
