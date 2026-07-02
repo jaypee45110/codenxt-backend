@@ -188,6 +188,134 @@ test('successful codeClip scan builds validated Interaction state machine data',
   assert.equal(eventScanPayload.extraPayload.interaction.audienceEntry.ip, undefined);
 });
 
+test('successful codeClip keyword entry builds internal Interaction without event scan persistence', async () => {
+  const eventCode = 'CC-KEYWORD-RUNTIME';
+  const eventId = 'event-keyword-runtime';
+  const messageId = 'message-keyword-runtime';
+  const rewards = {
+    openClip: { enabled: true },
+    clipPlus: { enabled: true },
+  };
+  const rewardAssignments = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipPlus: { assigned: true, tier: 'clipPlus' },
+    clipXtra: { assigned: false },
+  };
+
+  let eventScanWriteAttempted = false;
+  let persistedInteraction = null;
+  let persistedRewardAssignmentSnapshot = null;
+
+  const result = await codeClipService.handleCodeClipKeywordEntry({
+    event: {
+      id: eventId,
+      code: eventCode,
+      vertical: 'codeclip',
+      venue: 'Keyword Venue',
+      city: 'Bergen',
+      startAt: '2099-12-31T18:00:00.000Z',
+      unlockAt: '2099-12-31T18:30:00.000Z',
+      endAt: '2099-12-31T23:59:59.000Z',
+      activationMethod: 'keyword',
+      activationKeyword: 'GOLD',
+      activationChannels: ['Instagram'],
+      rewards,
+    },
+    eventCode,
+    eventId,
+    keyword: '  GOLD  ',
+    messageId,
+    requestedVertical: ' codeclip ',
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    rawPayload: { text: 'GOLD', provider: 'test' },
+    messageBody: 'GOLD',
+    handle: '@participant',
+    redis: null,
+    codeClipVertical: {
+      routes: {
+        parseCodeClipRewardsMeta(event) {
+          return event;
+        },
+      },
+      assignment: {
+        async assignCodeClipRewards() {
+          return rewardAssignments;
+        },
+      },
+    },
+    async persistFinalScan() {
+      eventScanWriteAttempted = true;
+    },
+    async saveCodeClipInteraction(interaction) {
+      persistedInteraction = interaction;
+      return { id: 2, interaction_state: interaction.state, routing_outcome: interaction.routingOutcome };
+    },
+    async saveCodeClipRewardAssignments(snapshot) {
+      persistedRewardAssignmentSnapshot = snapshot;
+      return snapshot.assignments;
+    },
+    async saveCodeClipXtraRedemption() {
+      throw new Error('ClipXtra should not be persisted when not assigned');
+    },
+  });
+
+  assert.equal(result.httpStatus, 200);
+  assert.equal(result.payload.success, true);
+  assert.equal(eventScanWriteAttempted, false);
+
+  assert.ok(persistedInteraction, 'saveCodeClipInteraction should receive a keyword Interaction');
+  assert.equal(persistedInteraction.eventCode, eventCode);
+  assert.equal(persistedInteraction.eventId, eventId);
+  assert.equal(persistedInteraction.scanId, messageId);
+  assert.equal(persistedInteraction.state, 'processed');
+  assert.equal(persistedInteraction.routingOutcome, 'MATCH');
+  assert.deepEqual(persistedInteraction.audienceEntry, {
+    entryCode: eventCode,
+    keyword: 'GOLD',
+    requestedVertical: 'codeclip',
+    source: 'keyword',
+    transport: 'message',
+    receivedAt: persistedInteraction.audienceEntry.receivedAt,
+  });
+  assert.deepEqual(persistedInteraction.audienceIntent, {
+    type: 'keyword',
+    entryCode: eventCode,
+    keyword: 'GOLD',
+    requestedVertical: 'codeclip',
+    source: 'keyword',
+    transport: 'message',
+  });
+  assert.equal(persistedInteraction.audienceEntry.ip, undefined);
+  assert.equal(persistedInteraction.audienceEntry.userAgent, undefined);
+  assert.equal(persistedInteraction.audienceEntry.rawPayload, undefined);
+  assert.equal(persistedInteraction.audienceIntent.ip, undefined);
+  assert.equal(persistedInteraction.audienceIntent.userAgent, undefined);
+  assert.equal(persistedInteraction.audienceIntent.rawPayload, undefined);
+  assert.ok(persistedInteraction.audienceContext);
+  assert.deepEqual(persistedInteraction.audienceContext.entry, {
+    source: 'keyword',
+    transport: 'message',
+    requestedVertical: 'codeclip',
+  });
+  assert.deepEqual(persistedInteraction.audienceContext.activation, {
+    method: 'keyword',
+    keyword: 'GOLD',
+    channels: ['Instagram'],
+  });
+  assert.ok(persistedInteraction.rewardAssignmentSnapshot);
+  assert.equal(persistedInteraction.rewardAssignmentSnapshot, persistedRewardAssignmentSnapshot);
+  assert.equal(persistedInteraction.rewardAssignmentSnapshot.scanId, messageId);
+  assert.deepEqual(
+    persistedInteraction.rewardAssignmentSnapshot.assignments.map((assignment) => assignment.tier),
+    ['openClip', 'clipPlus', 'clipXtra']
+  );
+  assert.equal(result.payload.audienceEntry, undefined);
+  assert.equal(result.payload.audienceIntent, undefined);
+  assert.equal(result.payload.audienceContext, undefined);
+  assert.equal(result.payload.rewardAssignmentSnapshot, undefined);
+});
+
 test('codeClip no-match interaction uses unmatched state machine data', () => {
   const eventCode = 'CC-MISSING-STATE-TEST';
   const scanId = 'scan-missing-state-test';

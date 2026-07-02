@@ -173,14 +173,18 @@ function buildInteractionContext({
 function createAudienceEntrySnapshot(audienceEntry = null) {
   if (!audienceEntry) return null;
 
-  return {
+  const snapshot = {
     entryCode: audienceEntry.entryCode,
-    scanId: audienceEntry.scanId,
     requestedVertical: audienceEntry.requestedVertical,
     source: audienceEntry.source,
     transport: audienceEntry.transport,
     receivedAt: audienceEntry.receivedAt,
   };
+
+  if (audienceEntry.scanId !== undefined) snapshot.scanId = audienceEntry.scanId;
+  if (audienceEntry.keyword !== undefined) snapshot.keyword = audienceEntry.keyword;
+
+  return snapshot;
 }
 
 function createAudienceIntentSnapshot(audienceEntry = null) {
@@ -731,6 +735,105 @@ async function handleCodeClipScan({
   });
 }
 
+async function handleCodeClipKeywordEntry({
+  event,
+  eventCode,
+  eventId,
+  keyword,
+  messageId,
+  requestedVertical,
+  receivedAt,
+  redis,
+  codeClipVertical,
+  saveCodeClipInteraction,
+  saveCodeClipRewardAssignments,
+}) {
+  const normalizedKeywordEntry = normalizeAudienceEntry("keyword", {
+    entryCode: eventCode,
+    keyword,
+    requestedVertical,
+    receivedAt,
+  });
+
+  if (!normalizedKeywordEntry.ok) {
+    return buildInteractionResult(400, {
+      success: false,
+      errors: normalizedKeywordEntry.errors,
+    });
+  }
+
+  const scanId = String(messageId || "").trim();
+  const interactionContext = buildInteractionContext({
+    event,
+    eventCode,
+    eventId,
+    scanId,
+    rawScans: null,
+    uniqueScans: null,
+    scanRank: null,
+    audienceEntry: normalizedKeywordEntry.audienceEntry,
+    audienceIntent: normalizedKeywordEntry.audienceIntent,
+  });
+  const routingOutcome = buildRoutingMatch(interactionContext);
+  const codeClipEvent = codeClipVertical.routes.parseCodeClipRewardsMeta(routingOutcome.interactionContext.event || {});
+
+  if (Date.now() > Date.parse(codeClipEvent.endAt)) {
+    return buildInteractionResult(200, {
+      success: false,
+      status: INTERACTION_STATES.EXPIRED,
+      error: CODECLIP_FAILURE_REASONS.BONUS_WINDOW_EXPIRED,
+    });
+  }
+
+  const codeClipRewardAssignments = await codeClipVertical.assignment.assignCodeClipRewards({
+    redis,
+    eventCode: routingOutcome.interactionContext.eventCode,
+    scanId: routingOutcome.interactionContext.scanId,
+    rewards: codeClipEvent.rewards || {},
+  });
+
+  const tier =
+    codeClipRewardAssignments.clipPlus?.assigned ? "clipPlus" :
+    codeClipRewardAssignments.clip?.assigned ? "clip" :
+    codeClipRewardAssignments.openClip?.assigned ? "openClip" :
+    "openClip";
+
+  const interaction = createInteraction({
+    interactionContext: routingOutcome.interactionContext,
+    routingOutcome: routingOutcome.outcome,
+    tier,
+    rewardAssignments: codeClipRewardAssignments,
+  });
+  interaction.audienceContext = createAudienceContextSnapshot(routingOutcome.interactionContext, codeClipEvent);
+  interaction.rewardAssignmentSnapshot = createRewardAssignmentSnapshot(interaction);
+
+  if (saveCodeClipInteraction) {
+    try {
+      await saveCodeClipInteraction(interaction);
+    } catch (dbError) {
+      console.warn("codeClip keyword Interaction Postgres save failed:", dbError.message);
+    }
+  }
+
+  if (saveCodeClipRewardAssignments) {
+    try {
+      await saveCodeClipRewardAssignments(interaction.rewardAssignmentSnapshot);
+    } catch (dbError) {
+      console.warn("codeClip keyword RewardAssignment Postgres save failed:", dbError.message);
+    }
+  }
+
+  return buildInteractionResult(200, {
+    success: true,
+    eventCode: interaction.eventCode,
+    eventId: interaction.eventId,
+    messageId: interaction.scanId,
+    tier: interaction.tier,
+    rewards: interaction.rewardAssignments,
+    clipXtra: interaction.rewardAssignments.clipXtra || null,
+  });
+}
+
 module.exports = {
   validateClipXtraToken,
   redeemClipXtraToken,
@@ -740,4 +843,5 @@ module.exports = {
   normalizeAudienceEntry,
   createRewardAssignmentSnapshot,
   handleCodeClipScan,
+  handleCodeClipKeywordEntry,
 };
