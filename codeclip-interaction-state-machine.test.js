@@ -316,6 +316,59 @@ test('successful codeClip keyword entry builds internal Interaction without even
   assert.equal(result.payload.rewardAssignmentSnapshot, undefined);
 });
 
+test('codeClip keyword entry rejects missing keyword without persistence', async () => {
+  let eventScanWriteAttempted = false;
+  let interactionPersisted = false;
+  let rewardAssignmentsPersisted = false;
+
+  const result = await codeClipService.handleCodeClipKeywordEntry({
+    event: {
+      id: 'event-keyword-invalid',
+      code: 'CC-KEYWORD-INVALID',
+      vertical: 'codeclip',
+      endAt: '2099-12-31T23:59:59.000Z',
+      rewards: {},
+    },
+    eventCode: 'CC-KEYWORD-INVALID',
+    eventId: 'event-keyword-invalid',
+    keyword: '   ',
+    messageId: 'message-keyword-invalid',
+    requestedVertical: 'codeclip',
+    redis: null,
+    codeClipVertical: {
+      routes: {
+        parseCodeClipRewardsMeta() {
+          throw new Error('invalid keyword should not reach reward metadata parsing');
+        },
+      },
+      assignment: {
+        async assignCodeClipRewards() {
+          throw new Error('invalid keyword should not assign rewards');
+        },
+      },
+    },
+    async persistFinalScan() {
+      eventScanWriteAttempted = true;
+    },
+    async saveCodeClipInteraction() {
+      interactionPersisted = true;
+    },
+    async saveCodeClipRewardAssignments() {
+      rewardAssignmentsPersisted = true;
+    },
+  });
+
+  assert.equal(result.httpStatus, 400);
+  assert.equal(result.payload.success, false);
+  assert.deepEqual(
+    result.payload.errors.map((error) => error.code),
+    ['KEYWORD_REQUIRED']
+  );
+  assert.equal(eventScanWriteAttempted, false);
+  assert.equal(interactionPersisted, false);
+  assert.equal(rewardAssignmentsPersisted, false);
+});
+
 test('codeClip no-match interaction uses unmatched state machine data', () => {
   const eventCode = 'CC-MISSING-STATE-TEST';
   const scanId = 'scan-missing-state-test';
