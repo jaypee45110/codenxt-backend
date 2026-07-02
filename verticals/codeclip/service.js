@@ -646,6 +646,48 @@ function buildPersistenceDecision(status = {}) {
   };
 }
 
+function applyPersistenceGuaranteePolicy(persistenceDecision = {}) {
+  const severity = String(persistenceDecision?.severity || "").trim().toLowerCase();
+
+  if (severity === "ok") {
+    return {
+      severity: "ok",
+      shouldContinue: true,
+      requiresRetry: false,
+      requiresOperatorAttention: false,
+      reason: "persistence_ok",
+    };
+  }
+
+  if (severity === "degraded") {
+    return {
+      severity: "degraded",
+      shouldContinue: true,
+      requiresRetry: true,
+      requiresOperatorAttention: true,
+      reason: "persistence_degraded",
+    };
+  }
+
+  if (severity === "critical") {
+    return {
+      severity: "critical",
+      shouldContinue: false,
+      requiresRetry: true,
+      requiresOperatorAttention: true,
+      reason: "persistence_critical",
+    };
+  }
+
+  return {
+    severity: "critical",
+    shouldContinue: false,
+    requiresRetry: true,
+    requiresOperatorAttention: true,
+    reason: "unknown_persistence_severity",
+  };
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -900,6 +942,7 @@ module.exports = {
   normalizeAudienceEntry,
   createRewardAssignmentSnapshot,
   buildPersistenceDecision,
+  applyPersistenceGuaranteePolicy,
   handleCodeClipScan,
   handleCodeClipKeywordEntry,
 };

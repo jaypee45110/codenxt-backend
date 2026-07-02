@@ -78,6 +78,48 @@ test('buildPersistenceDecision classifies COAS persistence status', () => {
   });
 });
 
+test('applyPersistenceGuaranteePolicy maps persistence decisions to internal policy', () => {
+  assert.deepEqual(codeClipService.applyPersistenceGuaranteePolicy({ severity: 'ok' }), {
+    severity: 'ok',
+    shouldContinue: true,
+    requiresRetry: false,
+    requiresOperatorAttention: false,
+    reason: 'persistence_ok',
+  });
+
+  assert.deepEqual(codeClipService.applyPersistenceGuaranteePolicy({ severity: 'degraded' }), {
+    severity: 'degraded',
+    shouldContinue: true,
+    requiresRetry: true,
+    requiresOperatorAttention: true,
+    reason: 'persistence_degraded',
+  });
+
+  assert.deepEqual(codeClipService.applyPersistenceGuaranteePolicy({ severity: 'critical' }), {
+    severity: 'critical',
+    shouldContinue: false,
+    requiresRetry: true,
+    requiresOperatorAttention: true,
+    reason: 'persistence_critical',
+  });
+
+  assert.deepEqual(codeClipService.applyPersistenceGuaranteePolicy({}), {
+    severity: 'critical',
+    shouldContinue: false,
+    requiresRetry: true,
+    requiresOperatorAttention: true,
+    reason: 'unknown_persistence_severity',
+  });
+
+  assert.deepEqual(codeClipService.applyPersistenceGuaranteePolicy({ severity: 'unexpected' }), {
+    severity: 'critical',
+    shouldContinue: false,
+    requiresRetry: true,
+    requiresOperatorAttention: true,
+    reason: 'unknown_persistence_severity',
+  });
+});
+
 test('successful codeClip scan builds validated Interaction state machine data', async () => {
   const eventCode = 'CC-STATE-TEST';
   const eventId = 'event-state-test';
