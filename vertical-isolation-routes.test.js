@@ -129,6 +129,50 @@ test('POST /scan uses stored codeClip event vertical when request vertical is mi
   });
 });
 
+test('POST /scan does not expose codeClip COAS adapter internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-ADAPTER-INTERNALS-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip adapter internals route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const scanResponse = await fetch(`${baseUrl}/scan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: code,
+        scanId: `scan-${Date.now()}`,
+      }),
+    });
+    const scan = await scanResponse.json();
+
+    assert.equal(scanResponse.ok, true);
+    assert.equal(scan.success, true);
+    assert.equal(scan.eventCode, code);
+    assert.equal(Object.hasOwn(scan, 'audienceEntry'), false);
+    assert.equal(Object.hasOwn(scan, 'audienceIntent'), false);
+    assert.equal(Object.hasOwn(scan, 'warnings'), false);
+    assert.equal(Object.hasOwn(scan, 'errors'), false);
+  });
+});
+
 test('POST /scan uses stored codePod event vertical when request vertical is missing', async () => {
   await withTestServer(async (baseUrl) => {
     const code = `CP-STORED-VERTICAL-${Date.now()}`;
