@@ -688,6 +688,48 @@ function applyPersistenceGuaranteePolicy(persistenceDecision = {}) {
   };
 }
 
+function buildPersistenceAction(policy = {}) {
+  const reason = String(policy?.reason || "").trim();
+
+  if (reason === "persistence_ok") {
+    return {
+      action: "continue",
+      logLevel: "none",
+      retry: false,
+      escalate: false,
+      reason,
+    };
+  }
+
+  if (reason === "persistence_degraded") {
+    return {
+      action: "continue_with_internal_warning",
+      logLevel: "warn",
+      retry: true,
+      escalate: true,
+      reason,
+    };
+  }
+
+  if (reason === "persistence_critical") {
+    return {
+      action: "continue_with_internal_error_marker",
+      logLevel: "error",
+      retry: true,
+      escalate: true,
+      reason,
+    };
+  }
+
+  return {
+    action: "continue_with_internal_error_marker",
+    logLevel: "error",
+    retry: true,
+    escalate: true,
+    reason: "unknown_persistence_policy",
+  };
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -813,6 +855,7 @@ async function handleCodeClipScan({
 
   interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
   interaction.persistenceGuaranteePolicy = applyPersistenceGuaranteePolicy(interaction.persistenceDecision);
+  interaction.persistenceAction = buildPersistenceAction(interaction.persistenceGuaranteePolicy);
 
   return buildInteractionResult(200, {
     success: true,
@@ -923,6 +966,7 @@ async function handleCodeClipKeywordEntry({
 
   interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
   interaction.persistenceGuaranteePolicy = applyPersistenceGuaranteePolicy(interaction.persistenceDecision);
+  interaction.persistenceAction = buildPersistenceAction(interaction.persistenceGuaranteePolicy);
 
   return buildInteractionResult(200, {
     success: true,
@@ -945,6 +989,7 @@ module.exports = {
   createRewardAssignmentSnapshot,
   buildPersistenceDecision,
   applyPersistenceGuaranteePolicy,
+  buildPersistenceAction,
   handleCodeClipScan,
   handleCodeClipKeywordEntry,
 };

@@ -120,6 +120,48 @@ test('applyPersistenceGuaranteePolicy maps persistence decisions to internal pol
   });
 });
 
+test('buildPersistenceAction maps persistence guarantee policy to internal action', () => {
+  assert.deepEqual(codeClipService.buildPersistenceAction({ reason: 'persistence_ok' }), {
+    action: 'continue',
+    logLevel: 'none',
+    retry: false,
+    escalate: false,
+    reason: 'persistence_ok',
+  });
+
+  assert.deepEqual(codeClipService.buildPersistenceAction({ reason: 'persistence_degraded' }), {
+    action: 'continue_with_internal_warning',
+    logLevel: 'warn',
+    retry: true,
+    escalate: true,
+    reason: 'persistence_degraded',
+  });
+
+  assert.deepEqual(codeClipService.buildPersistenceAction({ reason: 'persistence_critical' }), {
+    action: 'continue_with_internal_error_marker',
+    logLevel: 'error',
+    retry: true,
+    escalate: true,
+    reason: 'persistence_critical',
+  });
+
+  assert.deepEqual(codeClipService.buildPersistenceAction({}), {
+    action: 'continue_with_internal_error_marker',
+    logLevel: 'error',
+    retry: true,
+    escalate: true,
+    reason: 'unknown_persistence_policy',
+  });
+
+  assert.deepEqual(codeClipService.buildPersistenceAction({ reason: 'unexpected' }), {
+    action: 'continue_with_internal_error_marker',
+    logLevel: 'error',
+    retry: true,
+    escalate: true,
+    reason: 'unknown_persistence_policy',
+  });
+});
+
 test('successful codeClip scan builds validated Interaction state machine data', async () => {
   const eventCode = 'CC-STATE-TEST';
   const eventId = 'event-state-test';
@@ -268,6 +310,13 @@ test('successful codeClip scan builds validated Interaction state machine data',
     requiresOperatorAttention: false,
     reason: 'persistence_ok',
   });
+  assert.deepEqual(persistedInteraction.persistenceAction, {
+    action: 'continue',
+    logLevel: 'none',
+    retry: false,
+    escalate: false,
+    reason: 'persistence_ok',
+  });
   assert.ok(persistedInteraction.rewardAssignmentSnapshot);
   assert.equal(persistedInteraction.rewardAssignmentSnapshot.eventCode, eventCode);
   assert.equal(persistedInteraction.rewardAssignmentSnapshot.eventId, eventId);
@@ -294,6 +343,7 @@ test('successful codeClip scan builds validated Interaction state machine data',
   assert.equal(result.payload.persistenceStatus, undefined);
   assert.equal(result.payload.persistenceDecision, undefined);
   assert.equal(result.payload.persistenceGuaranteePolicy, undefined);
+  assert.equal(result.payload.persistenceAction, undefined);
 
   assert.ok(eventScanPayload, 'event scan payload should be built');
   assert.equal(eventScanPayload.finalTier, 'clipPlus');
@@ -378,6 +428,7 @@ test('codeClip scan records internal persistence status when COAS persistence fa
   assert.equal(result.payload.persistenceStatus, undefined);
   assert.equal(result.payload.persistenceDecision, undefined);
   assert.equal(result.payload.persistenceGuaranteePolicy, undefined);
+  assert.equal(result.payload.persistenceAction, undefined);
   assert.equal(rewardAssignmentPersistenceAttempted, true);
   assert.ok(eventScanPayload?.interaction?.persistenceStatus);
   assert.deepEqual(eventScanPayload.interaction.persistenceStatus.interaction, {
@@ -401,6 +452,13 @@ test('codeClip scan records internal persistence status when COAS persistence fa
     shouldContinue: false,
     requiresRetry: true,
     requiresOperatorAttention: true,
+    reason: 'persistence_critical',
+  });
+  assert.deepEqual(eventScanPayload.interaction.persistenceAction, {
+    action: 'continue_with_internal_error_marker',
+    logLevel: 'error',
+    retry: true,
+    escalate: true,
     reason: 'persistence_critical',
   });
 });
@@ -531,6 +589,13 @@ test('successful codeClip keyword entry builds internal Interaction without even
     requiresOperatorAttention: false,
     reason: 'persistence_ok',
   });
+  assert.deepEqual(persistedInteraction.persistenceAction, {
+    action: 'continue',
+    logLevel: 'none',
+    retry: false,
+    escalate: false,
+    reason: 'persistence_ok',
+  });
   assert.deepEqual(
     persistedInteraction.rewardAssignmentSnapshot.assignments.map((assignment) => assignment.tier),
     ['openClip', 'clipPlus', 'clipXtra']
@@ -542,6 +607,7 @@ test('successful codeClip keyword entry builds internal Interaction without even
   assert.equal(result.payload.persistenceStatus, undefined);
   assert.equal(result.payload.persistenceDecision, undefined);
   assert.equal(result.payload.persistenceGuaranteePolicy, undefined);
+  assert.equal(result.payload.persistenceAction, undefined);
 });
 
 test('codeClip keyword entry rejects missing keyword without persistence', async () => {
