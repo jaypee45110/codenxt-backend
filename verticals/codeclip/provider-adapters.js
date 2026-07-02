@@ -1,7 +1,7 @@
 function normalizeTestProviderKeyword(input = {}) {
   const eventCode = String(input.eventCode || "").trim();
   const keyword = String(input.text || "").trim();
-  const messageId = String(input.messageId || "").trim();
+  const messageId = String(input.messageId || input.providerEventId || "").trim();
   const errors = [];
 
   if (!eventCode) errors.push({ code: "EVENT_CODE_REQUIRED" });
@@ -32,7 +32,7 @@ function normalizeTestProviderKeyword(input = {}) {
 function normalizeSmsKeywordProvider(input = {}) {
   const eventCode = String(input.eventCode || "").trim();
   const keyword = String(input.Body || input.body || input.text || "").trim();
-  const messageId = String(input.MessageSid || input.messageId || "").trim();
+  const messageId = String(input.messageId || input.MessageSid || input.providerEventId || "").trim();
   const errors = [];
 
   if (!eventCode) errors.push({ code: "EVENT_CODE_REQUIRED" });

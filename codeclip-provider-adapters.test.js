@@ -47,6 +47,16 @@ test('codeClip test ProviderAdapter normalizes keyword provider input', () => {
   assert.equal(valid.userAgent, undefined);
   assert.equal(valid.ip, undefined);
 
+  const providerEventFallback = normalizeTestProviderKeyword({
+    eventCode: 'CC',
+    text: 'GOLD',
+    providerEventId: ' provider-event-1 ',
+  });
+  assertProviderKeywordContract(providerEventFallback);
+  assert.equal(providerEventFallback.ok, true);
+  assert.equal(providerEventFallback.messageId, 'provider-event-1');
+  assert.equal(providerEventFallback.providerEventId, undefined);
+
   const missingEventCode = normalizeTestProviderKeyword({
     text: 'GOLD',
     messageId: 'msg-1',
@@ -123,6 +133,16 @@ test('codeClip SMS ProviderAdapter normalizes keyword provider input', () => {
   assert.equal(textFallback.ok, true);
   assert.equal(textFallback.keyword, 'BRONZE');
   assert.equal(textFallback.messageId, 'sms-3');
+
+  const providerEventFallback = normalizeSmsKeywordProvider({
+    eventCode: 'CC',
+    Body: 'GOLD',
+    providerEventId: ' sms-provider-event-1 ',
+  });
+  assertProviderKeywordContract(providerEventFallback);
+  assert.equal(providerEventFallback.ok, true);
+  assert.equal(providerEventFallback.messageId, 'sms-provider-event-1');
+  assert.equal(providerEventFallback.providerEventId, undefined);
 
   const missingEventCode = normalizeSmsKeywordProvider({
     Body: 'GOLD',
@@ -204,6 +224,16 @@ test('codeClip provider keyword ingress selects registered ProviderAdapter', () 
   assert.equal(smsProvider.From, undefined);
   assert.equal(smsProvider.provider, undefined);
   assert.equal(smsProvider.rawPayload, undefined);
+
+  const providerEventFallback = normalizeProviderKeywordIngress('sms', {
+    eventCode: 'CC',
+    text: 'GOLD',
+    providerEventId: ' ingress-provider-event-1 ',
+  });
+  assertProviderKeywordContract(providerEventFallback);
+  assert.equal(providerEventFallback.ok, true);
+  assert.equal(providerEventFallback.messageId, 'ingress-provider-event-1');
+  assert.equal(providerEventFallback.providerEventId, undefined);
 
   const missingProvider = normalizeProviderKeywordIngress('', {
     eventCode: 'CC',
