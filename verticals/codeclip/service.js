@@ -229,6 +229,12 @@ function buildNoCampaignMatchInteraction({
   scanId,
   audienceEntry,
 }) {
+  const audienceEntrySnapshot = createAudienceEntrySnapshot(audienceEntry);
+  const interactionContext = {
+    eventCode,
+    eventId: null,
+    audienceEntry: audienceEntrySnapshot,
+  };
   const interactionState = buildInteractionStateSnapshot([
     buildValidInteractionStateTransition({
       from: null,
@@ -247,8 +253,15 @@ function buildNoCampaignMatchInteraction({
     eventCode,
     eventId: null,
     scanId,
-    audienceEntry: createAudienceEntrySnapshot(audienceEntry),
+    audienceEntry: audienceEntrySnapshot,
     audienceIntent: createAudienceIntentSnapshot(audienceEntry),
+    audienceContext: createAudienceContextSnapshot(interactionContext, {
+      vertical: null,
+      activationMethod: "",
+      activationKeyword: "",
+      activationChannels: [],
+      rewards: {},
+    }),
     state: interactionState.state,
     stateTransitions: interactionState.transitions,
     timestamp: new Date().toISOString(),

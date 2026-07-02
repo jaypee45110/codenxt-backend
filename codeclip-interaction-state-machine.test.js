@@ -222,6 +222,28 @@ test('codeClip no-match interaction uses unmatched state machine data', () => {
   });
   assert.equal(interaction.audienceIntent.userAgent, undefined);
   assert.equal(interaction.audienceIntent.ip, undefined);
+  assert.ok(interaction.audienceContext);
+  assert.equal(interaction.audienceContext.campaign.eventCode, eventCode);
+  assert.equal(interaction.audienceContext.campaign.eventId, null);
+  assert.equal(interaction.audienceContext.campaign.vertical, null);
+  assert.deepEqual(interaction.audienceContext.activation, {
+    method: '',
+    keyword: '',
+    channels: [],
+  });
+  assert.deepEqual(interaction.audienceContext.entry, {
+    source: 'scan',
+    transport: 'http',
+    requestedVertical: 'codeclip',
+  });
+  assert.deepEqual(interaction.audienceContext.rewardContext, {
+    hasOpenClip: false,
+    hasClip: false,
+    hasClipPlus: false,
+    hasClipXtra: false,
+  });
+  assert.equal(interaction.audienceContext.entry.userAgent, undefined);
+  assert.equal(interaction.audienceContext.entry.ip, undefined);
   assert.equal(interaction.rewardAssignments, undefined);
 });
 
