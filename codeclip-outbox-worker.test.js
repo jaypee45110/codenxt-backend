@@ -50,6 +50,309 @@ test('codeClip outbox worker marks known persistence action events succeeded', a
   ]);
 });
 
+test('codeClip outbox worker recovers failed interaction persistence before succeeding', async () => {
+  const savedInteractions = [];
+  const succeeded = [];
+  const recoveryInteraction = {
+    eventCode: 'CC-RECOVER-INTERACTION',
+    scanId: 'scan-recover-interaction',
+    state: 'processed',
+  };
+
+  const summary = await processCodeClipOutboxBatch({
+    async claimCodeClipOutboxEvents() {
+      return [
+        {
+          id: 111,
+          event_type: 'codeclip.persistence_action',
+          attempt_count: 1,
+          payload: {
+            persistenceDecision: { failedSteps: ['interaction'] },
+            recovery: { interaction: recoveryInteraction },
+          },
+        },
+      ];
+    },
+    async saveCodeClipInteraction(interaction) {
+      savedInteractions.push(interaction);
+    },
+    async markCodeClipOutboxEventSucceeded(id) {
+      succeeded.push(id);
+    },
+  });
+
+  assert.deepEqual(summary, {
+    claimed: 1,
+    succeeded: 1,
+    retried: 0,
+    deadLettered: 0,
+    failed: 0,
+  });
+  assert.deepEqual(savedInteractions, [recoveryInteraction]);
+  assert.deepEqual(succeeded, [111]);
+});
+
+test('codeClip outbox worker recovers failed reward assignment persistence before succeeding', async () => {
+  const savedSnapshots = [];
+  const succeeded = [];
+  const rewardAssignmentSnapshot = {
+    eventCode: 'CC-RECOVER-REWARDS',
+    scanId: 'scan-recover-rewards',
+    assignments: [{ tier: 'openClip', assigned: true }],
+  };
+
+  const summary = await processCodeClipOutboxBatch({
+    async claimCodeClipOutboxEvents() {
+      return [
+        {
+          id: 112,
+          event_type: 'codeclip.persistence_action',
+          attempt_count: 1,
+          payload: {
+            persistenceDecision: { failedSteps: ['rewardAssignments'] },
+            recovery: { rewardAssignmentSnapshot },
+          },
+        },
+      ];
+    },
+    async saveCodeClipRewardAssignments(snapshot) {
+      savedSnapshots.push(snapshot);
+    },
+    async markCodeClipOutboxEventSucceeded(id) {
+      succeeded.push(id);
+    },
+  });
+
+  assert.deepEqual(summary, {
+    claimed: 1,
+    succeeded: 1,
+    retried: 0,
+    deadLettered: 0,
+    failed: 0,
+  });
+  assert.deepEqual(savedSnapshots, [rewardAssignmentSnapshot]);
+  assert.deepEqual(succeeded, [112]);
+});
+
+test('codeClip outbox worker recovers interaction and reward assignment failures before succeeding', async () => {
+  const calls = [];
+  const recoveryInteraction = {
+    eventCode: 'CC-RECOVER-BOTH',
+    scanId: 'scan-recover-both',
+  };
+  const rewardAssignmentSnapshot = {
+    eventCode: 'CC-RECOVER-BOTH',
+    scanId: 'scan-recover-both',
+    assignments: [{ tier: 'clipPlus', assigned: true }],
+  };
+
+  const summary = await processCodeClipOutboxBatch({
+    async claimCodeClipOutboxEvents() {
+      return [
+        {
+          id: 113,
+          event_type: 'codeclip.persistence_action',
+          attempt_count: 1,
+          payload: {
+            persistenceDecision: { failedSteps: ['interaction', 'rewardAssignments'] },
+            recovery: {
+              interaction: recoveryInteraction,
+              rewardAssignmentSnapshot,
+            },
+          },
+        },
+      ];
+    },
+    async saveCodeClipInteraction(interaction) {
+      calls.push({ method: 'interaction', interaction });
+    },
+    async saveCodeClipRewardAssignments(snapshot) {
+      calls.push({ method: 'rewardAssignments', snapshot });
+    },
+    async markCodeClipOutboxEventSucceeded(id) {
+      calls.push({ method: 'succeeded', id });
+    },
+  });
+
+  assert.deepEqual(summary, {
+    claimed: 1,
+    succeeded: 1,
+    retried: 0,
+    deadLettered: 0,
+    failed: 0,
+  });
+  assert.deepEqual(calls, [
+    { method: 'interaction', interaction: recoveryInteraction },
+    { method: 'rewardAssignments', snapshot: rewardAssignmentSnapshot },
+    { method: 'succeeded', id: 113 },
+  ]);
+});
+
+test('codeClip outbox worker reschedules persistence action when recovery interaction is missing', async () => {
+  const failedCalls = [];
+  const summary = await processCodeClipOutboxBatch({
+    now: '2026-07-01T00:00:00.000Z',
+    retryDelayMs: 60000,
+    async claimCodeClipOutboxEvents() {
+      return [
+        {
+          id: 114,
+          event_type: 'codeclip.persistence_action',
+          attempt_count: 1,
+          payload: {
+            persistenceDecision: { failedSteps: ['interaction'] },
+            recovery: {},
+          },
+        },
+      ];
+    },
+    async saveCodeClipInteraction() {
+      throw new Error('should not be called without recovery interaction');
+    },
+    async markCodeClipOutboxEventSucceeded() {
+      throw new Error('should not succeed without recovery interaction');
+    },
+    async markCodeClipOutboxEventFailed(args) {
+      failedCalls.push(args);
+    },
+  });
+
+  assert.deepEqual(summary, {
+    claimed: 1,
+    succeeded: 0,
+    retried: 1,
+    deadLettered: 0,
+    failed: 0,
+  });
+  assert.equal(failedCalls.length, 1);
+  assert.equal(failedCalls[0].id, 114);
+  assert.equal(failedCalls[0].availableAt, '2026-07-01T00:01:00.000Z');
+  assert.match(failedCalls[0].error, /missing interaction payload/);
+});
+
+test('codeClip outbox worker reschedules unsupported persistence recovery steps', async () => {
+  const failedCalls = [];
+  const summary = await processCodeClipOutboxBatch({
+    now: '2026-07-01T00:00:00.000Z',
+    retryDelayMs: 60000,
+    maxAttempts: 5,
+    async claimCodeClipOutboxEvents() {
+      return [
+        {
+          id: 115,
+          event_type: 'codeclip.persistence_action',
+          attempt_count: 2,
+          payload: {
+            persistenceDecision: { failedSteps: ['clipXtraRedemption'] },
+            recovery: {},
+          },
+        },
+      ];
+    },
+    async markCodeClipOutboxEventSucceeded() {
+      throw new Error('should not succeed unsupported recovery step');
+    },
+    async markCodeClipOutboxEventFailed(args) {
+      failedCalls.push(args);
+    },
+  });
+
+  assert.deepEqual(summary, {
+    claimed: 1,
+    succeeded: 0,
+    retried: 1,
+    deadLettered: 0,
+    failed: 0,
+  });
+  assert.equal(failedCalls.length, 1);
+  assert.equal(failedCalls[0].id, 115);
+  assert.match(failedCalls[0].error, /Unsupported codeClip persistence recovery step: clipXtraRedemption/);
+});
+
+test('codeClip outbox worker dead-letters unsupported persistence recovery steps at max attempts', async () => {
+  const deadLetterCalls = [];
+  const summary = await processCodeClipOutboxBatch({
+    maxAttempts: 5,
+    async claimCodeClipOutboxEvents() {
+      return [
+        {
+          id: 116,
+          event_type: 'codeclip.persistence_action',
+          attempt_count: 5,
+          payload: {
+            persistenceDecision: { failedSteps: ['clipXtraRedemption'] },
+            recovery: {},
+          },
+        },
+      ];
+    },
+    async markCodeClipOutboxEventSucceeded() {
+      throw new Error('should not succeed unsupported recovery step');
+    },
+    async markCodeClipOutboxEventDeadLetter(args) {
+      deadLetterCalls.push(args);
+    },
+  });
+
+  assert.deepEqual(summary, {
+    claimed: 1,
+    succeeded: 0,
+    retried: 0,
+    deadLettered: 1,
+    failed: 0,
+  });
+  assert.equal(deadLetterCalls.length, 1);
+  assert.equal(deadLetterCalls[0].id, 116);
+  assert.match(deadLetterCalls[0].error, /Unsupported codeClip persistence recovery step: clipXtraRedemption/);
+});
+
+test('codeClip outbox worker reschedules when persistence recovery save fails', async () => {
+  const failedCalls = [];
+  const summary = await processCodeClipOutboxBatch({
+    now: '2026-07-01T00:00:00.000Z',
+    retryDelayMs: 60000,
+    async claimCodeClipOutboxEvents() {
+      return [
+        {
+          id: 117,
+          event_type: 'codeclip.persistence_action',
+          attempt_count: 1,
+          payload: {
+            persistenceDecision: { failedSteps: ['interaction'] },
+            recovery: {
+              interaction: {
+                eventCode: 'CC-RECOVERY-SAVE-FAIL',
+                scanId: 'scan-recovery-save-fail',
+              },
+            },
+          },
+        },
+      ];
+    },
+    async saveCodeClipInteraction() {
+      throw new Error('interaction recovery save failed');
+    },
+    async markCodeClipOutboxEventSucceeded() {
+      throw new Error('should not succeed when recovery save fails');
+    },
+    async markCodeClipOutboxEventFailed(args) {
+      failedCalls.push(args);
+    },
+  });
+
+  assert.deepEqual(summary, {
+    claimed: 1,
+    succeeded: 0,
+    retried: 1,
+    deadLettered: 0,
+    failed: 0,
+  });
+  assert.equal(failedCalls.length, 1);
+  assert.equal(failedCalls[0].id, 117);
+  assert.equal(failedCalls[0].availableAt, '2026-07-01T00:01:00.000Z');
+  assert.equal(failedCalls[0].error, 'interaction recovery save failed');
+});
+
 test('codeClip outbox worker reschedules unknown events below max attempts', async () => {
   const calls = [];
   const summary = await processCodeClipOutboxBatch({

@@ -38,6 +38,44 @@ function getAttemptCount(event = {}) {
   return parsed;
 }
 
+async function recoverPersistenceActionEvent(event = {}, {
+  saveCodeClipInteraction,
+  saveCodeClipRewardAssignments,
+} = {}) {
+  const failedSteps = Array.isArray(event.payload?.persistenceDecision?.failedSteps)
+    ? event.payload.persistenceDecision.failedSteps
+    : [];
+  const recovery = event.payload?.recovery || {};
+
+  if (!failedSteps.length) return;
+
+  for (const step of failedSteps) {
+    if (step === "interaction") {
+      if (!saveCodeClipInteraction) {
+        throw new Error("codeClip outbox recovery missing saveCodeClipInteraction");
+      }
+      if (!recovery.interaction) {
+        throw new Error("codeClip outbox recovery missing interaction payload");
+      }
+      await saveCodeClipInteraction(recovery.interaction);
+      continue;
+    }
+
+    if (step === "rewardAssignments") {
+      if (!saveCodeClipRewardAssignments) {
+        throw new Error("codeClip outbox recovery missing saveCodeClipRewardAssignments");
+      }
+      if (!recovery.rewardAssignmentSnapshot) {
+        throw new Error("codeClip outbox recovery missing reward assignment payload");
+      }
+      await saveCodeClipRewardAssignments(recovery.rewardAssignmentSnapshot);
+      continue;
+    }
+
+    throw new Error(`Unsupported codeClip persistence recovery step: ${step}`);
+  }
+}
+
 async function processCodeClipOutboxBatch({
   limit = 10,
   now = null,
@@ -47,6 +85,8 @@ async function processCodeClipOutboxBatch({
   markCodeClipOutboxEventSucceeded,
   markCodeClipOutboxEventFailed,
   markCodeClipOutboxEventDeadLetter,
+  saveCodeClipInteraction,
+  saveCodeClipRewardAssignments,
   logger = console,
 } = {}) {
   if (!claimCodeClipOutboxEvents) return createZeroSummary();
@@ -120,6 +160,10 @@ async function processCodeClipOutboxBatch({
           summary.failed += 1;
           continue;
         }
+        await recoverPersistenceActionEvent(event, {
+          saveCodeClipInteraction,
+          saveCodeClipRewardAssignments,
+        });
         await markCodeClipOutboxEventSucceeded(event.id);
         summary.succeeded += 1;
         continue;
@@ -138,5 +182,6 @@ async function processCodeClipOutboxBatch({
 }
 
 module.exports = {
+  recoverPersistenceActionEvent,
   processCodeClipOutboxBatch,
 };
