@@ -41,6 +41,7 @@ function getAttemptCount(event = {}) {
 async function recoverPersistenceActionEvent(event = {}, {
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
+  saveCodeClipXtraRedemption,
 } = {}) {
   const failedSteps = Array.isArray(event.payload?.persistenceDecision?.failedSteps)
     ? event.payload.persistenceDecision.failedSteps
@@ -72,6 +73,17 @@ async function recoverPersistenceActionEvent(event = {}, {
       continue;
     }
 
+    if (step === "clipXtraRedemption") {
+      if (!saveCodeClipXtraRedemption) {
+        throw new Error("codeClip outbox recovery missing saveCodeClipXtraRedemption");
+      }
+      if (!recovery.clipXtraRedemption) {
+        throw new Error("codeClip outbox recovery missing ClipXtra redemption payload");
+      }
+      await saveCodeClipXtraRedemption(recovery.clipXtraRedemption);
+      continue;
+    }
+
     throw new Error(`Unsupported codeClip persistence recovery step: ${step}`);
   }
 }
@@ -87,6 +99,7 @@ async function processCodeClipOutboxBatch({
   markCodeClipOutboxEventDeadLetter,
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
+  saveCodeClipXtraRedemption,
   logger = console,
 } = {}) {
   if (!claimCodeClipOutboxEvents) return createZeroSummary();
@@ -163,6 +176,7 @@ async function processCodeClipOutboxBatch({
         await recoverPersistenceActionEvent(event, {
           saveCodeClipInteraction,
           saveCodeClipRewardAssignments,
+          saveCodeClipXtraRedemption,
         });
         await markCodeClipOutboxEventSucceeded(event.id);
         summary.succeeded += 1;

@@ -829,6 +829,7 @@ async function savePersistenceActionOutbox({ interaction = {}, saveCodeClipOutbo
   try {
     const recoveryInteractionSnapshot = JSON.parse(JSON.stringify(interaction || null));
     const recoveryRewardAssignmentSnapshot = JSON.parse(JSON.stringify(interaction.rewardAssignmentSnapshot || null));
+    const recoveryClipXtraRedemptionSnapshot = JSON.parse(JSON.stringify(createClipXtraRedemptionRecord(interaction) || null));
 
     return await saveCodeClipOutboxEvent({
       eventType: "codeclip.persistence_action",
@@ -859,6 +860,7 @@ async function savePersistenceActionOutbox({ interaction = {}, saveCodeClipOutbo
         recovery: {
           interaction: recoveryInteractionSnapshot,
           rewardAssignmentSnapshot: recoveryRewardAssignmentSnapshot,
+          clipXtraRedemption: recoveryClipXtraRedemptionSnapshot,
         },
       },
     });
@@ -866,6 +868,37 @@ async function savePersistenceActionOutbox({ interaction = {}, saveCodeClipOutbo
     console.warn("codeClip persistence action outbox save failed:", dbError.message);
     return null;
   }
+}
+
+function createClipXtraRedemptionRecord(interaction = {}) {
+  const clipXtra = interaction.rewardAssignments?.clipXtra;
+  if (!clipXtra?.assigned) return null;
+
+  return {
+    token: clipXtra.redemptionToken,
+    eventCode: interaction.eventCode,
+    eventId: interaction.eventId,
+    scanId: interaction.scanId,
+    vertical: "codeclip",
+    rewardType: "clip_xtra",
+    tier: "clipXtra",
+    displayTier: "ClipXtra",
+    partnerName: clipXtra.partnerName,
+    rewardTitle: clipXtra.title,
+    redemptionLocation: clipXtra.redemptionLocation,
+    redemptionDeadline: clipXtra.redemptionDeadline,
+    redemptionInstructions: clipXtra.redemptionInstructions,
+    status: REWARD_ASSIGNMENT_STATES.ASSIGNED,
+    assignedAt: clipXtra.assignedAt,
+    rawPayload: {
+      eventCode: interaction.eventCode,
+      eventId: interaction.eventId,
+      scanId: interaction.scanId,
+      tier: interaction.tier,
+      rewardType: "clip_xtra",
+      clipXtra,
+    },
+  };
 }
 
 async function handleCodeClipScan({
@@ -961,31 +994,7 @@ async function handleCodeClipScan({
 
   if (interactionRewardAssignments.clipXtra?.assigned) {
     try {
-      await saveCodeClipXtraRedemption({
-        token: interactionRewardAssignments.clipXtra.redemptionToken,
-        eventCode: interaction.eventCode,
-        eventId: interaction.eventId,
-        scanId: interaction.scanId,
-        vertical: "codeclip",
-        rewardType: "clip_xtra",
-        tier: "clipXtra",
-        displayTier: "ClipXtra",
-        partnerName: interactionRewardAssignments.clipXtra.partnerName,
-        rewardTitle: interactionRewardAssignments.clipXtra.title,
-        redemptionLocation: interactionRewardAssignments.clipXtra.redemptionLocation,
-        redemptionDeadline: interactionRewardAssignments.clipXtra.redemptionDeadline,
-        redemptionInstructions: interactionRewardAssignments.clipXtra.redemptionInstructions,
-        status: REWARD_ASSIGNMENT_STATES.ASSIGNED,
-        assignedAt: interactionRewardAssignments.clipXtra.assignedAt,
-        rawPayload: {
-          eventCode: interaction.eventCode,
-          eventId: interaction.eventId,
-          scanId: interaction.scanId,
-          tier: interaction.tier,
-          rewardType: "clip_xtra",
-          clipXtra: interactionRewardAssignments.clipXtra,
-        },
-      });
+      await saveCodeClipXtraRedemption(createClipXtraRedemptionRecord(interaction));
       recordPersistenceStep(interaction.persistenceStatus, "clipXtraRedemption", true);
     } catch (dbError) {
       recordPersistenceStep(interaction.persistenceStatus, "clipXtraRedemption", false, dbError);

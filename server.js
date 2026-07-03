@@ -84,6 +84,9 @@ function startCodeClipOutboxWorker() {
         markCodeClipOutboxEventSucceeded,
         markCodeClipOutboxEventFailed,
         markCodeClipOutboxEventDeadLetter,
+        saveCodeClipInteraction,
+        saveCodeClipRewardAssignments,
+        saveCodeClipXtraRedemption,
       });
 
       if (summary.claimed > 0 || summary.failed > 0) {

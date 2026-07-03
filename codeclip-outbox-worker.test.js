@@ -230,7 +230,50 @@ test('codeClip outbox worker reschedules persistence action when recovery intera
   assert.match(failedCalls[0].error, /missing interaction payload/);
 });
 
-test('codeClip outbox worker reschedules unsupported persistence recovery steps', async () => {
+test('codeClip outbox worker recovers failed ClipXtra redemption persistence before succeeding', async () => {
+  const savedRedemptions = [];
+  const succeeded = [];
+  const clipXtraRedemption = {
+    token: 'CX-RECOVER-CLIPXTRA',
+    eventCode: 'CC-RECOVER-CLIPXTRA',
+    scanId: 'scan-recover-clipxtra',
+    tier: 'clipXtra',
+  };
+
+  const summary = await processCodeClipOutboxBatch({
+    async claimCodeClipOutboxEvents() {
+      return [
+        {
+          id: 115,
+          event_type: 'codeclip.persistence_action',
+          attempt_count: 1,
+          payload: {
+            persistenceDecision: { failedSteps: ['clipXtraRedemption'] },
+            recovery: { clipXtraRedemption },
+          },
+        },
+      ];
+    },
+    async saveCodeClipXtraRedemption(record) {
+      savedRedemptions.push(record);
+    },
+    async markCodeClipOutboxEventSucceeded(id) {
+      succeeded.push(id);
+    },
+  });
+
+  assert.deepEqual(summary, {
+    claimed: 1,
+    succeeded: 1,
+    retried: 0,
+    deadLettered: 0,
+    failed: 0,
+  });
+  assert.deepEqual(savedRedemptions, [clipXtraRedemption]);
+  assert.deepEqual(succeeded, [115]);
+});
+
+test('codeClip outbox worker reschedules ClipXtra recovery when redemption payload is missing', async () => {
   const failedCalls = [];
   const summary = await processCodeClipOutboxBatch({
     now: '2026-07-01T00:00:00.000Z',
@@ -249,8 +292,11 @@ test('codeClip outbox worker reschedules unsupported persistence recovery steps'
         },
       ];
     },
+    async saveCodeClipXtraRedemption() {
+      throw new Error('should not be called without ClipXtra redemption payload');
+    },
     async markCodeClipOutboxEventSucceeded() {
-      throw new Error('should not succeed unsupported recovery step');
+      throw new Error('should not succeed without ClipXtra redemption payload');
     },
     async markCodeClipOutboxEventFailed(args) {
       failedCalls.push(args);
@@ -266,17 +312,65 @@ test('codeClip outbox worker reschedules unsupported persistence recovery steps'
   });
   assert.equal(failedCalls.length, 1);
   assert.equal(failedCalls[0].id, 115);
-  assert.match(failedCalls[0].error, /Unsupported codeClip persistence recovery step: clipXtraRedemption/);
+  assert.match(failedCalls[0].error, /missing ClipXtra redemption payload/);
 });
 
-test('codeClip outbox worker dead-letters unsupported persistence recovery steps at max attempts', async () => {
+test('codeClip outbox worker reschedules when ClipXtra recovery save fails', async () => {
+  const failedCalls = [];
+  const summary = await processCodeClipOutboxBatch({
+    now: '2026-07-01T00:00:00.000Z',
+    retryDelayMs: 60000,
+    async claimCodeClipOutboxEvents() {
+      return [
+        {
+          id: 116,
+          event_type: 'codeclip.persistence_action',
+          attempt_count: 1,
+          payload: {
+            persistenceDecision: { failedSteps: ['clipXtraRedemption'] },
+            recovery: {
+              clipXtraRedemption: {
+                token: 'CX-RECOVERY-SAVE-FAIL',
+                eventCode: 'CC-RECOVERY-SAVE-FAIL',
+                scanId: 'scan-recovery-save-fail',
+              },
+            },
+          },
+        },
+      ];
+    },
+    async saveCodeClipXtraRedemption() {
+      throw new Error('ClipXtra recovery save failed');
+    },
+    async markCodeClipOutboxEventSucceeded() {
+      throw new Error('should not succeed when ClipXtra recovery save fails');
+    },
+    async markCodeClipOutboxEventFailed(args) {
+      failedCalls.push(args);
+    },
+  });
+
+  assert.deepEqual(summary, {
+    claimed: 1,
+    succeeded: 0,
+    retried: 1,
+    deadLettered: 0,
+    failed: 0,
+  });
+  assert.equal(failedCalls.length, 1);
+  assert.equal(failedCalls[0].id, 116);
+  assert.equal(failedCalls[0].availableAt, '2026-07-01T00:01:00.000Z');
+  assert.equal(failedCalls[0].error, 'ClipXtra recovery save failed');
+});
+
+test('codeClip outbox worker dead-letters ClipXtra recovery when payload is missing at max attempts', async () => {
   const deadLetterCalls = [];
   const summary = await processCodeClipOutboxBatch({
     maxAttempts: 5,
     async claimCodeClipOutboxEvents() {
       return [
         {
-          id: 116,
+          id: 118,
           event_type: 'codeclip.persistence_action',
           attempt_count: 5,
           payload: {
@@ -286,8 +380,11 @@ test('codeClip outbox worker dead-letters unsupported persistence recovery steps
         },
       ];
     },
+    async saveCodeClipXtraRedemption() {
+      throw new Error('should not be called without ClipXtra redemption payload');
+    },
     async markCodeClipOutboxEventSucceeded() {
-      throw new Error('should not succeed unsupported recovery step');
+      throw new Error('should not succeed without ClipXtra redemption payload');
     },
     async markCodeClipOutboxEventDeadLetter(args) {
       deadLetterCalls.push(args);
@@ -302,8 +399,8 @@ test('codeClip outbox worker dead-letters unsupported persistence recovery steps
     failed: 0,
   });
   assert.equal(deadLetterCalls.length, 1);
-  assert.equal(deadLetterCalls[0].id, 116);
-  assert.match(deadLetterCalls[0].error, /Unsupported codeClip persistence recovery step: clipXtraRedemption/);
+  assert.equal(deadLetterCalls[0].id, 118);
+  assert.match(deadLetterCalls[0].error, /missing ClipXtra redemption payload/);
 });
 
 test('codeClip outbox worker reschedules when persistence recovery save fails', async () => {

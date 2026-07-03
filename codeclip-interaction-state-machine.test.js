@@ -571,6 +571,124 @@ test('codeClip scan records internal persistence status when COAS persistence fa
   assert.equal(outboxEvents[0].payload.recovery.rewardAssignmentSnapshot.scanId, scanId);
 });
 
+test('codeClip scan includes ClipXtra redemption recovery payload when redemption persistence fails', async () => {
+  const eventCode = 'CC-CLIPXTRA-RECOVERY';
+  const eventId = 'event-clipxtra-recovery';
+  const scanId = 'scan-clipxtra-recovery';
+  const clipXtraAssignment = {
+    assigned: true,
+    tier: 'clipXtra',
+    rewardType: 'clip_xtra',
+    redemptionToken: 'CX-CLIPXTRA-RECOVERY',
+    partnerName: 'Recovery Partner',
+    title: 'Recovery ClipXtra',
+    redemptionLocation: 'Recovery Desk',
+    redemptionDeadline: '2099-12-31',
+    redemptionInstructions: 'Show recovery token',
+    assignedAt: '2026-07-01T00:01:00.000Z',
+  };
+  const rewardAssignments = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipXtra: clipXtraAssignment,
+  };
+
+  let eventScanPayload = null;
+  let clipXtraRedemptionAttempt = null;
+  const outboxEvents = [];
+
+  const result = await codeClipService.handleCodeClipScan({
+    event: {
+      id: eventId,
+      code: eventCode,
+      vertical: 'codeclip',
+      startAt: '2099-12-31T18:00:00.000Z',
+      endAt: '2099-12-31T23:59:59.000Z',
+      rewards: {
+        openClip: { enabled: true },
+        clipXtra: { enabled: true },
+      },
+    },
+    eventCode,
+    eventId,
+    scanId,
+    rawScans: 1,
+    uniqueScans: 1,
+    scanRank: 1,
+    audienceEntry: {
+      entryCode: eventCode,
+      scanId,
+      requestedVertical: 'codeclip',
+      source: 'scan',
+      transport: 'http',
+      receivedAt: '2026-07-01T00:00:00.000Z',
+    },
+    redis: null,
+    codeClipVertical: {
+      routes: {
+        parseCodeClipRewardsMeta(event) {
+          return event;
+        },
+      },
+      assignment: {
+        async assignCodeClipRewards() {
+          return rewardAssignments;
+        },
+      },
+    },
+    async persistFinalScan(finalTier, extraPayload, interaction) {
+      eventScanPayload = { finalTier, extraPayload, interaction };
+    },
+    async saveCodeClipInteraction(interaction) {
+      return { id: 3, interaction_state: interaction.state, routing_outcome: interaction.routingOutcome };
+    },
+    async saveCodeClipRewardAssignments(snapshot) {
+      return snapshot.assignments;
+    },
+    async saveCodeClipXtraRedemption(record) {
+      clipXtraRedemptionAttempt = record;
+      throw new Error('ClipXtra redemption persistence failed');
+    },
+    async saveCodeClipOutboxEvent(event) {
+      outboxEvents.push(event);
+      return { id: 1, ...event };
+    },
+  });
+
+  assert.equal(result.httpStatus, 200);
+  assert.equal(result.payload.success, true);
+  assert.equal(result.payload.recovery, undefined);
+  assert.equal(result.payload.outbox, undefined);
+  assert.equal(result.payload.persistenceStatus, undefined);
+  assert.equal(result.payload.persistenceDecision, undefined);
+  assert.equal(result.payload.persistenceGuaranteePolicy, undefined);
+  assert.equal(result.payload.persistenceAction, undefined);
+
+  assert.ok(eventScanPayload?.interaction);
+  assert.deepEqual(eventScanPayload.interaction.persistenceStatus.clipXtraRedemption, {
+    attempted: true,
+    ok: false,
+    error: 'ClipXtra redemption persistence failed',
+  });
+  assert.deepEqual(eventScanPayload.interaction.persistenceDecision, {
+    ok: false,
+    severity: 'critical',
+    failedSteps: ['clipXtraRedemption'],
+    criticalFailures: ['clipXtraRedemption'],
+  });
+
+  assert.equal(outboxEvents.length, 1);
+  assert.equal(outboxEvents[0].eventType, 'codeclip.persistence_action');
+  assert.deepEqual(outboxEvents[0].payload.persistenceDecision, eventScanPayload.interaction.persistenceDecision);
+  assert.ok(outboxEvents[0].payload.recovery.clipXtraRedemption);
+  assert.notEqual(outboxEvents[0].payload.recovery.clipXtraRedemption, clipXtraRedemptionAttempt);
+  assert.deepEqual(outboxEvents[0].payload.recovery.clipXtraRedemption, clipXtraRedemptionAttempt);
+  assert.equal(outboxEvents[0].payload.recovery.clipXtraRedemption.token, 'CX-CLIPXTRA-RECOVERY');
+  assert.equal(outboxEvents[0].payload.recovery.clipXtraRedemption.eventCode, eventCode);
+  assert.equal(outboxEvents[0].payload.recovery.clipXtraRedemption.eventId, eventId);
+  assert.equal(outboxEvents[0].payload.recovery.clipXtraRedemption.scanId, scanId);
+  assert.equal(outboxEvents[0].payload.recovery.clipXtraRedemption.rawPayload.clipXtra.redemptionToken, 'CX-CLIPXTRA-RECOVERY');
+});
+
 test('successful codeClip keyword entry builds internal Interaction without event scan persistence', async () => {
   const eventCode = 'CC-KEYWORD-RUNTIME';
   const eventId = 'event-keyword-runtime';
