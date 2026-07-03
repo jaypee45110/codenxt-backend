@@ -39,6 +39,17 @@ function assertApplicationMissingEventResponse(body) {
   assert.notEqual(body.json.error, 'Cannot GET');
 }
 
+function assertNoCodeClipProviderInternals(payload) {
+  assert.equal(Object.hasOwn(payload, 'audienceEntry'), false);
+  assert.equal(Object.hasOwn(payload, 'audienceIntent'), false);
+  assert.equal(Object.hasOwn(payload, 'audienceContext'), false);
+  assert.equal(Object.hasOwn(payload, 'rewardAssignmentSnapshot'), false);
+  assert.equal(Object.hasOwn(payload, 'persistenceStatus'), false);
+  assert.equal(Object.hasOwn(payload, 'persistenceDecision'), false);
+  assert.equal(Object.hasOwn(payload, 'persistenceGuaranteePolicy'), false);
+  assert.equal(Object.hasOwn(payload, 'persistenceAction'), false);
+}
+
 test('codeClip and codePod report routes are both available for missing events', async () => {
   await withTestServer(async (baseUrl) => {
     const codeClipResponse = await fetch(`${baseUrl}/codeclip/report/__missing_test_event__`);
@@ -275,6 +286,170 @@ test('POST /codeclip/test-provider/keyword maps provider-like input without expo
     assert.equal(Object.hasOwn(keywordEntry, 'warnings'), false);
     assert.equal(Object.hasOwn(keywordEntry, 'errors'), false);
   });
+});
+
+test('POST /codeclip/provider/test/keyword accepts generic provider keyword input', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-GENERIC-PROVIDER-KEYWORD-${Date.now()}`;
+    const providerEventId = `generic-provider-event-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip generic provider keyword route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'keyword',
+        activationKeyword: 'GOLD',
+        activationChannels: ['Instagram'],
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: code,
+        text: ' GOLD ',
+        providerEventId,
+      }),
+    });
+    const keywordEntry = await keywordResponse.json();
+
+    assert.equal(keywordResponse.ok, true);
+    assert.equal(keywordEntry.success, true);
+    assert.equal(keywordEntry.eventCode, code);
+    assert.equal(keywordEntry.messageId, providerEventId);
+    assertNoCodeClipProviderInternals(keywordEntry);
+  });
+});
+
+test('POST /codeclip/provider/unknown/keyword rejects unknown providers without COAS internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/unknown/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: `CC-UNKNOWN-PROVIDER-${Date.now()}`,
+        text: ' GOLD ',
+        providerEventId: `unknown-provider-event-${Date.now()}`,
+      }),
+    });
+    const body = await keywordResponse.json();
+
+    assert.equal(keywordResponse.status, 400);
+    assert.equal(body.ok, false);
+    assert.equal(body.error, 'Invalid provider keyword payload');
+    assertNoCodeClipProviderInternals(body);
+  });
+});
+
+test('POST /codeclip/provider/:provider/keyword enforces optional provider token auth', async () => {
+  const previousToken = process.env.CODECLIP_PROVIDER_WEBHOOK_TOKEN;
+  process.env.CODECLIP_PROVIDER_WEBHOOK_TOKEN = 'provider-test-token';
+
+  try {
+    await withTestServer(async (baseUrl) => {
+      const code = `CC-PROVIDER-AUTH-${Date.now()}`;
+      const providerEventId = `provider-auth-event-${Date.now()}`;
+
+      const missingAuthResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          eventCode: code,
+          text: ' GOLD ',
+          providerEventId,
+        }),
+      });
+      const missingAuth = await missingAuthResponse.json();
+
+      assert.equal(missingAuthResponse.status, 401);
+      assert.equal(missingAuth.ok, false);
+      assert.equal(missingAuth.error, 'Unauthorized');
+      assertNoCodeClipProviderInternals(missingAuth);
+
+      const wrongAuthResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-codeclip-provider-token': 'wrong-token',
+        },
+        body: JSON.stringify({
+          eventCode: code,
+          text: ' GOLD ',
+          providerEventId,
+        }),
+      });
+      const wrongAuth = await wrongAuthResponse.json();
+
+      assert.equal(wrongAuthResponse.status, 401);
+      assert.equal(wrongAuth.ok, false);
+      assert.equal(wrongAuth.error, 'Unauthorized');
+      assertNoCodeClipProviderInternals(wrongAuth);
+
+      const createResponse = await fetch(`${baseUrl}/event`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          vertical: 'codeclip',
+          code,
+          name: 'codeClip provider auth route test',
+          startAt: '2099-01-01T10:00:00.000Z',
+          unlockAt: '2099-01-01T10:00:00.000Z',
+          endAt: '2099-01-01T11:00:00.000Z',
+          activationMethod: 'keyword',
+          activationKeyword: 'GOLD',
+          activationChannels: ['Instagram'],
+          rewards: {
+            openClip: {
+              enabled: true,
+              title: 'OpenClip',
+            },
+          },
+        }),
+      });
+
+      assert.equal(createResponse.ok, true);
+
+      const authorizedResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-codeclip-provider-token': 'provider-test-token',
+        },
+        body: JSON.stringify({
+          eventCode: code,
+          text: ' GOLD ',
+          providerEventId,
+        }),
+      });
+      const authorized = await authorizedResponse.json();
+
+      assert.equal(authorizedResponse.ok, true);
+      assert.equal(authorized.success, true);
+      assert.equal(authorized.eventCode, code);
+      assert.equal(authorized.messageId, providerEventId);
+      assertNoCodeClipProviderInternals(authorized);
+    });
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.CODECLIP_PROVIDER_WEBHOOK_TOKEN;
+    } else {
+      process.env.CODECLIP_PROVIDER_WEBHOOK_TOKEN = previousToken;
+    }
+  }
 });
 
 test('POST /scan uses stored codePod event vertical when request vertical is missing', async () => {
