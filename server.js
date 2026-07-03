@@ -3311,6 +3311,7 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
       ? await claimProviderKeywordIdempotency({
           redis,
           key: idempotencyKey,
+          ttlSeconds: 300,
         })
       : { enabled: false, claimed: true };
 
@@ -3320,9 +3321,14 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
         key: idempotencyKey,
       });
 
-      return res.status(200).json(storedResponse || {
-        success: true,
+      if (storedResponse) {
+        return res.status(200).json(storedResponse);
+      }
+
+      return res.status(202).json({
+        ok: false,
         duplicate: true,
+        status: "processing",
         eventCode,
         messageId,
       });
@@ -3382,6 +3388,7 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
         redis,
         key: idempotencyKey,
         payload: result.payload,
+        ttlSeconds: 86400,
       });
     }
 
