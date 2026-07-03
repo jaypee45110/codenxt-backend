@@ -1543,6 +1543,94 @@ async function getCodeClipRewardAssignmentSummary(eventCode, queryClient = pool)
   };
 }
 
+async function ensureCodeClipOutboxEventsTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_outbox_events (
+      id BIGSERIAL PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      event_code TEXT,
+      event_id TEXT,
+      scan_id TEXT,
+      message_id TEXT,
+      routing_outcome TEXT,
+      interaction_state TEXT,
+      severity TEXT,
+      action TEXT,
+      retry BOOLEAN DEFAULT FALSE,
+      escalate BOOLEAN DEFAULT FALSE,
+      reason TEXT,
+      payload JSONB,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      available_at TIMESTAMPTZ DEFAULT NOW(),
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_outbox_events_status_available_at_idx
+    ON codeclip_outbox_events (status, available_at)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_outbox_events_event_code_created_at_idx
+    ON codeclip_outbox_events (event_code, created_at DESC)
+  `);
+}
+
+async function saveCodeClipOutboxEvent(event = {}, queryClient = pool) {
+  if (!queryClient || !event.eventType) return null;
+
+  await ensureCodeClipOutboxEventsTable(queryClient);
+
+  const result = await queryClient.query(
+    `
+      INSERT INTO codeclip_outbox_events (
+        event_type,
+        status,
+        event_code,
+        event_id,
+        scan_id,
+        message_id,
+        routing_outcome,
+        interaction_state,
+        severity,
+        action,
+        retry,
+        escalate,
+        reason,
+        payload,
+        available_at,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,COALESCE($15::timestamptz,NOW()),NOW())
+      RETURNING *
+    `,
+    [
+      event.eventType,
+      event.status || 'pending',
+      event.eventCode || null,
+      event.eventId || null,
+      event.scanId || null,
+      event.messageId || null,
+      event.routingOutcome || null,
+      event.interactionState || null,
+      event.severity || null,
+      event.action || null,
+      event.retry ?? false,
+      event.escalate ?? false,
+      event.reason || null,
+      JSON.stringify(event.payload || {}),
+      event.availableAt || null,
+    ]
+  );
+
+  return result.rows?.[0] || null;
+}
+
 async function getCodeClipXtraRedemptionByToken(token) {
   if (!pool || !token) return null;
 
@@ -1686,6 +1774,8 @@ module.exports = {
   saveCodeClipRewardAssignments,
   getCodeClipRewardAssignments,
   getCodeClipRewardAssignmentSummary,
+  ensureCodeClipOutboxEventsTable,
+  saveCodeClipOutboxEvent,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,

@@ -9,6 +9,7 @@ const {
   saveCodeClipRewardAssignments,
   getCodeClipRewardAssignments,
   getCodeClipRewardAssignmentSummary,
+  saveCodeClipOutboxEvent,
 } = require('./db');
 
 function assertAudienceIntentContract(intent, expectedType) {
@@ -1402,6 +1403,87 @@ test('codeClip reward assignment read helper normalizes limit and raw payload sh
   assert.equal(rows[0].tier, 'clipXtra');
   assert.equal(rows[0].raw_payload.assignment.redemptionToken, 'CX-READ-TEST');
   assert.equal(rows[0].rawPayload.scanId, 'scan-reward-read-test');
+});
+
+test('saveCodeClipOutboxEvent persists internal outbox rows with payload shape', async () => {
+  const calls = [];
+  const fakeClient = {
+    async query(sql, params = []) {
+      calls.push({ sql, params });
+      if (/INSERT INTO codeclip_outbox_events/.test(sql)) {
+        return {
+          rows: [
+            {
+              event_type: params[0],
+              status: params[1],
+              event_code: params[2],
+              scan_id: params[4],
+              message_id: params[5],
+              severity: params[8],
+              action: params[9],
+              retry: params[10],
+              escalate: params[11],
+              reason: params[12],
+              payload: params[13],
+              available_at: params[14],
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    },
+  };
+  const availableAt = '2026-07-01T00:00:00.000Z';
+
+  assert.equal(await saveCodeClipOutboxEvent({}, fakeClient), null);
+
+  const row = await saveCodeClipOutboxEvent({
+    eventType: 'codeclip.persistence_action',
+    eventCode: 'CC-OUTBOX',
+    eventId: 'event-outbox',
+    scanId: 'scan-outbox',
+    messageId: 'message-outbox',
+    routingOutcome: 'MATCH',
+    interactionState: 'processed',
+    severity: 'critical',
+    action: 'continue_with_internal_error_marker',
+    retry: true,
+    escalate: true,
+    reason: 'persistence_critical',
+    payload: {
+      failedSteps: ['interaction'],
+      persistenceAction: { retry: true, escalate: true },
+    },
+    availableAt,
+  }, fakeClient);
+
+  assert.equal(calls.length, 4);
+  assert.match(calls[0].sql, /CREATE TABLE IF NOT EXISTS codeclip_outbox_events/);
+  assert.match(calls[1].sql, /codeclip_outbox_events_status_available_at_idx/);
+  assert.match(calls[2].sql, /codeclip_outbox_events_event_code_created_at_idx/);
+  assert.match(calls[3].sql, /INSERT INTO codeclip_outbox_events/);
+  assert.match(calls[3].sql, /\$14::jsonb/);
+  assert.equal(calls[3].params[0], 'codeclip.persistence_action');
+  assert.equal(calls[3].params[1], 'pending');
+  assert.equal(calls[3].params[2], 'CC-OUTBOX');
+  assert.equal(calls[3].params[3], 'event-outbox');
+  assert.equal(calls[3].params[4], 'scan-outbox');
+  assert.equal(calls[3].params[5], 'message-outbox');
+  assert.equal(calls[3].params[6], 'MATCH');
+  assert.equal(calls[3].params[7], 'processed');
+  assert.equal(calls[3].params[8], 'critical');
+  assert.equal(calls[3].params[9], 'continue_with_internal_error_marker');
+  assert.equal(calls[3].params[10], true);
+  assert.equal(calls[3].params[11], true);
+  assert.equal(calls[3].params[12], 'persistence_critical');
+  assert.deepEqual(JSON.parse(calls[3].params[13]), {
+    failedSteps: ['interaction'],
+    persistenceAction: { retry: true, escalate: true },
+  });
+  assert.equal(calls[3].params[14], availableAt);
+  assert.equal(row.event_type, 'codeclip.persistence_action');
+  assert.equal(row.retry, true);
+  assert.equal(row.escalate, true);
 });
 
 test('codeClip reward assignment summary helper returns assignment counts', async () => {
