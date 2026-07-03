@@ -38,6 +38,44 @@ function getAttemptCount(event = {}) {
   return parsed;
 }
 
+const PERSISTENCE_RECOVERY_HANDLERS = {
+  async interaction(recovery = {}, {
+    saveCodeClipInteraction,
+  } = {}) {
+    if (!saveCodeClipInteraction) {
+      throw new Error("codeClip outbox recovery missing saveCodeClipInteraction");
+    }
+    if (!recovery.interaction) {
+      throw new Error("codeClip outbox recovery missing interaction payload");
+    }
+    await saveCodeClipInteraction(recovery.interaction);
+  },
+
+  async rewardAssignments(recovery = {}, {
+    saveCodeClipRewardAssignments,
+  } = {}) {
+    if (!saveCodeClipRewardAssignments) {
+      throw new Error("codeClip outbox recovery missing saveCodeClipRewardAssignments");
+    }
+    if (!recovery.rewardAssignmentSnapshot) {
+      throw new Error("codeClip outbox recovery missing reward assignment payload");
+    }
+    await saveCodeClipRewardAssignments(recovery.rewardAssignmentSnapshot);
+  },
+
+  async clipXtraRedemption(recovery = {}, {
+    saveCodeClipXtraRedemption,
+  } = {}) {
+    if (!saveCodeClipXtraRedemption) {
+      throw new Error("codeClip outbox recovery missing saveCodeClipXtraRedemption");
+    }
+    if (!recovery.clipXtraRedemption) {
+      throw new Error("codeClip outbox recovery missing ClipXtra redemption payload");
+    }
+    await saveCodeClipXtraRedemption(recovery.clipXtraRedemption);
+  },
+};
+
 async function recoverPersistenceActionEvent(event = {}, {
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
@@ -51,40 +89,13 @@ async function recoverPersistenceActionEvent(event = {}, {
   if (!failedSteps.length) return;
 
   for (const step of failedSteps) {
-    if (step === "interaction") {
-      if (!saveCodeClipInteraction) {
-        throw new Error("codeClip outbox recovery missing saveCodeClipInteraction");
-      }
-      if (!recovery.interaction) {
-        throw new Error("codeClip outbox recovery missing interaction payload");
-      }
-      await saveCodeClipInteraction(recovery.interaction);
-      continue;
-    }
-
-    if (step === "rewardAssignments") {
-      if (!saveCodeClipRewardAssignments) {
-        throw new Error("codeClip outbox recovery missing saveCodeClipRewardAssignments");
-      }
-      if (!recovery.rewardAssignmentSnapshot) {
-        throw new Error("codeClip outbox recovery missing reward assignment payload");
-      }
-      await saveCodeClipRewardAssignments(recovery.rewardAssignmentSnapshot);
-      continue;
-    }
-
-    if (step === "clipXtraRedemption") {
-      if (!saveCodeClipXtraRedemption) {
-        throw new Error("codeClip outbox recovery missing saveCodeClipXtraRedemption");
-      }
-      if (!recovery.clipXtraRedemption) {
-        throw new Error("codeClip outbox recovery missing ClipXtra redemption payload");
-      }
-      await saveCodeClipXtraRedemption(recovery.clipXtraRedemption);
-      continue;
-    }
-
-    throw new Error(`Unsupported codeClip persistence recovery step: ${step}`);
+    const handler = PERSISTENCE_RECOVERY_HANDLERS[step];
+    if (!handler) throw new Error(`Unsupported codeClip persistence recovery step: ${step}`);
+    await handler(recovery, {
+      saveCodeClipInteraction,
+      saveCodeClipRewardAssignments,
+      saveCodeClipXtraRedemption,
+    });
   }
 }
 
