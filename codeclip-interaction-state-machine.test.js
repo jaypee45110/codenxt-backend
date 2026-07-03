@@ -10,6 +10,10 @@ const {
   getCodeClipRewardAssignments,
   getCodeClipRewardAssignmentSummary,
   saveCodeClipOutboxEvent,
+  claimCodeClipOutboxEvents,
+  markCodeClipOutboxEventSucceeded,
+  markCodeClipOutboxEventFailed,
+  markCodeClipOutboxEventDeadLetter,
 } = require('./db');
 
 function assertAudienceIntentContract(intent, expectedType) {
@@ -1608,6 +1612,78 @@ test('saveCodeClipOutboxEvent persists internal outbox rows with payload shape',
   assert.equal(row.event_type, 'codeclip.persistence_action');
   assert.equal(row.retry, true);
   assert.equal(row.escalate, true);
+});
+
+test('codeClip outbox lifecycle helpers claim and mark retry states', async () => {
+  const calls = [];
+  const fakeClient = {
+    async query(sql, params = []) {
+      calls.push({ sql, params });
+      if (/FOR UPDATE SKIP LOCKED/.test(sql)) {
+        return { rows: [{ id: 100, status: 'processing' }] };
+      }
+      if (/status = 'succeeded'/.test(sql)) {
+        return { rows: [{ id: params[0], status: 'succeeded' }] };
+      }
+      if (/status = 'pending'/.test(sql) && /lastError/.test(sql)) {
+        return { rows: [{ id: params[0], status: 'pending' }] };
+      }
+      if (/status = 'dead_letter'/.test(sql)) {
+        return { rows: [{ id: params[0], status: 'dead_letter' }] };
+      }
+      return { rows: [] };
+    },
+  };
+  const now = '2026-07-01T00:00:00.000Z';
+  const availableAt = '2026-07-01T00:05:00.000Z';
+
+  assert.deepEqual(await claimCodeClipOutboxEvents({}, null), []);
+  assert.equal(await markCodeClipOutboxEventSucceeded('', fakeClient), null);
+  assert.equal(await markCodeClipOutboxEventFailed({}, fakeClient), null);
+  assert.equal(await markCodeClipOutboxEventDeadLetter({}, fakeClient), null);
+
+  const claimed = await claimCodeClipOutboxEvents({ limit: 999, now }, fakeClient);
+  const succeeded = await markCodeClipOutboxEventSucceeded(101, fakeClient);
+  const failed = await markCodeClipOutboxEventFailed({
+    id: 102,
+    error: 'temporary failure',
+    availableAt,
+  }, fakeClient);
+  const dead = await markCodeClipOutboxEventDeadLetter({
+    id: 103,
+    error: 'permanent failure',
+  }, fakeClient);
+
+  const claimCall = calls.find((call) => /FOR UPDATE SKIP LOCKED/.test(call.sql));
+  assert.ok(claimCall);
+  assert.match(claimCall.sql, /status = 'processing'/);
+  assert.match(claimCall.sql, /attempt_count = attempt_count \+ 1/);
+  assert.equal(claimCall.params[0], 100);
+  assert.equal(claimCall.params[1], now);
+
+  const successCall = calls.find((call) => /status = 'succeeded'/.test(call.sql));
+  assert.ok(successCall);
+  assert.equal(successCall.params[0], 101);
+
+  const failedCall = calls.find((call) => /status = 'pending'/.test(call.sql) && /lastError/.test(call.sql));
+  assert.ok(failedCall);
+  assert.match(failedCall.sql, /available_at = COALESCE\(\$2::timestamptz, NOW\(\)\)/);
+  assert.match(failedCall.sql, /lastFailedAt/);
+  assert.equal(failedCall.params[0], 102);
+  assert.equal(failedCall.params[1], availableAt);
+  assert.equal(failedCall.params[2], 'temporary failure');
+
+  const deadCall = calls.find((call) => /status = 'dead_letter'/.test(call.sql));
+  assert.ok(deadCall);
+  assert.match(deadCall.sql, /deadLetterReason/);
+  assert.match(deadCall.sql, /deadLetterAt/);
+  assert.equal(deadCall.params[0], 103);
+  assert.equal(deadCall.params[1], 'permanent failure');
+
+  assert.deepEqual(claimed, [{ id: 100, status: 'processing' }]);
+  assert.equal(succeeded.status, 'succeeded');
+  assert.equal(failed.status, 'pending');
+  assert.equal(dead.status, 'dead_letter');
 });
 
 test('codeClip reward assignment summary helper returns assignment counts', async () => {

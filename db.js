@@ -1631,6 +1631,112 @@ async function saveCodeClipOutboxEvent(event = {}, queryClient = pool) {
   return result.rows?.[0] || null;
 }
 
+function normalizeCodeClipOutboxLimit(limit = 10) {
+  const parsed = Number.parseInt(String(limit || 10), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 10;
+  return Math.min(parsed, 100);
+}
+
+async function claimCodeClipOutboxEvents({ limit = 10, now = null } = {}, queryClient = pool) {
+  if (!queryClient) return [];
+
+  await ensureCodeClipOutboxEventsTable(queryClient);
+
+  const safeLimit = normalizeCodeClipOutboxLimit(limit);
+  const result = await queryClient.query(
+    `
+      WITH candidates AS (
+        SELECT id
+        FROM codeclip_outbox_events
+        WHERE status = 'pending'
+          AND available_at <= COALESCE($2::timestamptz, NOW())
+        ORDER BY available_at ASC, created_at ASC
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE codeclip_outbox_events
+      SET
+        status = 'processing',
+        attempt_count = attempt_count + 1,
+        updated_at = NOW()
+      WHERE id IN (SELECT id FROM candidates)
+      RETURNING *
+    `,
+    [safeLimit, now]
+  );
+
+  return result.rows || [];
+}
+
+async function markCodeClipOutboxEventSucceeded(id, queryClient = pool) {
+  if (!queryClient || !id) return null;
+
+  await ensureCodeClipOutboxEventsTable(queryClient);
+
+  const result = await queryClient.query(
+    `
+      UPDATE codeclip_outbox_events
+      SET
+        status = 'succeeded',
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+    `,
+    [id]
+  );
+
+  return result.rows?.[0] || null;
+}
+
+async function markCodeClipOutboxEventFailed({ id, error = "", availableAt = null } = {}, queryClient = pool) {
+  if (!queryClient || !id) return null;
+
+  await ensureCodeClipOutboxEventsTable(queryClient);
+
+  const result = await queryClient.query(
+    `
+      UPDATE codeclip_outbox_events
+      SET
+        status = 'pending',
+        available_at = COALESCE($2::timestamptz, NOW()),
+        payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object(
+          'lastError', $3::text,
+          'lastFailedAt', NOW()
+        ),
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+    `,
+    [id, availableAt, String(error || "")]
+  );
+
+  return result.rows?.[0] || null;
+}
+
+async function markCodeClipOutboxEventDeadLetter({ id, error = "" } = {}, queryClient = pool) {
+  if (!queryClient || !id) return null;
+
+  await ensureCodeClipOutboxEventsTable(queryClient);
+
+  const result = await queryClient.query(
+    `
+      UPDATE codeclip_outbox_events
+      SET
+        status = 'dead_letter',
+        payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object(
+          'deadLetterReason', $2::text,
+          'deadLetterAt', NOW()
+        ),
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+    `,
+    [id, String(error || "")]
+  );
+
+  return result.rows?.[0] || null;
+}
+
 async function getCodeClipXtraRedemptionByToken(token) {
   if (!pool || !token) return null;
 
@@ -1776,6 +1882,10 @@ module.exports = {
   getCodeClipRewardAssignmentSummary,
   ensureCodeClipOutboxEventsTable,
   saveCodeClipOutboxEvent,
+  claimCodeClipOutboxEvents,
+  markCodeClipOutboxEventSucceeded,
+  markCodeClipOutboxEventFailed,
+  markCodeClipOutboxEventDeadLetter,
   getCodeClipXtraRedemptionByToken,
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
