@@ -375,6 +375,19 @@ function buildRoutingMatch(interactionContext) {
   });
 }
 
+function sanitizeRoutingCandidate(candidate = {}) {
+  return {
+    eventCode: String(candidate.eventCode || candidate.code || "").trim(),
+    eventId: candidate.eventId || candidate.id || null,
+    vertical: String(candidate.vertical || "").trim().toLowerCase(),
+    activationMethod: String(candidate.activationMethod || "").trim(),
+    activationKeyword: String(candidate.activationKeyword || "").trim(),
+    activationChannels: Array.isArray(candidate.activationChannels)
+      ? candidate.activationChannels.map((channel) => String(channel || "").trim()).filter(Boolean)
+      : [],
+  };
+}
+
 function buildNoCampaignMatchInteraction({
   eventCode,
   scanId,
@@ -422,6 +435,65 @@ function buildNoCampaignMatchInteraction({
     stateTransitions: interactionState.transitions,
     timestamp: new Date().toISOString(),
     routingOutcome: routingOutcome.outcome,
+  };
+}
+
+function buildRoutingConflictInteraction({
+  eventCode,
+  scanId,
+  audienceEntry,
+  candidates = [],
+  reason = "multiple_campaign_matches",
+}) {
+  const audienceEntrySnapshot = createAudienceEntrySnapshot(audienceEntry);
+  const sanitizedCandidates = (Array.isArray(candidates) ? candidates : [])
+    .map(sanitizeRoutingCandidate)
+    .filter((candidate) => candidate.eventCode || candidate.eventId);
+  const interactionContext = {
+    eventCode,
+    eventId: null,
+    audienceEntry: audienceEntrySnapshot,
+  };
+  const routingOutcome = createRoutingOutcome({
+    outcome: ROUTING_OUTCOMES.ROUTING_CONFLICT,
+    interactionContext,
+    reason,
+    candidates: sanitizedCandidates,
+  });
+  const interactionState = buildInteractionStateSnapshot([
+    buildValidInteractionStateTransition({
+      from: null,
+      to: INTERACTION_STATES.RECEIVED,
+      transition: INTERACTION_TRANSITIONS.RECEIVE,
+    }),
+    buildValidInteractionStateTransition({
+      from: INTERACTION_STATES.RECEIVED,
+      to: INTERACTION_STATES.UNMATCHED,
+      transition: INTERACTION_TRANSITIONS.NO_CAMPAIGN_MATCH,
+      reason,
+    }),
+  ], INTERACTION_STATES.UNMATCHED);
+
+  return {
+    interactionId: null,
+    eventCode,
+    eventId: null,
+    scanId,
+    audienceEntry: audienceEntrySnapshot,
+    audienceIntent: createAudienceIntentSnapshot(audienceEntry),
+    audienceContext: createAudienceContextSnapshot(interactionContext, {
+      vertical: null,
+      activationMethod: "",
+      activationKeyword: "",
+      activationChannels: [],
+      rewards: {},
+    }),
+    state: interactionState.state,
+    stateTransitions: interactionState.transitions,
+    timestamp: new Date().toISOString(),
+    routingOutcome: routingOutcome.outcome,
+    reason: routingOutcome.reason,
+    candidates: routingOutcome.candidates || [],
   };
 }
 
@@ -1007,6 +1079,7 @@ module.exports = {
   validateClipXtraToken,
   redeemClipXtraToken,
   buildNoCampaignMatchInteraction,
+  buildRoutingConflictInteraction,
   normalizeScanAudienceEntry,
   normalizeKeywordAudienceEntry,
   normalizeAudienceEntry,

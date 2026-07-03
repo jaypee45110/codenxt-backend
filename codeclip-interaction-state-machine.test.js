@@ -791,6 +791,86 @@ test('codeClip no-match interaction uses unmatched state machine data', () => {
   assert.equal(interaction.rewardAssignments, undefined);
 });
 
+test('codeClip routing conflict interaction uses sanitized unmatched state machine data', () => {
+  const eventCode = 'CC-CONFLICT-STATE-TEST';
+  const scanId = 'scan-conflict-state-test';
+
+  const interaction = codeClipService.buildRoutingConflictInteraction({
+    eventCode,
+    scanId,
+    audienceEntry: {
+      entryCode: eventCode,
+      scanId,
+      requestedVertical: 'codeclip',
+      source: 'scan',
+      transport: 'http',
+      userAgent: 'test-agent',
+      ip: '127.0.0.1',
+      rawPayload: { ignored: true },
+      receivedAt: '2026-07-01T00:00:00.000Z',
+    },
+    candidates: [
+      {
+        eventCode: 'CC-CONFLICT-A',
+        eventId: 'event-a',
+        vertical: ' CODECLIP ',
+        activationMethod: 'keyword',
+        activationKeyword: ' GOLD ',
+        activationChannels: [' Instagram ', '', 'Messenger'],
+        ip: '127.0.0.1',
+        userAgent: 'candidate-agent',
+        rawPayload: { ignored: true },
+      },
+      {
+        code: 'CC-CONFLICT-B',
+        id: 'event-b',
+        vertical: 'codeclip',
+        providerPayload: { ignored: true },
+      },
+    ],
+  });
+
+  assert.equal(interaction.eventCode, eventCode);
+  assert.equal(interaction.eventId, null);
+  assert.equal(interaction.scanId, scanId);
+  assert.equal(interaction.state, 'unmatched');
+  assert.equal(interaction.routingOutcome, 'ROUTING_CONFLICT');
+  assert.equal(interaction.reason, 'multiple_campaign_matches');
+  assert.ok(Array.isArray(interaction.stateTransitions));
+  assert.deepEqual(
+    interaction.stateTransitions.map((transition) => transition.to),
+    ['received', 'unmatched']
+  );
+  assert.equal(interaction.stateTransitions[1].reason, 'multiple_campaign_matches');
+  assert.equal(interaction.audienceEntry.entryCode, eventCode);
+  assert.equal(interaction.audienceEntry.userAgent, undefined);
+  assert.equal(interaction.audienceEntry.ip, undefined);
+  assert.equal(interaction.audienceEntry.rawPayload, undefined);
+  assert.deepEqual(interaction.candidates, [
+    {
+      eventCode: 'CC-CONFLICT-A',
+      eventId: 'event-a',
+      vertical: 'codeclip',
+      activationMethod: 'keyword',
+      activationKeyword: 'GOLD',
+      activationChannels: ['Instagram', 'Messenger'],
+    },
+    {
+      eventCode: 'CC-CONFLICT-B',
+      eventId: 'event-b',
+      vertical: 'codeclip',
+      activationMethod: '',
+      activationKeyword: '',
+      activationChannels: [],
+    },
+  ]);
+  assert.equal(interaction.candidates[0].ip, undefined);
+  assert.equal(interaction.candidates[0].userAgent, undefined);
+  assert.equal(interaction.candidates[0].rawPayload, undefined);
+  assert.equal(interaction.candidates[1].providerPayload, undefined);
+  assert.equal(interaction.rewardAssignments, undefined);
+});
+
 test('codeClip scan EntryAdapter normalizes sanitized AudienceEntry and AudienceIntent', () => {
   const valid = codeClipService.normalizeScanAudienceEntry({
     entryCode: 'CC-ENTRY-ADAPTER',
