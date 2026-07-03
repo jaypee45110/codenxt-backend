@@ -399,6 +399,8 @@ test('successful codeClip scan builds validated Interaction state machine data',
   assert.equal(result.payload.persistenceDecision, undefined);
   assert.equal(result.payload.persistenceGuaranteePolicy, undefined);
   assert.equal(result.payload.persistenceAction, undefined);
+  assert.equal(result.payload.recovery, undefined);
+  assert.equal(result.payload.outbox, undefined);
 
   assert.ok(eventScanPayload, 'event scan payload should be built');
   assert.equal(eventScanPayload.finalTier, 'clipPlus');
@@ -552,6 +554,21 @@ test('codeClip scan records internal persistence status when COAS persistence fa
     state: 'processed',
     tier: 'openClip',
   });
+  assert.ok(outboxEvents[0].payload.recovery);
+  assert.ok(outboxEvents[0].payload.recovery.interaction);
+  assert.notEqual(outboxEvents[0].payload.recovery.interaction, eventScanPayload.interaction);
+  assert.equal(outboxEvents[0].payload.recovery.interaction.eventCode, eventCode);
+  assert.equal(outboxEvents[0].payload.recovery.interaction.eventId, eventId);
+  assert.equal(outboxEvents[0].payload.recovery.interaction.scanId, scanId);
+  assert.equal(outboxEvents[0].payload.recovery.interaction.routingOutcome, 'MATCH');
+  assert.equal(outboxEvents[0].payload.recovery.interaction.state, 'processed');
+  assert.ok(outboxEvents[0].payload.recovery.interaction.audienceEntry);
+  assert.ok(outboxEvents[0].payload.recovery.interaction.audienceIntent);
+  assert.ok(outboxEvents[0].payload.recovery.interaction.audienceContext);
+  assert.ok(outboxEvents[0].payload.recovery.rewardAssignmentSnapshot);
+  assert.notEqual(outboxEvents[0].payload.recovery.rewardAssignmentSnapshot, eventScanPayload.interaction.rewardAssignmentSnapshot);
+  assert.equal(outboxEvents[0].payload.recovery.rewardAssignmentSnapshot.eventCode, eventCode);
+  assert.equal(outboxEvents[0].payload.recovery.rewardAssignmentSnapshot.scanId, scanId);
 });
 
 test('successful codeClip keyword entry builds internal Interaction without event scan persistence', async () => {
@@ -713,6 +730,7 @@ test('successful codeClip keyword entry builds internal Interaction without even
   assert.equal(result.payload.persistenceDecision, undefined);
   assert.equal(result.payload.persistenceGuaranteePolicy, undefined);
   assert.equal(result.payload.persistenceAction, undefined);
+  assert.equal(result.payload.recovery, undefined);
   assert.equal(result.payload.outbox, undefined);
 });
 
@@ -721,6 +739,7 @@ test('codeClip keyword entry writes outbox event when persistence action require
   const eventId = 'event-keyword-outbox';
   const messageId = 'message-keyword-outbox';
   const outboxEvents = [];
+  let runtimeInteraction = null;
 
   const result = await codeClipService.handleCodeClipKeywordEntry({
     event: {
@@ -757,7 +776,8 @@ test('codeClip keyword entry writes outbox event when persistence action require
         },
       },
     },
-    async saveCodeClipInteraction() {
+    async saveCodeClipInteraction(interaction) {
+      runtimeInteraction = interaction;
       throw new Error('keyword interaction persistence failed');
     },
     async saveCodeClipRewardAssignments() {
@@ -797,6 +817,21 @@ test('codeClip keyword entry writes outbox event when persistence action require
     state: 'processed',
     tier: 'openClip',
   });
+  assert.ok(outboxEvents[0].payload.recovery);
+  assert.ok(outboxEvents[0].payload.recovery.interaction);
+  assert.notEqual(outboxEvents[0].payload.recovery.interaction, runtimeInteraction);
+  assert.equal(outboxEvents[0].payload.recovery.interaction.eventCode, eventCode);
+  assert.equal(outboxEvents[0].payload.recovery.interaction.eventId, eventId);
+  assert.equal(outboxEvents[0].payload.recovery.interaction.scanId, messageId);
+  assert.equal(outboxEvents[0].payload.recovery.interaction.routingOutcome, 'MATCH');
+  assert.equal(outboxEvents[0].payload.recovery.interaction.state, 'processed');
+  assert.ok(outboxEvents[0].payload.recovery.interaction.audienceEntry);
+  assert.ok(outboxEvents[0].payload.recovery.interaction.audienceIntent);
+  assert.ok(outboxEvents[0].payload.recovery.interaction.audienceContext);
+  assert.ok(outboxEvents[0].payload.recovery.rewardAssignmentSnapshot);
+  assert.notEqual(outboxEvents[0].payload.recovery.rewardAssignmentSnapshot, runtimeInteraction.rewardAssignmentSnapshot);
+  assert.equal(outboxEvents[0].payload.recovery.rewardAssignmentSnapshot.eventCode, eventCode);
+  assert.equal(outboxEvents[0].payload.recovery.rewardAssignmentSnapshot.scanId, messageId);
 });
 
 test('codeClip keyword entry rejects missing keyword without persistence', async () => {

@@ -827,6 +827,9 @@ async function savePersistenceActionOutbox({ interaction = {}, saveCodeClipOutbo
   if (!saveCodeClipOutboxEvent || (!action.retry && !action.escalate)) return null;
 
   try {
+    const recoveryInteractionSnapshot = JSON.parse(JSON.stringify(interaction || null));
+    const recoveryRewardAssignmentSnapshot = JSON.parse(JSON.stringify(interaction.rewardAssignmentSnapshot || null));
+
     return await saveCodeClipOutboxEvent({
       eventType: "codeclip.persistence_action",
       eventCode: interaction.eventCode,
@@ -852,6 +855,10 @@ async function savePersistenceActionOutbox({ interaction = {}, saveCodeClipOutbo
           routingOutcome: interaction.routingOutcome,
           state: interaction.state,
           tier: interaction.tier,
+        },
+        recovery: {
+          interaction: recoveryInteractionSnapshot,
+          rewardAssignmentSnapshot: recoveryRewardAssignmentSnapshot,
         },
       },
     });
