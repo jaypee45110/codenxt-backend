@@ -129,7 +129,12 @@ function normalizeProviderKeywordIngress(provider, input = {}) {
   return adapter(input);
 }
 
+function getRegisteredKeywordProviderAdapters() {
+  return Object.keys(KEYWORD_PROVIDER_ADAPTERS).sort();
+}
+
 module.exports = {
+  getRegisteredKeywordProviderAdapters,
   normalizeMetaKeywordProvider,
   normalizeProviderKeywordIngress,
   normalizeSmsKeywordProvider,

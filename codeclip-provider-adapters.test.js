@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  getRegisteredKeywordProviderAdapters,
   normalizeMetaKeywordProvider,
   normalizeProviderKeywordIngress,
   normalizeSmsKeywordProvider,
@@ -18,6 +19,19 @@ function assertProviderKeywordContract(result) {
   assert.ok(Array.isArray(result.warnings));
   assert.ok(Array.isArray(result.errors));
 }
+
+test('codeClip provider keyword registry exposes registered provider names only', () => {
+  const providers = getRegisteredKeywordProviderAdapters();
+
+  assert.deepEqual(providers, ['meta', 'sms', 'test']);
+  assert.deepEqual([...providers].sort(), providers);
+
+  for (const provider of providers) {
+    assert.equal(provider, provider.toLowerCase());
+    assert.equal(typeof provider, 'string');
+    assert.notEqual(provider.trim(), '');
+  }
+});
 
 test('codeClip test ProviderAdapter normalizes keyword provider input', () => {
   const valid = normalizeTestProviderKeyword({
