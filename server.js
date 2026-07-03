@@ -1,4 +1,5 @@
 const codeClipVertical = require("./verticals/codeclip");
+const codePodVertical = require("./verticals/codepod");
 const { processCodeClipOutboxBatch } = require("./verticals/codeclip/outbox-worker");
 require("dotenv").config();
 
@@ -4598,6 +4599,15 @@ if (vertical === "codeclip") {
 }
 
 const isCodePodScan = vertical === "codepod" || String(event?.vertical || "").trim().toLowerCase() === "codepod";
+const codePodAudienceEntry = isCodePodScan
+  ? codePodVertical.service.normalizeCodePodScanAudienceEntry({
+    eventCode,
+    eventId,
+    scanId,
+    requestedVertical: vertical,
+  })
+  : null;
+void codePodAudienceEntry;
 let codePodSouvenirAssignment = null;
 let goldXtraAssignment = null;
 let tierLimits = null;

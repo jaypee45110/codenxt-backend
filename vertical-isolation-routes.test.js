@@ -493,6 +493,7 @@ test('POST /scan uses stored codePod event vertical when request vertical is mis
     assert.equal(scan.eventCode, code);
     assert.ok(scan.digitalSouvenir && typeof scan.digitalSouvenir === 'object');
     assert.equal(Object.hasOwn(scan, 'tierLimits'), false);
+    assert.equal(Object.hasOwn(scan, 'audienceEntry'), false);
   });
 });
 
