@@ -1,4 +1,5 @@
 const codeClipVertical = require("./verticals/codeclip");
+const { processCodeClipOutboxBatch } = require("./verticals/codeclip/outbox-worker");
 require("dotenv").config();
 
 const REDIS_ENABLED = !!process.env.REDIS_URL;
@@ -35,6 +36,10 @@ const {
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
   saveCodeClipOutboxEvent,
+  claimCodeClipOutboxEvents,
+  markCodeClipOutboxEventSucceeded,
+  markCodeClipOutboxEventFailed,
+  markCodeClipOutboxEventDeadLetter,
   getCodeClipInteractions,
   getCodeClipRewardAssignments,
   getCodeClipRewardAssignmentSummary,
@@ -54,6 +59,47 @@ testDbConnection().catch((error) => {
 ensureCodePodGoldXtraRedemptionsTable().catch((error) => {
   console.error("CODEPOD GOLDXTRA TABLE INIT FAILED:", error.message);
 });
+
+function parsePositiveInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function startCodeClipOutboxWorker() {
+  if (process.env.CODECLIP_OUTBOX_WORKER_ENABLED !== "1") return null;
+
+  const intervalMs = parsePositiveInteger(process.env.CODECLIP_OUTBOX_WORKER_INTERVAL_MS, 30000);
+  const limit = parsePositiveInteger(process.env.CODECLIP_OUTBOX_WORKER_LIMIT, 10);
+  let isRunning = false;
+
+  const runBatch = async () => {
+    if (isRunning) return;
+    isRunning = true;
+
+    try {
+      const summary = await processCodeClipOutboxBatch({
+        limit,
+        claimCodeClipOutboxEvents,
+        markCodeClipOutboxEventSucceeded,
+        markCodeClipOutboxEventFailed,
+        markCodeClipOutboxEventDeadLetter,
+      });
+
+      if (summary.claimed > 0 || summary.failed > 0) {
+        console.log("codeClip outbox worker summary", summary);
+      }
+    } catch (error) {
+      console.warn("codeClip outbox worker failed:", error.message);
+    } finally {
+      isRunning = false;
+    }
+  };
+
+  const interval = setInterval(runBatch, intervalMs);
+  console.log(`codeClip outbox worker enabled intervalMs=${intervalMs} limit=${limit}`);
+  return interval;
+}
 
 function normalizeRewardDelivery(input = {}) {
   return {
@@ -6423,6 +6469,8 @@ if (require.main === module) {
     } else {
       console.log("Redis disabled - running in memory mode");
     }
+
+    startCodeClipOutboxWorker();
   });
 }
 
