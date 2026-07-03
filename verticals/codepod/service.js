@@ -16,6 +16,7 @@ function normalizeCodePodScanAudienceEntry(input = {}) {
     return {
       ok: false,
       audienceEntry: null,
+      audienceIntent: null,
       warnings,
       errors: [
         {
@@ -51,9 +52,21 @@ function normalizeCodePodScanAudienceEntry(input = {}) {
   if (scanId) audienceEntry.scanId = scanId;
   if (receivedAt) audienceEntry.receivedAt = receivedAt;
 
+  const audienceIntent = {
+    vertical: "codepod",
+    intentType: "scan",
+    entryCode,
+    eventCode: entryCode,
+    source: "scan",
+    transport: "http",
+  };
+
+  if (scanId) audienceIntent.scanId = scanId;
+
   return {
     ok: true,
     audienceEntry,
+    audienceIntent,
     warnings,
     errors: [],
   };

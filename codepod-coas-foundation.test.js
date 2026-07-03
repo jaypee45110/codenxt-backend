@@ -33,11 +33,25 @@ test('codePod COAS foundation normalizes scan AudienceEntry', () => {
       vertical: 'codepod',
     },
   });
+  assert.deepEqual(result.audienceIntent, {
+    vertical: 'codepod',
+    intentType: 'scan',
+    entryCode: 'CP-FOUNDATION',
+    eventCode: 'CP-FOUNDATION',
+    scanId: 'scan-codepod-foundation',
+    source: 'scan',
+    transport: 'http',
+  });
   assert.equal(result.audienceEntry.ip, undefined);
   assert.equal(result.audienceEntry.userAgent, undefined);
   assert.equal(result.audienceEntry.rawPayload, undefined);
   assert.equal(result.audienceEntry.phone, undefined);
   assert.equal(result.audienceEntry.handle, undefined);
+  assert.equal(result.audienceIntent.ip, undefined);
+  assert.equal(result.audienceIntent.userAgent, undefined);
+  assert.equal(result.audienceIntent.rawPayload, undefined);
+  assert.equal(result.audienceIntent.phone, undefined);
+  assert.equal(result.audienceIntent.handle, undefined);
 });
 
 test('codePod COAS foundation rejects missing entry code', () => {
@@ -47,6 +61,7 @@ test('codePod COAS foundation rejects missing entry code', () => {
 
   assert.equal(result.ok, false);
   assert.equal(result.audienceEntry, null);
+  assert.equal(result.audienceIntent, null);
   assert.deepEqual(result.warnings, []);
   assert.deepEqual(
     result.errors.map((error) => error.code),
@@ -62,6 +77,14 @@ test('codePod COAS foundation warns on missing scanId', () => {
   assert.equal(result.ok, true);
   assert.equal(result.audienceEntry.entryCode, 'CP-MISSING-SCAN');
   assert.equal(result.audienceEntry.scanId, undefined);
+  assert.deepEqual(result.audienceIntent, {
+    vertical: 'codepod',
+    intentType: 'scan',
+    entryCode: 'CP-MISSING-SCAN',
+    eventCode: 'CP-MISSING-SCAN',
+    source: 'scan',
+    transport: 'http',
+  });
   assert.deepEqual(
     result.warnings.map((warning) => warning.code),
     ['SCAN_ID_MISSING']
@@ -77,4 +100,5 @@ test('codePod COAS foundation defaults requestedVertical to codepod', () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.audienceEntry.requestedVertical, 'codepod');
+  assert.equal(result.audienceIntent.vertical, 'codepod');
 });
