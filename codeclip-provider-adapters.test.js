@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  normalizeMetaKeywordProvider,
   normalizeProviderKeywordIngress,
   normalizeSmsKeywordProvider,
   normalizeTestProviderKeyword,
@@ -178,6 +179,112 @@ test('codeClip SMS ProviderAdapter normalizes keyword provider input', () => {
   );
 });
 
+test('codeClip Meta ProviderAdapter normalizes keyword provider input without live integration', () => {
+  const valid = normalizeMetaKeywordProvider({
+    eventCode: ' CC ',
+    text: ' GOLD ',
+    messageId: ' meta-1 ',
+    rawPayload: { entry: [] },
+    entry: [{ id: 'page-1' }],
+    messaging: [{ message: { text: 'GOLD' } }],
+    sender: { id: 'sender-1' },
+    recipient: { id: 'page-1' },
+    profileId: 'profile-123',
+    psid: 'psid-123',
+    phone: '+4712345678',
+    email: 'participant@example.com',
+    handle: '@participant',
+    userAgent: 'test-agent',
+    ip: '127.0.0.1',
+  });
+
+  assertProviderKeywordContract(valid);
+  assert.equal(valid.ok, true);
+  assert.equal(valid.eventCode, 'CC');
+  assert.equal(valid.keyword, 'GOLD');
+  assert.equal(valid.messageId, 'meta-1');
+  assert.deepEqual(valid.warnings, []);
+  assert.deepEqual(valid.errors, []);
+  assert.equal(valid.rawPayload, undefined);
+  assert.equal(valid.entry, undefined);
+  assert.equal(valid.messaging, undefined);
+  assert.equal(valid.sender, undefined);
+  assert.equal(valid.recipient, undefined);
+  assert.equal(valid.profileId, undefined);
+  assert.equal(valid.psid, undefined);
+  assert.equal(valid.phone, undefined);
+  assert.equal(valid.email, undefined);
+  assert.equal(valid.handle, undefined);
+  assert.equal(valid.userAgent, undefined);
+  assert.equal(valid.ip, undefined);
+
+  const messageTextFallback = normalizeMetaKeywordProvider({
+    eventCode: 'CC',
+    messageText: 'SILVER',
+    providerEventId: ' meta-provider-event-1 ',
+  });
+  assertProviderKeywordContract(messageTextFallback);
+  assert.equal(messageTextFallback.ok, true);
+  assert.equal(messageTextFallback.keyword, 'SILVER');
+  assert.equal(messageTextFallback.messageId, 'meta-provider-event-1');
+  assert.equal(messageTextFallback.providerEventId, undefined);
+
+  const bodyFallback = normalizeMetaKeywordProvider({
+    eventCode: 'CC',
+    body: 'BRONZE',
+    mid: ' meta-mid-1 ',
+  });
+  assertProviderKeywordContract(bodyFallback);
+  assert.equal(bodyFallback.ok, true);
+  assert.equal(bodyFallback.keyword, 'BRONZE');
+  assert.equal(bodyFallback.messageId, 'meta-mid-1');
+  assert.equal(bodyFallback.mid, undefined);
+
+  const nestedMessageFallback = normalizeMetaKeywordProvider({
+    eventCode: 'CC',
+    text: 'OPEN',
+    message: { mid: ' nested-meta-mid-1 ' },
+  });
+  assertProviderKeywordContract(nestedMessageFallback);
+  assert.equal(nestedMessageFallback.ok, true);
+  assert.equal(nestedMessageFallback.keyword, 'OPEN');
+  assert.equal(nestedMessageFallback.messageId, 'nested-meta-mid-1');
+  assert.equal(nestedMessageFallback.message, undefined);
+
+  const missingEventCode = normalizeMetaKeywordProvider({
+    text: 'GOLD',
+    messageId: 'meta-1',
+  });
+  assertProviderKeywordContract(missingEventCode);
+  assert.equal(missingEventCode.ok, false);
+  assert.deepEqual(
+    missingEventCode.errors.map((error) => error.code),
+    ['EVENT_CODE_REQUIRED']
+  );
+
+  const missingKeyword = normalizeMetaKeywordProvider({
+    eventCode: 'CC',
+    messageId: 'meta-1',
+  });
+  assertProviderKeywordContract(missingKeyword);
+  assert.equal(missingKeyword.ok, false);
+  assert.deepEqual(
+    missingKeyword.errors.map((error) => error.code),
+    ['KEYWORD_REQUIRED']
+  );
+
+  const missingMessageId = normalizeMetaKeywordProvider({
+    eventCode: 'CC',
+    text: 'GOLD',
+  });
+  assertProviderKeywordContract(missingMessageId);
+  assert.equal(missingMessageId.ok, false);
+  assert.deepEqual(
+    missingMessageId.errors.map((error) => error.code),
+    ['MESSAGE_ID_REQUIRED']
+  );
+});
+
 test('codeClip provider keyword ingress selects registered ProviderAdapter', () => {
   const testProvider = normalizeProviderKeywordIngress(' test ', {
     eventCode: ' CC ',
@@ -224,6 +331,24 @@ test('codeClip provider keyword ingress selects registered ProviderAdapter', () 
   assert.equal(smsProvider.From, undefined);
   assert.equal(smsProvider.provider, undefined);
   assert.equal(smsProvider.rawPayload, undefined);
+
+  const metaProvider = normalizeProviderKeywordIngress(' Meta ', {
+    eventCode: ' CC ',
+    messageText: ' BRONZE ',
+    providerEventId: ' meta-ingress-event-1 ',
+    rawPayload: { entry: [] },
+    sender: { id: 'sender-1' },
+  });
+
+  assertProviderKeywordContract(metaProvider);
+  assert.equal(metaProvider.ok, true);
+  assert.equal(metaProvider.eventCode, 'CC');
+  assert.equal(metaProvider.keyword, 'BRONZE');
+  assert.equal(metaProvider.messageId, 'meta-ingress-event-1');
+  assert.deepEqual(metaProvider.warnings, []);
+  assert.deepEqual(metaProvider.errors, []);
+  assert.equal(metaProvider.rawPayload, undefined);
+  assert.equal(metaProvider.sender, undefined);
 
   const providerEventFallback = normalizeProviderKeywordIngress('sms', {
     eventCode: 'CC',

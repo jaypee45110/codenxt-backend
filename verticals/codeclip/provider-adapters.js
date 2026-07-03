@@ -60,7 +60,45 @@ function normalizeSmsKeywordProvider(input = {}) {
   };
 }
 
+function normalizeMetaKeywordProvider(input = {}) {
+  const eventCode = String(input.eventCode || "").trim();
+  const keyword = String(input.text || input.messageText || input.body || "").trim();
+  const messageId = String(
+    input.messageId ||
+    input.providerEventId ||
+    input.mid ||
+    input.message?.mid ||
+    ""
+  ).trim();
+  const errors = [];
+
+  if (!eventCode) errors.push({ code: "EVENT_CODE_REQUIRED" });
+  if (!keyword) errors.push({ code: "KEYWORD_REQUIRED" });
+  if (!messageId) errors.push({ code: "MESSAGE_ID_REQUIRED" });
+
+  if (errors.length) {
+    return {
+      ok: false,
+      eventCode,
+      keyword,
+      messageId,
+      warnings: [],
+      errors,
+    };
+  }
+
+  return {
+    ok: true,
+    eventCode,
+    keyword,
+    messageId,
+    warnings: [],
+    errors: [],
+  };
+}
+
 const KEYWORD_PROVIDER_ADAPTERS = {
+  meta: normalizeMetaKeywordProvider,
   sms: normalizeSmsKeywordProvider,
   test: normalizeTestProviderKeyword,
 };
@@ -92,6 +130,7 @@ function normalizeProviderKeywordIngress(provider, input = {}) {
 }
 
 module.exports = {
+  normalizeMetaKeywordProvider,
   normalizeProviderKeywordIngress,
   normalizeSmsKeywordProvider,
   normalizeTestProviderKeyword,
