@@ -3289,6 +3289,12 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
     }
 
     const { normalizeProviderKeywordIngress } = require("./verticals/codeclip/provider-adapters");
+    const {
+      buildProviderKeywordIdempotencyKey,
+      claimProviderKeywordIdempotency,
+      readProviderKeywordResponse,
+      recordProviderKeywordResponse,
+    } = require("./verticals/codeclip/provider-idempotency");
     const normalizedProviderInput = normalizeProviderKeywordIngress(req.params.provider, req.body || {});
 
     if (!normalizedProviderInput.ok) {
@@ -3296,6 +3302,32 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
     }
 
     const { eventCode, keyword, messageId } = normalizedProviderInput;
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider: req.params.provider,
+      eventCode,
+      messageId,
+    });
+    const idempotencyClaim = process.env.REDIS_URL
+      ? await claimProviderKeywordIdempotency({
+          redis,
+          key: idempotencyKey,
+        })
+      : { enabled: false, claimed: true };
+
+    if (idempotencyClaim.enabled && !idempotencyClaim.claimed) {
+      const storedResponse = await readProviderKeywordResponse({
+        redis,
+        key: idempotencyKey,
+      });
+
+      return res.status(200).json(storedResponse || {
+        success: true,
+        duplicate: true,
+        eventCode,
+        messageId,
+      });
+    }
+
     let eventId = null;
     let meta = Object.values(events).find(
       (item) => item?.code === eventCode && String(item?.vertical || "").trim().toLowerCase() === "codeclip"
@@ -3344,6 +3376,14 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
     });
+
+    if (idempotencyClaim.enabled) {
+      await recordProviderKeywordResponse({
+        redis,
+        key: idempotencyKey,
+        payload: result.payload,
+      });
+    }
 
     return res.status(result.httpStatus).json(result.payload);
   } catch (err) {
