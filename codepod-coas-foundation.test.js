@@ -3,6 +3,120 @@ const assert = require('node:assert/strict');
 
 const codePod = require('./verticals/codepod');
 
+test('codePod service normalizes DigitalSouvenir object input', () => {
+  const goldXtra = { enabled: true, partner: 'ACME' };
+  const result = codePod.service.normalizeCodePodDigitalSouvenir({
+    general: {
+      enabled: 'true',
+      title: ' General clip ',
+      url: ' https://cdn.example/general.png ',
+      fileName: ' general.png ',
+      quantity: '3.8',
+    },
+    silver: {
+      enabled: true,
+      title: ' Silver clip ',
+      type: ' video ',
+      contentUrl: ' https://cdn.example/silver.mp4 ',
+      contentFileName: ' silver.mp4 ',
+      quantity: -2,
+    },
+    gold: {
+      enabled: false,
+      quantity: 'not-a-number',
+    },
+    goldXtra,
+  });
+
+  assert.deepEqual(result.general, {
+    enabled: true,
+    title: 'General clip',
+    type: 'image',
+    contentUrl: 'https://cdn.example/general.png',
+    contentFileName: 'general.png',
+    quantity: 3,
+  });
+  assert.deepEqual(result.silver, {
+    enabled: true,
+    title: 'Silver clip',
+    type: 'video',
+    contentUrl: 'https://cdn.example/silver.mp4',
+    contentFileName: 'silver.mp4',
+    quantity: 0,
+  });
+  assert.deepEqual(result.gold, {
+    enabled: false,
+    title: '',
+    type: 'image',
+    contentUrl: '',
+    contentFileName: '',
+    quantity: 0,
+  });
+  assert.equal(result.goldXtra, goldXtra);
+});
+
+test('codePod service normalizes DigitalSouvenir JSON string input', () => {
+  const result = codePod.service.normalizeCodePodDigitalSouvenir(JSON.stringify({
+    general: {
+      enabled: true,
+      title: ' JSON souvenir ',
+      url: ' https://cdn.example/json.png ',
+      fileName: ' json.png ',
+      quantity: '2',
+    },
+  }));
+
+  assert.deepEqual(result.general, {
+    enabled: true,
+    title: 'JSON souvenir',
+    type: 'image',
+    contentUrl: 'https://cdn.example/json.png',
+    contentFileName: 'json.png',
+    quantity: 2,
+  });
+  assert.deepEqual(result.silver, {
+    enabled: false,
+    title: '',
+    type: 'image',
+    contentUrl: '',
+    contentFileName: '',
+    quantity: 0,
+  });
+  assert.deepEqual(result.goldXtra, {});
+});
+
+test('codePod service normalizes invalid DigitalSouvenir JSON string to defaults', () => {
+  const result = codePod.service.normalizeCodePodDigitalSouvenir('{invalid-json');
+
+  assert.deepEqual(result, {
+    general: {
+      enabled: false,
+      title: '',
+      type: 'image',
+      contentUrl: '',
+      contentFileName: '',
+      quantity: 0,
+    },
+    silver: {
+      enabled: false,
+      title: '',
+      type: 'image',
+      contentUrl: '',
+      contentFileName: '',
+      quantity: 0,
+    },
+    gold: {
+      enabled: false,
+      title: '',
+      type: 'image',
+      contentUrl: '',
+      contentFileName: '',
+      quantity: 0,
+    },
+    goldXtra: {},
+  });
+});
+
 test('codePod COAS foundation normalizes scan AudienceEntry', () => {
   const result = codePod.service.normalizeCodePodScanAudienceEntry({
     eventCode: ' CP-FOUNDATION ',

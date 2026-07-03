@@ -161,29 +161,7 @@ function parseCodePodPartnerReward(input = {}) {
 }
 
 function normalizeCodePodDigitalSouvenir(input = {}) {
-  if (typeof input === "string") {
-    try {
-      return normalizeCodePodDigitalSouvenir(JSON.parse(input));
-    } catch {
-      return normalizeCodePodDigitalSouvenir({});
-    }
-  }
-
-  const normalizeTier = (tier = {}) => ({
-    enabled: tier.enabled === true || tier.enabled === "true",
-    title: String(tier.title || "").trim(),
-    type: String(tier.type || "image").trim(),
-    contentUrl: String(tier.contentUrl || tier.url || "").trim(),
-    contentFileName: String(tier.contentFileName || tier.fileName || "").trim(),
-    quantity: Math.max(0, Math.floor(Number(tier.quantity || 0) || 0)),
-  });
-
-  return {
-    general: normalizeTier(input.general || {}),
-    silver: normalizeTier(input.silver || {}),
-    gold: normalizeTier(input.gold || {}),
-    goldXtra: input.goldXtra || {},
-  };
+  return codePodVertical.service.normalizeCodePodDigitalSouvenir(input);
 }
 
 async function assignCodePodDigitalSouvenirTier(eventCode, scanId, digitalSouvenir, event = {}) {
