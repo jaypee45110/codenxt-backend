@@ -228,7 +228,7 @@ test('POST /codeclip/keyword-entry accepts internal keyword entry without exposi
 test('POST /codeclip/test-provider/keyword maps provider-like input without exposing COAS internals', async () => {
   await withTestServer(async (baseUrl) => {
     const code = `CC-TEST-PROVIDER-KEYWORD-${Date.now()}`;
-    const messageId = `provider-message-${Date.now()}`;
+    const providerEventId = `provider-event-${Date.now()}`;
     const createResponse = await fetch(`${baseUrl}/event`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -259,7 +259,7 @@ test('POST /codeclip/test-provider/keyword maps provider-like input without expo
       body: JSON.stringify({
         eventCode: code,
         text: ' GOLD ',
-        messageId,
+        providerEventId,
       }),
     });
     const keywordEntry = await keywordResponse.json();
@@ -267,7 +267,7 @@ test('POST /codeclip/test-provider/keyword maps provider-like input without expo
     assert.equal(keywordResponse.ok, true);
     assert.equal(keywordEntry.success, true);
     assert.equal(keywordEntry.eventCode, code);
-    assert.equal(keywordEntry.messageId, messageId);
+    assert.equal(keywordEntry.messageId, providerEventId);
     assert.equal(Object.hasOwn(keywordEntry, 'audienceEntry'), false);
     assert.equal(Object.hasOwn(keywordEntry, 'audienceIntent'), false);
     assert.equal(Object.hasOwn(keywordEntry, 'audienceContext'), false);

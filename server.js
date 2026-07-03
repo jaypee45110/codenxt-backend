@@ -3215,8 +3215,8 @@ app.post("/codeclip/keyword-entry", async (req, res) => {
 
 app.post("/codeclip/test-provider/keyword", async (req, res) => {
   try {
-    const { normalizeTestProviderKeyword } = require("./verticals/codeclip/provider-adapters");
-    const normalizedProviderInput = normalizeTestProviderKeyword(req.body || {});
+    const { normalizeProviderKeywordIngress } = require("./verticals/codeclip/provider-adapters");
+    const normalizedProviderInput = normalizeProviderKeywordIngress("test", req.body || {});
 
     if (!normalizedProviderInput.ok) {
       return res.status(400).json({ ok: false, error: "eventCode, text and messageId are required" });
