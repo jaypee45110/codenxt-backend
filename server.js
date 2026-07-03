@@ -34,6 +34,7 @@ const {
   saveCodeClipXtraRedemption,
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
+  saveCodeClipOutboxEvent,
   getCodeClipInteractions,
   getCodeClipRewardAssignments,
   getCodeClipRewardAssignmentSummary,
@@ -3204,6 +3205,7 @@ app.post("/codeclip/keyword-entry", async (req, res) => {
       codeClipVertical,
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
+      saveCodeClipOutboxEvent,
     });
 
     return res.status(result.httpStatus).json(result.payload);
@@ -3270,6 +3272,7 @@ app.post("/codeclip/test-provider/keyword", async (req, res) => {
       codeClipVertical,
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
+      saveCodeClipOutboxEvent,
     });
 
     return res.status(result.httpStatus).json(result.payload);
@@ -3381,6 +3384,7 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
       codeClipVertical,
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
+      saveCodeClipOutboxEvent,
     });
 
     if (idempotencyClaim.enabled) {
@@ -4537,6 +4541,7 @@ if (vertical === "codeclip") {
     persistFinalScan,
     saveCodeClipInteraction,
     saveCodeClipRewardAssignments,
+    saveCodeClipOutboxEvent,
     saveCodeClipXtraRedemption,
   });
 

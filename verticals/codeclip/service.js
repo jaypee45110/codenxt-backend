@@ -822,6 +822,45 @@ function recordPersistenceAction(action = {}, interaction = {}, logger = console
   return event;
 }
 
+async function savePersistenceActionOutbox({ interaction = {}, saveCodeClipOutboxEvent } = {}) {
+  const action = interaction.persistenceAction || {};
+  if (!saveCodeClipOutboxEvent || (!action.retry && !action.escalate)) return null;
+
+  try {
+    return await saveCodeClipOutboxEvent({
+      eventType: "codeclip.persistence_action",
+      eventCode: interaction.eventCode,
+      eventId: interaction.eventId,
+      scanId: interaction.scanId,
+      messageId: interaction.scanId,
+      routingOutcome: interaction.routingOutcome,
+      interactionState: interaction.state,
+      severity: interaction.persistenceGuaranteePolicy?.severity,
+      action: action.action,
+      retry: Boolean(action.retry),
+      escalate: Boolean(action.escalate),
+      reason: action.reason,
+      payload: {
+        persistenceStatus: interaction.persistenceStatus,
+        persistenceDecision: interaction.persistenceDecision,
+        persistenceGuaranteePolicy: interaction.persistenceGuaranteePolicy,
+        persistenceAction: interaction.persistenceAction,
+        interaction: {
+          eventCode: interaction.eventCode,
+          eventId: interaction.eventId,
+          scanId: interaction.scanId,
+          routingOutcome: interaction.routingOutcome,
+          state: interaction.state,
+          tier: interaction.tier,
+        },
+      },
+    });
+  } catch (dbError) {
+    console.warn("codeClip persistence action outbox save failed:", dbError.message);
+    return null;
+  }
+}
+
 async function handleCodeClipScan({
   event,
   eventCode,
@@ -838,6 +877,7 @@ async function handleCodeClipScan({
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
   saveCodeClipXtraRedemption,
+  saveCodeClipOutboxEvent,
   recordPersistenceAction: recordPersistenceActionHandler = recordPersistenceAction,
 }) {
   const interactionContext = buildInteractionContext({
@@ -950,6 +990,7 @@ async function handleCodeClipScan({
   interaction.persistenceGuaranteePolicy = applyPersistenceGuaranteePolicy(interaction.persistenceDecision);
   interaction.persistenceAction = buildPersistenceAction(interaction.persistenceGuaranteePolicy);
   recordPersistenceActionHandler(interaction.persistenceAction, interaction);
+  await savePersistenceActionOutbox({ interaction, saveCodeClipOutboxEvent });
 
   return buildInteractionResult(200, {
     success: true,
@@ -976,6 +1017,7 @@ async function handleCodeClipKeywordEntry({
   codeClipVertical,
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
+  saveCodeClipOutboxEvent,
   recordPersistenceAction: recordPersistenceActionHandler = recordPersistenceAction,
 }) {
   const normalizedKeywordEntry = normalizeAudienceEntry("keyword", {
@@ -1063,6 +1105,7 @@ async function handleCodeClipKeywordEntry({
   interaction.persistenceGuaranteePolicy = applyPersistenceGuaranteePolicy(interaction.persistenceDecision);
   interaction.persistenceAction = buildPersistenceAction(interaction.persistenceGuaranteePolicy);
   recordPersistenceActionHandler(interaction.persistenceAction, interaction);
+  await savePersistenceActionOutbox({ interaction, saveCodeClipOutboxEvent });
 
   return buildInteractionResult(200, {
     success: true,
