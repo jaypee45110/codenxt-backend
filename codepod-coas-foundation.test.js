@@ -167,3 +167,59 @@ test('codePod COAS foundation does not build Interaction snapshot without eventC
 
   assert.equal(interaction, null);
 });
+
+test('codePod COAS foundation builds observational AudienceContext snapshot', () => {
+  const normalized = codePod.service.normalizeCodePodScanAudienceEntry({
+    eventCode: ' CP-CONTEXT ',
+    eventId: ' event-codepod-context ',
+    scanId: ' scan-codepod-context ',
+    requestedVertical: ' codepod ',
+    receivedAt: '2026-07-01T00:00:00.000Z',
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    rawPayload: { ignored: true },
+    phone: '+4712345678',
+    handle: '@participant',
+  });
+
+  const context = codePod.service.createCodePodAudienceContextSnapshot({
+    eventCode: ' CP-CONTEXT ',
+    eventId: ' event-codepod-context ',
+    scanId: ' scan-codepod-context ',
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    rawPayload: { ignored: true },
+    phone: '+4712345678',
+    handle: '@participant',
+  });
+
+  assert.deepEqual(context, {
+    vertical: 'codepod',
+    contextType: 'audience',
+    eventCode: 'CP-CONTEXT',
+    eventId: 'event-codepod-context',
+    scanId: 'scan-codepod-context',
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    source: 'scan',
+    transport: 'http',
+    metadata: {
+      vertical: 'codepod',
+    },
+  });
+  assert.equal(context.ip, undefined);
+  assert.equal(context.userAgent, undefined);
+  assert.equal(context.rawPayload, undefined);
+  assert.equal(context.phone, undefined);
+  assert.equal(context.handle, undefined);
+});
+
+test('codePod COAS foundation does not build AudienceContext snapshot without eventCode', () => {
+  const context = codePod.service.createCodePodAudienceContextSnapshot({
+    scanId: 'scan-missing-event-code',
+  });
+
+  assert.equal(context, null);
+});

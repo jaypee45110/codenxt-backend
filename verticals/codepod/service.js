@@ -97,7 +97,29 @@ function createCodePodInteractionSnapshot(input = {}) {
   };
 }
 
+function createCodePodAudienceContextSnapshot(input = {}) {
+  const eventCode = normalizeString(input.eventCode);
+
+  if (!eventCode) return null;
+
+  return {
+    vertical: "codepod",
+    contextType: "audience",
+    eventCode,
+    eventId: normalizeString(input.eventId),
+    scanId: normalizeString(input.scanId),
+    audienceEntry: input.audienceEntry || null,
+    audienceIntent: input.audienceIntent || null,
+    source: "scan",
+    transport: "http",
+    metadata: {
+      vertical: "codepod",
+    },
+  };
+}
+
 module.exports = {
+  createCodePodAudienceContextSnapshot,
   createCodePodInteractionSnapshot,
   normalizeCodePodScanAudienceEntry,
 };
