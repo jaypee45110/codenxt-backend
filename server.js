@@ -165,108 +165,16 @@ function normalizeCodePodDigitalSouvenir(input = {}) {
 }
 
 async function assignCodePodDigitalSouvenirTier(eventCode, scanId, digitalSouvenir, event = {}) {
-  const inventory = normalizeCodePodDigitalSouvenir(digitalSouvenir || {});
-  const scanKey = scanId ? `codepod:digitalSouvenir:scan:${eventCode}:${scanId}` : "";
-
-  const buildAssignment = (tier, assignedCount = 0, quantity = 0, unlimited = false) => ({
-    tier,
-    assignedCount: Number(assignedCount || 0),
-    quantity: Number(quantity || 0),
-    remaining: unlimited ? null : Math.max(0, Number(quantity || 0) - Number(assignedCount || 0)),
-    unlimited,
-    exhausted: false,
-    noReward: false,
-  });
-
-  if (process.env.REDIS_URL) {
-    if (scanKey) {
-      const stored = await redis.get(scanKey);
-      if (stored) {
-        try {
-          return JSON.parse(stored);
-        } catch {
-          // Continue with a fresh assignment if the cached value is malformed.
-        }
-      }
+  return codePodVertical.service.assignCodePodDigitalSouvenirTier(
+    eventCode,
+    scanId,
+    digitalSouvenir,
+    event,
+    {
+      redis,
+      redisEnabled: Boolean(process.env.REDIS_URL),
     }
-
-    const tryLimitedTier = async (tier) => {
-      const quantity = Math.max(0, Math.floor(Number(inventory[tier]?.quantity || 0) || 0));
-      if (quantity <= 0) return null;
-
-      const counterKey = `codepod:digitalSouvenir:assigned:${eventCode}:${tier}`;
-      const assignedCount = await redis.incr(counterKey);
-      if (assignedCount <= quantity) {
-        const assignment = buildAssignment(tier, assignedCount, quantity, false);
-        if (scanKey) await redis.set(scanKey, JSON.stringify(assignment));
-        return assignment;
-      }
-
-      await redis.decr(counterKey);
-      return null;
-    };
-
-    const gold = await tryLimitedTier("gold");
-    if (gold) return gold;
-
-    const silver = await tryLimitedTier("silver");
-    if (silver) return silver;
-
-    const generalQuantity = Math.max(0, Math.floor(Number(inventory.general?.quantity || 0) || 0));
-    const generalCounterKey = `codepod:digitalSouvenir:assigned:${eventCode}:general`;
-    const assignedGeneral = await redis.incr(generalCounterKey);
-    if (generalQuantity === 0 || assignedGeneral <= generalQuantity) {
-      const assignment = buildAssignment("general", assignedGeneral, generalQuantity, generalQuantity === 0);
-      if (scanKey) await redis.set(scanKey, JSON.stringify(assignment));
-      return assignment;
-    }
-
-    await redis.decr(generalCounterKey);
-    const exhausted = {
-      ...buildAssignment("general", assignedGeneral - 1, generalQuantity, false),
-      exhausted: true,
-      noReward: true,
-    };
-    if (scanKey) await redis.set(scanKey, JSON.stringify(exhausted));
-    return exhausted;
-  }
-
-  event._codepodDigitalSouvenirAssigned = event._codepodDigitalSouvenirAssigned || { gold: 0, silver: 0, general: 0 };
-  event._codepodDigitalSouvenirScan = event._codepodDigitalSouvenirScan || {};
-
-  if (scanId && event._codepodDigitalSouvenirScan[scanId]) {
-    return event._codepodDigitalSouvenirScan[scanId];
-  }
-
-  const assignLocal = (tier, quantity, unlimited = false) => {
-    event._codepodDigitalSouvenirAssigned[tier] = Number(event._codepodDigitalSouvenirAssigned[tier] || 0) + 1;
-    const assignment = buildAssignment(tier, event._codepodDigitalSouvenirAssigned[tier], quantity, unlimited);
-    if (scanId) event._codepodDigitalSouvenirScan[scanId] = assignment;
-    return assignment;
-  };
-
-  const goldQuantity = Math.max(0, Math.floor(Number(inventory.gold?.quantity || 0) || 0));
-  if (goldQuantity > Number(event._codepodDigitalSouvenirAssigned.gold || 0)) {
-    return assignLocal("gold", goldQuantity, false);
-  }
-
-  const silverQuantity = Math.max(0, Math.floor(Number(inventory.silver?.quantity || 0) || 0));
-  if (silverQuantity > Number(event._codepodDigitalSouvenirAssigned.silver || 0)) {
-    return assignLocal("silver", silverQuantity, false);
-  }
-
-  const generalQuantity = Math.max(0, Math.floor(Number(inventory.general?.quantity || 0) || 0));
-  if (generalQuantity === 0 || generalQuantity > Number(event._codepodDigitalSouvenirAssigned.general || 0)) {
-    return assignLocal("general", generalQuantity, generalQuantity === 0);
-  }
-
-  const exhausted = {
-    ...buildAssignment("general", event._codepodDigitalSouvenirAssigned.general, generalQuantity, false),
-    exhausted: true,
-    noReward: true,
-  };
-  if (scanId) event._codepodDigitalSouvenirScan[scanId] = exhausted;
-  return exhausted;
+  );
 }
 
 async function createCodePodGoldXtraToken(payload) {

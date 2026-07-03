@@ -117,6 +117,100 @@ test('codePod service normalizes invalid DigitalSouvenir JSON string to defaults
   });
 });
 
+test('codePod service local DigitalSouvenir assignment chooses gold before silver before general', async () => {
+  const event = {};
+  const digitalSouvenir = {
+    gold: { quantity: 1 },
+    silver: { quantity: 1 },
+    general: { quantity: 0 },
+  };
+
+  const first = await codePod.service.assignCodePodDigitalSouvenirTier(
+    'CP-DS-ORDER',
+    'scan-gold',
+    digitalSouvenir,
+    event
+  );
+  const second = await codePod.service.assignCodePodDigitalSouvenirTier(
+    'CP-DS-ORDER',
+    'scan-silver',
+    digitalSouvenir,
+    event
+  );
+  const third = await codePod.service.assignCodePodDigitalSouvenirTier(
+    'CP-DS-ORDER',
+    'scan-general',
+    digitalSouvenir,
+    event
+  );
+
+  assert.equal(first.tier, 'gold');
+  assert.equal(first.assignedCount, 1);
+  assert.equal(first.remaining, 0);
+  assert.equal(second.tier, 'silver');
+  assert.equal(second.assignedCount, 1);
+  assert.equal(second.remaining, 0);
+  assert.equal(third.tier, 'general');
+  assert.equal(third.unlimited, true);
+  assert.equal(third.remaining, null);
+});
+
+test('codePod service local DigitalSouvenir assignment preserves same assignment for same scanId', async () => {
+  const event = {};
+  const digitalSouvenir = {
+    gold: { quantity: 1 },
+    silver: { quantity: 1 },
+    general: { quantity: 0 },
+  };
+
+  const first = await codePod.service.assignCodePodDigitalSouvenirTier(
+    'CP-DS-SAME-SCAN',
+    'scan-same',
+    digitalSouvenir,
+    event
+  );
+  const second = await codePod.service.assignCodePodDigitalSouvenirTier(
+    'CP-DS-SAME-SCAN',
+    'scan-same',
+    digitalSouvenir,
+    event
+  );
+
+  assert.deepEqual(second, first);
+  assert.equal(event._codepodDigitalSouvenirAssigned.gold, 1);
+  assert.equal(event._codepodDigitalSouvenirAssigned.silver, 0);
+  assert.equal(event._codepodDigitalSouvenirAssigned.general, 0);
+});
+
+test('codePod service local DigitalSouvenir assignment marks exhausted general', async () => {
+  const event = {};
+  const digitalSouvenir = {
+    gold: { quantity: 0 },
+    silver: { quantity: 0 },
+    general: { quantity: 1 },
+  };
+
+  const first = await codePod.service.assignCodePodDigitalSouvenirTier(
+    'CP-DS-EXHAUSTED',
+    'scan-general-1',
+    digitalSouvenir,
+    event
+  );
+  const second = await codePod.service.assignCodePodDigitalSouvenirTier(
+    'CP-DS-EXHAUSTED',
+    'scan-general-2',
+    digitalSouvenir,
+    event
+  );
+
+  assert.equal(first.tier, 'general');
+  assert.equal(first.exhausted, false);
+  assert.equal(first.noReward, false);
+  assert.equal(second.tier, 'general');
+  assert.equal(second.exhausted, true);
+  assert.equal(second.noReward, true);
+});
+
 test('codePod COAS foundation normalizes scan AudienceEntry', () => {
   const result = codePod.service.normalizeCodePodScanAudienceEntry({
     eventCode: ' CP-FOUNDATION ',
