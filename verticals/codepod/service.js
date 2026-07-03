@@ -72,6 +72,32 @@ function normalizeCodePodScanAudienceEntry(input = {}) {
   };
 }
 
+function createCodePodInteractionSnapshot(input = {}) {
+  const eventCode = normalizeString(input.eventCode);
+
+  if (!eventCode) return null;
+
+  return {
+    interactionId: null,
+    vertical: "codepod",
+    interactionType: "scan",
+    eventCode,
+    eventId: normalizeString(input.eventId),
+    scanId: normalizeString(input.scanId),
+    rawScans: input.rawScans,
+    uniqueScans: input.uniqueScans,
+    scanRank: input.scanRank,
+    audienceEntry: input.audienceEntry || null,
+    audienceIntent: input.audienceIntent || null,
+    state: "observed",
+    stateTransitions: [],
+    tier: normalizeString(input.tier),
+    timestamp: input.timestamp || new Date().toISOString(),
+    routingOutcome: "MATCH",
+  };
+}
+
 module.exports = {
+  createCodePodInteractionSnapshot,
   normalizeCodePodScanAudienceEntry,
 };
