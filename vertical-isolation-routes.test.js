@@ -73,6 +73,39 @@ test('codeClip and codePod report routes are both available for missing events',
   });
 });
 
+test('GET /codepod/report returns a compatible empty report for a codePod event', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CP-REPORT-HAPPY-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code,
+        name: 'codePod report happy path test',
+        startAt: '2024-01-01T10:00:00.000Z',
+        unlockAt: '2024-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+      }),
+    });
+    const created = await createResponse.json();
+
+    assert.equal(createResponse.ok, true);
+    assert.equal(created.event.vertical, 'codepod');
+
+    const reportResponse = await fetch(`${baseUrl}/codepod/report/${code}`);
+    const report = await reportResponse.json();
+
+    assert.equal(reportResponse.ok, true);
+    assert.equal(report.ok, true);
+    assert.equal(report.vertical, 'codepod');
+    assert.equal(report.eventCode, code);
+    assert.equal(Array.isArray(report.rows), true);
+    assert.equal(Array.isArray(report.scans), true);
+    assert.ok(report.metrics && typeof report.metrics === 'object');
+  });
+});
+
 test('POST /event defaults missing vertical to codeTone', async () => {
   await withTestServer(async (baseUrl) => {
     const response = await fetch(`${baseUrl}/event`, {
@@ -462,8 +495,8 @@ test('POST /scan uses stored codePod event vertical when request vertical is mis
         vertical: 'codepod',
         code,
         name: 'codePod stored vertical route test',
-        startAt: '2099-01-01T10:00:00.000Z',
-        unlockAt: '2099-01-01T10:00:00.000Z',
+        startAt: '2024-01-01T10:00:00.000Z',
+        unlockAt: '2024-01-01T10:00:00.000Z',
         endAt: '2099-01-01T11:00:00.000Z',
         digitalSouvenir: {
           general: {
@@ -493,6 +526,62 @@ test('POST /scan uses stored codePod event vertical when request vertical is mis
     assert.equal(scan.eventCode, code);
     assert.ok(scan.digitalSouvenir && typeof scan.digitalSouvenir === 'object');
     assert.equal(Object.hasOwn(scan, 'tierLimits'), false);
+    assert.equal(Object.hasOwn(scan, 'audienceEntry'), false);
+    assert.equal(Object.hasOwn(scan, 'audienceIntent'), false);
+    assert.equal(Object.hasOwn(scan, 'audienceContext'), false);
+    assert.equal(Object.hasOwn(scan, 'interaction'), false);
+    assert.equal(Object.hasOwn(scan, 'stateTransitions'), false);
+    assert.equal(Object.hasOwn(scan, 'routingOutcome'), false);
+    assert.equal(Object.hasOwn(scan, 'rewardAssignmentSnapshot'), false);
+    assert.equal(Object.hasOwn(scan, 'persistenceStatus'), false);
+    assert.equal(Object.hasOwn(scan, 'persistenceDecision'), false);
+    assert.equal(Object.hasOwn(scan, 'persistenceGuaranteePolicy'), false);
+    assert.equal(Object.hasOwn(scan, 'persistenceAction'), false);
+  });
+});
+
+test('POST /scan returns locked for codePod events before unlock', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CP-LOCKED-SCAN-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code,
+        name: 'codePod locked scan route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        digitalSouvenir: {
+          general: {
+            enabled: true,
+            title: 'General souvenir',
+          },
+        },
+      }),
+    });
+    const created = await createResponse.json();
+
+    assert.equal(createResponse.ok, true);
+    assert.equal(created.event.vertical, 'codepod');
+
+    const scanResponse = await fetch(`${baseUrl}/scan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: code,
+        scanId: `scan-${Date.now()}`,
+      }),
+    });
+    const scan = await scanResponse.json();
+
+    assert.equal(scanResponse.ok, true);
+    assert.equal(scan.success, false);
+    assert.equal(scan.status, 'locked');
+    assert.equal(scan.error, 'bonus_window_locked');
+    assert.equal(scan.unlockAt, '2099-01-01T10:00:00.000Z');
+    assert.ok(scan.serverTime);
     assert.equal(Object.hasOwn(scan, 'audienceEntry'), false);
     assert.equal(Object.hasOwn(scan, 'audienceIntent'), false);
     assert.equal(Object.hasOwn(scan, 'audienceContext'), false);

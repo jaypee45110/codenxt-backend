@@ -374,6 +374,49 @@ async function getEventRegistrations(eventCode, limit = 50) {
   return result.rows || [];
 }
 
+async function getCodePodReportRows(eventCode) {
+  if (!pool || !eventCode) return [];
+
+  await ensureEventScansTable();
+  await ensureCodePodGoldXtraRedemptionsTable();
+
+  const result = await pool.query(
+    `
+      SELECT
+        scans.event_code,
+        scans.event_id,
+        scans.scan_id,
+        scans.scan_rank,
+        scans.tier,
+        scans.created_at,
+        COALESCE(
+          redemptions.display_tier,
+          scans.raw_payload->'digitalSouvenir'->>'displayTier',
+          scans.raw_payload->'digitalSouvenir'->>'tier',
+          scans.tier
+        ) AS display_tier,
+        COALESCE(
+          redemptions.reward_type,
+          scans.raw_payload->'digitalSouvenir'->>'rewardType',
+          CASE WHEN redemptions.token IS NOT NULL THEN 'partner_reward' ELSE 'digital_souvenir' END
+        ) AS reward_type,
+        redemptions.token AS redemption_token,
+        redemptions.status AS redemption_status,
+        redemptions.redeemed_at,
+        redemptions.already_redeemed_attempts
+      FROM event_scans scans
+      LEFT JOIN codepod_goldxtra_redemptions redemptions
+        ON redemptions.event_code = scans.event_code
+       AND redemptions.scan_id = scans.scan_id
+      WHERE scans.event_code = $1
+      ORDER BY scans.created_at DESC
+    `,
+    [eventCode]
+  );
+
+  return result.rows || [];
+}
+
 async function ensureCodeDemoHandshakesTable() {
   if (!pool) return;
 
@@ -1904,4 +1947,5 @@ module.exports = {
   ensureEventRegistrationsTable,
   saveEventRegistration,
   getEventRegistrations,
+  getCodePodReportRows,
 };

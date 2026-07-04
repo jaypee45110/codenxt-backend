@@ -4395,6 +4395,23 @@ let codePodSouvenirAssignment = null;
 let goldXtraAssignment = null;
 let tierLimits = null;
 
+if (isCodePodScan) {
+  const now = Date.now();
+  const startMs = Date.parse(event.startAt || "");
+  const unlockMs = Date.parse(event.unlockAt || "");
+  const isBeforeStart = Number.isFinite(startMs) && now < startMs;
+  const isBeforeUnlock = Number.isFinite(unlockMs) && now < unlockMs;
+  if (isBeforeStart || isBeforeUnlock) {
+    return res.json({
+      success: false,
+      status: "locked",
+      error: "bonus_window_locked",
+      unlockAt: event.unlockAt || event.startAt || "",
+      serverTime: new Date(now).toISOString(),
+    });
+  }
+}
+
 if (isCodePodScan && Date.now() > Date.parse(event.endAt)) {
   return res.json({
     success: false,
