@@ -129,6 +129,99 @@ test('POST /event defaults missing vertical to codeTone', async () => {
   });
 });
 
+test('eventCode collisions stay isolated across codePod and codeClip event resolution', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `SHARED-VERTICAL-${Date.now()}`;
+    const codePodCreateResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code,
+        name: 'codePod collision event',
+        startAt: '2024-01-01T10:00:00.000Z',
+        unlockAt: '2024-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        digitalSouvenir: {
+          general: {
+            enabled: true,
+            title: 'codePod souvenir',
+          },
+        },
+      }),
+    });
+    const codeClipCreateResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip collision event',
+        startAt: '2024-01-01T10:00:00.000Z',
+        unlockAt: '2024-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(codePodCreateResponse.ok, true);
+    assert.equal(codeClipCreateResponse.ok, true);
+
+    const codePodEventResponse = await fetch(`${baseUrl}/event/${code}?vertical=codepod`);
+    const codeClipEventResponse = await fetch(`${baseUrl}/event/${code}?vertical=codeclip`);
+    const codePodEvent = await codePodEventResponse.json();
+    const codeClipEvent = await codeClipEventResponse.json();
+
+    assert.equal(codePodEventResponse.ok, true);
+    assert.equal(codeClipEventResponse.ok, true);
+    assert.equal(codePodEvent.name, 'codePod collision event');
+    assert.equal(codeClipEvent.name, 'codeClip collision event');
+    assert.ok(codePodEvent.digitalSouvenir && typeof codePodEvent.digitalSouvenir === 'object');
+    assert.equal(Object.hasOwn(codePodEvent, 'openClip'), false);
+    assert.equal(Object.hasOwn(codeClipEvent, 'digitalSouvenir'), false);
+
+    const codePodScanResponse = await fetch(`${baseUrl}/scan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: code,
+        scanId: `scan-codepod-${Date.now()}`,
+        vertical: 'codepod',
+      }),
+    });
+    const codePodScan = await codePodScanResponse.json();
+
+    assert.equal(codePodScanResponse.ok, true);
+    assert.equal(codePodScan.success, true);
+    assert.ok(codePodScan.digitalSouvenir && typeof codePodScan.digitalSouvenir === 'object');
+    assert.equal(Object.hasOwn(codePodScan, 'rewards'), false);
+    assert.equal(Object.hasOwn(codePodScan, 'clipXtra'), false);
+
+    const codeClipScanResponse = await fetch(`${baseUrl}/scan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: code,
+        scanId: `scan-codeclip-${Date.now()}`,
+        vertical: 'codeclip',
+      }),
+    });
+    const codeClipScan = await codeClipScanResponse.json();
+
+    assert.equal(codeClipScanResponse.ok, true);
+    assert.equal(codeClipScan.success, true);
+    assert.ok(codeClipScan.rewards && typeof codeClipScan.rewards === 'object');
+    assert.equal(Object.hasOwn(codeClipScan, 'clipXtra'), true);
+    assert.equal(Object.hasOwn(codeClipScan, 'digitalSouvenir'), false);
+    assert.equal(Object.hasOwn(codeClipScan, 'partnerReward'), false);
+  });
+});
+
 test('POST /scan uses stored codeClip event vertical when request vertical is missing', async () => {
   await withTestServer(async (baseUrl) => {
     const code = `CC-STORED-VERTICAL-${Date.now()}`;

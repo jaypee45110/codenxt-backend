@@ -201,6 +201,64 @@ function buildCodePodGoldXtraValidationPayload(source = {}) {
   };
 }
 
+function normalizeVerticalName(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function eventMatchesVertical(event = {}, vertical = "") {
+  const normalizedVertical = normalizeVerticalName(vertical);
+  return !normalizedVertical || normalizeVerticalName(event.vertical) === normalizedVertical;
+}
+
+function findInMemoryEventByCode(eventCode, vertical = "") {
+  const code = String(eventCode || "").trim();
+  if (!code) return null;
+
+  for (const id in events) {
+    const event = events[id];
+    if (event?.code === code && eventMatchesVertical(event, vertical)) {
+      return { eventId: id, event };
+    }
+  }
+
+  return null;
+}
+
+async function resolveEventReference(eventCode, { requestedVertical = "", explicitVertical = false } = {}) {
+  const code = String(eventCode || "").trim();
+  const vertical = normalizeVerticalName(requestedVertical);
+  if (!code) return { eventId: null, event: null };
+
+  const directEvent = events[code];
+  if (directEvent && eventMatchesVertical(directEvent, explicitVertical ? vertical : "")) {
+    return { eventId: code, event: directEvent };
+  }
+
+  const inMemoryMatch = findInMemoryEventByCode(code, explicitVertical ? vertical : "");
+  if (inMemoryMatch) return inMemoryMatch;
+
+  if (process.env.REDIS_URL) {
+    let resolvedId = null;
+
+    if (vertical) {
+      resolvedId = await redis.get(`eventcode:${vertical}:${code}`);
+    }
+
+    if (!resolvedId && !explicitVertical) {
+      resolvedId = await redis.get(`eventcode:${code}`);
+    }
+
+    if (resolvedId) {
+      const meta = await redis.hgetall(`event:${resolvedId}:meta`);
+      if (meta && meta.id && eventMatchesVertical(meta, explicitVertical ? vertical : "")) {
+        return { eventId: resolvedId, event: meta };
+      }
+    }
+  }
+
+  return { eventId: null, event: null };
+}
+
 async function refreshCodePodGoldXtraRedisToken(token, row) {
   if (!process.env.REDIS_URL || !token || !row) return;
 
@@ -886,17 +944,16 @@ app.get("/event/:eventId", async (req, res) => {
   try {
     let { eventId } = req.params;
     const requestedEventId = eventId;
+    const requestedVertical = String(req.query?.vertical || "").trim().toLowerCase();
+    const hasExplicitVertical = !!requestedVertical;
+    const resolvedEvent = await resolveEventReference(eventId, {
+      requestedVertical,
+      explicitVertical: hasExplicitVertical,
+    });
+    const inMemoryEvent = resolvedEvent.event;
 
-// Try Redis lookup if available
-if (process.env.REDIS_URL) {
-  const vertical = String(req.query?.vertical || "codetone").trim().toLowerCase();
-  let resolvedId = await redis.get(`eventcode:${vertical}:${eventId}`);
-  if (!resolvedId) {
-    resolvedId = await redis.get(`eventcode:${eventId}`);
-  }
-  if (resolvedId) {
-    eventId = resolvedId;
-  }
+if (resolvedEvent.eventId) {
+  eventId = resolvedEvent.eventId;
 }
 
 if (process.env.DEBUG_EVENT_LOOKUP === "1") {
@@ -904,15 +961,7 @@ if (process.env.DEBUG_EVENT_LOOKUP === "1") {
   console.log("RESOLVED EVENT ID:", eventId);
 }
 }
-// Check in-memory first
-
-// Fallback: find by code in memory when Redis is unavailable
-const inMemoryEvent = Object.values(events).find(
-  (event) => event.code === eventId
-);
-
-
-  let meta = null;
+    let meta = null;
 
   if (process.env.REDIS_URL) {
     meta = await redis.hgetall(`event:${eventId}:meta`);
@@ -1022,7 +1071,8 @@ if ((!meta || !meta.id) && inMemoryEvent) {
 
 if (!meta || !meta.id) {
   const campaign = await getCampaignByCode(requestedEventId);
-  if (campaign?.raw_event) {
+  const campaignEvent = campaign?.raw_event || null;
+  if (campaignEvent && eventMatchesVertical(campaignEvent, hasExplicitVertical ? requestedVertical : "")) {
     meta = campaign.raw_event;
     eventId = meta.id || campaign.id || eventId;
   }
@@ -1137,7 +1187,6 @@ if (String(meta?.vertical || "").trim().toLowerCase() === "codeclip") {
   Object.assign(normalizedMeta, codeClipVertical.routes.attachCodeClipRewardsToNormalizedMeta(normalizedMeta, meta));
 }
 
-  events[eventId] = normalizedMeta;
   return res.json(normalizedMeta);
 
 } catch (err) {
@@ -4130,7 +4179,8 @@ app.post("/scan", async (req, res) => {
       req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
       req.socket?.remoteAddress ||
       "unknown";
-    const requestedVertical = String(req.body?.vertical || req.query?.vertical || "codetone").trim().toLowerCase();
+    const requestedVerticalInput = String(req.body?.vertical || req.query?.vertical || "").trim().toLowerCase();
+    const requestedVertical = requestedVerticalInput || "codetone";
     const audienceEntry = buildAudienceEntry({
       entryCode: eventCode,
       scanId,
@@ -4152,25 +4202,12 @@ app.post("/scan", async (req, res) => {
     let eventId = null;
     let event = null;
 
-    for (const id in events) {
-      if (events[id]?.code === eventCode) {
-        eventId = id;
-        event = events[id];
-        break;
-      }
-    }
-
-    if (!eventId && process.env.REDIS_URL) {
-      let resolvedId = await redis.get(`eventcode:${requestedVertical}:${eventCode}`);
-      if (!resolvedId) {
-        resolvedId = await redis.get(`eventcode:${eventCode}`);
-      }
-      if (resolvedId) {
-        eventId = resolvedId;
-        const meta = await redis.hgetall(`event:${eventId}:meta`);
-        if (meta && meta.id) event = meta;
-      }
-    }
+    const resolvedEvent = await resolveEventReference(eventCode, {
+      requestedVertical,
+      explicitVertical: !!requestedVerticalInput,
+    });
+    eventId = resolvedEvent.eventId;
+    event = resolvedEvent.event;
 
     if (!event || !eventId) {
       if (requestedVertical === "codeclip") {
