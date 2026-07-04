@@ -8,6 +8,14 @@ COAS is shared platform architecture, but every vertical must remain isolated in
 
 Later frontend repositories may link to this policy instead of duplicating it, but the policy itself is owned as a COAS platform rule.
 
+# Vertical Isolation Policy
+
+Each vertical is an independent product. COAS provides shared contracts and runtime principles, not shared product identity. codePod, codeClip, codeTone, codeVideo, and future codeNXT verticals must be treated as separate products.
+
+UI, JSX, CSS, assets, logos, copy, routes, and pages are vertical-specific. Reward and category names may differ between verticals, and visible terminology must follow the owning vertical. Reports, redemption, routing, event lookup, and Audience Entry handling must be vertical-isolated.
+
+Porting behavior, UI, assets, or copy between verticals must be an explicit product and architecture decision. Do not copy or merge vertical-specific files as a shortcut. Active routes in a vertical must point only to components owned by that vertical.
+
 ## Isolation Layers
 
 The gate must be evaluated across all platform layers:
