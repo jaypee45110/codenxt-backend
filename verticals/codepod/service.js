@@ -7,6 +7,38 @@ function normalizeRequestedVertical(value) {
   return requestedVertical || "codepod";
 }
 
+function normalizeCodePodPartnerReward(input = {}) {
+  const quantity = Math.max(0, Math.floor(Number(input.quantity || 0) || 0));
+
+  return {
+    active: input.active === true || input.active === "true",
+    rewardType: "partner_reward",
+    tier: "gold",
+    displayTier: "GoldXtra",
+    partnerName: String(input.partnerName || "").trim(),
+    product: String(input.product || "").trim(),
+    title: String(input.title || "").trim(),
+    quantity,
+    redemptionLocation: String(input.redemptionLocation || "").trim(),
+    redemptionDeadline: String(input.redemptionDeadline || "").trim(),
+    redemptionInstructions: String(input.redemptionInstructions || "").trim(),
+    partnerLogo: String(input.partnerLogo || "").trim(),
+    partnerLogoFileName: String(input.partnerLogoFileName || "").trim(),
+  };
+}
+
+function parseCodePodPartnerReward(input = {}) {
+  if (typeof input === "string") {
+    try {
+      return normalizeCodePodPartnerReward(JSON.parse(input));
+    } catch {
+      return normalizeCodePodPartnerReward({});
+    }
+  }
+
+  return normalizeCodePodPartnerReward(input || {});
+}
+
 function normalizeCodePodDigitalSouvenir(input = {}) {
   if (typeof input === "string") {
     try {
@@ -140,6 +172,97 @@ async function assignCodePodDigitalSouvenirTier(eventCode, scanId, digitalSouven
   return exhausted;
 }
 
+async function assignCodePodGoldXtra(eventCode, scanId, partnerReward, deps = {}) {
+  const redis = deps.redis;
+  const redisEnabled = Boolean(deps.redisEnabled && redis);
+  const createGoldXtraToken = deps.createGoldXtraToken;
+
+  if (!redisEnabled || !eventCode || !scanId) return null;
+
+  const reward = parseCodePodPartnerReward(partnerReward);
+  if (!reward.active || reward.quantity <= 0) return null;
+
+  const assignedKey = `codepod:partnerReward:assigned:${eventCode}`;
+  const scanKey = `codepod:partnerReward:scan:${eventCode}:${scanId}`;
+
+  try {
+    const storedAssignment = await redis.get(scanKey);
+    if (storedAssignment) {
+      const assignment = JSON.parse(storedAssignment);
+      if (assignment?.assigned) {
+        const assignedCount = Number(await redis.get(assignedKey) || assignment.assignedCount || 0);
+        if (!assignment.redemptionToken) {
+          assignment.redemptionToken = await createGoldXtraToken({
+            eventCode,
+            scanId,
+            tier: "gold",
+            displayTier: "GoldXtra",
+            rewardType: "partner_reward",
+            status: "assigned",
+            assignedCount,
+            assignedAt: assignment.assignedAt || new Date().toISOString(),
+          });
+          await redis.set(scanKey, JSON.stringify(assignment));
+        }
+        return {
+          ...reward,
+          assigned: true,
+          redemptionToken: assignment.redemptionToken || "",
+          assignedAt: assignment.assignedAt || "",
+          assignedCount,
+          remaining: Math.max(0, reward.quantity - assignedCount),
+        };
+      }
+      return null;
+    }
+
+    const assignedCount = await redis.incr(assignedKey);
+    if (assignedCount > reward.quantity) {
+      await redis.decr(assignedKey);
+      return null;
+    }
+
+    const assignment = {
+      assigned: true,
+      assignedCount,
+      assignedAt: new Date().toISOString(),
+    };
+    assignment.redemptionToken = await createGoldXtraToken({
+      eventCode,
+      scanId,
+      tier: "gold",
+      displayTier: "GoldXtra",
+      rewardType: "partner_reward",
+      status: "assigned",
+      assignedCount,
+      assignedAt: assignment.assignedAt,
+      reward: {
+        title: reward.title,
+        partnerName: reward.partnerName,
+        product: reward.product,
+        redemptionLocation: reward.redemptionLocation,
+        redemptionDeadline: reward.redemptionDeadline,
+        redemptionInstructions: reward.redemptionInstructions,
+        partnerLogo: reward.partnerLogo,
+        partnerLogoFileName: reward.partnerLogoFileName,
+      },
+    });
+    await redis.set(scanKey, JSON.stringify(assignment));
+
+    return {
+      ...reward,
+      assigned: true,
+      redemptionToken: assignment.redemptionToken,
+      assignedAt: assignment.assignedAt,
+      assignedCount,
+      remaining: Math.max(0, reward.quantity - assignedCount),
+    };
+  } catch (error) {
+    console.warn("codePod GoldXtra assignment failed:", error.message);
+    return null;
+  }
+}
+
 function normalizeCodePodScanAudienceEntry(input = {}) {
   const entryCode = normalizeString(input.eventCode || input.entryCode);
   const scanId = normalizeString(input.scanId);
@@ -253,8 +376,11 @@ function createCodePodAudienceContextSnapshot(input = {}) {
 
 module.exports = {
   assignCodePodDigitalSouvenirTier,
+  assignCodePodGoldXtra,
   createCodePodAudienceContextSnapshot,
   createCodePodInteractionSnapshot,
   normalizeCodePodDigitalSouvenir,
+  normalizeCodePodPartnerReward,
   normalizeCodePodScanAudienceEntry,
+  parseCodePodPartnerReward,
 };
