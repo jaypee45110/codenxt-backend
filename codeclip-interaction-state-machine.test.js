@@ -14,6 +14,10 @@ const {
   markCodeClipOutboxEventSucceeded,
   markCodeClipOutboxEventFailed,
   markCodeClipOutboxEventDeadLetter,
+  buildEventScanSummaryQuery,
+  buildEventRegistrationSummaryQuery,
+  buildEventRegistrationsQuery,
+  buildCodePodReportRowsQuery,
 } = require('./db');
 
 function assertAudienceIntentContract(intent, expectedType) {
@@ -2358,4 +2362,22 @@ test('codeClip report helper keeps codePod legacy report data isolated', async (
   assert.equal(legacyCodePodReport.scans, legacyCodePodReport.rows);
   assert.equal(legacyCodePodReport.rows[0].redemptionToken, 'GX-ISOLATION');
   assert.equal(legacyCodePodReport.metrics.goldXtraAssigned, 1);
+});
+
+test('shared report DB query builders apply vertical filters', () => {
+  const scanSummaryQuery = buildEventScanSummaryQuery('EVT1', 'CodePod');
+  assert.deepEqual(scanSummaryQuery.values, ['EVT1', 'codepod']);
+  assert.match(scanSummaryQuery.text, /vertical = \$2/);
+
+  const registrationSummaryQuery = buildEventRegistrationSummaryQuery('EVT1', 'CodeClip');
+  assert.deepEqual(registrationSummaryQuery.values, ['EVT1', 'codeclip']);
+  assert.match(registrationSummaryQuery.text, /vertical = \$2/);
+
+  const registrationsQuery = buildEventRegistrationsQuery('EVT1', 100, 'CodeClip');
+  assert.deepEqual(registrationsQuery.values, ['EVT1', 100, 'codeclip']);
+  assert.match(registrationsQuery.text, /vertical = \$3/);
+
+  const codePodRowsQuery = buildCodePodReportRowsQuery('EVT1');
+  assert.deepEqual(codePodRowsQuery.values, ['EVT1', 'codepod']);
+  assert.match(codePodRowsQuery.text, /scans\.vertical = \$2/);
 });

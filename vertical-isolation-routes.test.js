@@ -185,12 +185,15 @@ test('eventCode collisions stay isolated across codePod and codeClip event resol
     assert.equal(Object.hasOwn(codePodEvent, 'openClip'), false);
     assert.equal(Object.hasOwn(codeClipEvent, 'digitalSouvenir'), false);
 
+    const codePodScanId = `scan-codepod-${Date.now()}`;
+    const codeClipScanId = `scan-codeclip-${Date.now()}`;
+
     const codePodScanResponse = await fetch(`${baseUrl}/scan`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         eventCode: code,
-        scanId: `scan-codepod-${Date.now()}`,
+        scanId: codePodScanId,
         vertical: 'codepod',
       }),
     });
@@ -207,7 +210,7 @@ test('eventCode collisions stay isolated across codePod and codeClip event resol
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         eventCode: code,
-        scanId: `scan-codeclip-${Date.now()}`,
+        scanId: codeClipScanId,
         vertical: 'codeclip',
       }),
     });
@@ -219,6 +222,20 @@ test('eventCode collisions stay isolated across codePod and codeClip event resol
     assert.equal(Object.hasOwn(codeClipScan, 'clipXtra'), true);
     assert.equal(Object.hasOwn(codeClipScan, 'digitalSouvenir'), false);
     assert.equal(Object.hasOwn(codeClipScan, 'partnerReward'), false);
+
+    const codePodReportResponse = await fetch(`${baseUrl}/codepod/report/${code}`);
+    const codeClipReportResponse = await fetch(`${baseUrl}/codeclip/report/${code}`);
+    const codePodReport = await codePodReportResponse.json();
+    const codeClipReport = await codeClipReportResponse.json();
+    const codePodRows = Array.isArray(codePodReport.rows) ? codePodReport.rows : [];
+    const codeClipRows = Array.isArray(codeClipReport.rows) ? codeClipReport.rows : [];
+
+    assert.equal(codePodReportResponse.ok, true);
+    assert.equal(codeClipReportResponse.ok, true);
+    assert.equal(codePodReport.vertical, 'codepod');
+    assert.equal(codeClipReport.vertical, 'codeclip');
+    assert.equal(codePodRows.some((row) => row.scanId === codeClipScanId), false);
+    assert.equal(codeClipRows.some((row) => row.scanId === codePodScanId), false);
   });
 });
 

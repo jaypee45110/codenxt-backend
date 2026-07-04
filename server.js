@@ -210,6 +210,30 @@ function eventMatchesVertical(event = {}, vertical = "") {
   return !normalizedVertical || normalizeVerticalName(event.vertical) === normalizedVertical;
 }
 
+function normalizeActivationMethod(value) {
+  const method = String(value || "").trim().toLowerCase();
+  return ["keyword", "qr", "both"].includes(method) ? method : "keyword";
+}
+
+function normalizeActivationChannels(value) {
+  if (Array.isArray(value)) {
+    return value.map((channel) => String(channel || "").trim()).filter(Boolean);
+  }
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.map((channel) => String(channel || "").trim()).filter(Boolean);
+      }
+    } catch {
+      return [];
+    }
+  }
+  return raw.split(",").map((channel) => channel.trim()).filter(Boolean);
+}
+
 function findInMemoryEventByCode(eventCode, vertical = "") {
   const code = String(eventCode || "").trim();
   if (!code) return null;
@@ -1091,30 +1115,6 @@ if (process.env.REDIS_URL) {
   uniqueScans = Number(meta.uniqueScans || 0);
   innerCircleJoinCount = Number(meta.innerCircleJoinCount || 0);
 }
-
-const normalizeActivationMethod = (value) => {
-  const method = String(value || "").trim().toLowerCase();
-  return ["keyword", "qr", "both"].includes(method) ? method : "keyword";
-};
-
-const normalizeActivationChannels = (value) => {
-  if (Array.isArray(value)) {
-    return value.map((channel) => String(channel || "").trim()).filter(Boolean);
-  }
-  const raw = String(value || "").trim();
-  if (!raw) return [];
-  if (raw.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.map((channel) => String(channel || "").trim()).filter(Boolean);
-      }
-    } catch {
-      return [];
-    }
-  }
-  return raw.split(",").map((channel) => channel.trim()).filter(Boolean);
-};
 
 const normalizedMeta = {
   id: meta?.id,
@@ -2841,8 +2841,8 @@ app.get("/codepod/report/:eventCode", async (req, res) => {
 
     const partnerReward = normalizeCodePodPartnerReward(meta.partnerReward || {});
     const digitalSouvenir = normalizeCodePodDigitalSouvenir(meta.digitalSouvenir || {});
-    const rows = await getCodePodReportRows(eventCode);
-    const registrations = await getEventRegistrations(eventCode, 1000);
+    const rows = await getCodePodReportRows(eventCode, "codepod");
+    const registrations = await getEventRegistrations(eventCode, 1000, "codepod");
     const phoneByScanId = new Map(
       registrations
         .filter((registration) => registration.scan_id && registration.phone)
@@ -2905,8 +2905,8 @@ app.get("/codepod/report/:eventCode", async (req, res) => {
     let joins = registrationRows.length;
 
     try {
-      const scanSummary = await getEventScanSummary(eventCode);
-      const registrationSummary = await getEventRegistrationSummary(eventCode);
+      const scanSummary = await getEventScanSummary(eventCode, "codepod");
+      const registrationSummary = await getEventRegistrationSummary(eventCode, "codepod");
       rawScans = Number(scanSummary.scans || rawScans || 0);
       uniqueScans = Number(scanSummary.uniqueScans || uniqueScans || 0);
       joins = Number(registrationSummary.registrations || 0);
@@ -3004,9 +3004,9 @@ app.get("/codeclip/report/:eventCode", async (req, res) => {
       getCodeClipInteractions,
       getCodeClipRewardAssignments,
       getCodeClipRewardAssignmentSummary,
-      getEventScanSummary,
-      getEventRegistrations,
-      getEventRegistrationSummary,
+      getEventScanSummary: (code) => getEventScanSummary(code, "codeclip"),
+      getEventRegistrations: (code, limit) => getEventRegistrations(code, limit, "codeclip"),
+      getEventRegistrationSummary: (code) => getEventRegistrationSummary(code, "codeclip"),
     });
 
     return res.json({

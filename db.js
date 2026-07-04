@@ -306,23 +306,29 @@ async function saveEventRegistration(registration = {}) {
   return result.rows[0] || null;
 }
 
-async function getEventScanSummary(eventCode) {
-  if (!pool || !eventCode) {
-    return { scans: 0, uniqueScans: 0 };
-  }
-
-  await ensureEventScansTable();
-
-  const result = await pool.query(
-    `
+function buildEventScanSummaryQuery(eventCode, vertical = '') {
+  const normalizedVertical = String(vertical || '').trim().toLowerCase();
+  return {
+    text: `
       SELECT
         COUNT(*)::INTEGER AS scans,
         COUNT(DISTINCT NULLIF(scan_id, ''))::INTEGER AS unique_scans
       FROM event_scans
       WHERE event_code = $1
+        AND ($2::text = '' OR vertical = $2)
     `,
-    [eventCode]
-  );
+    values: [eventCode, normalizedVertical],
+  };
+}
+
+async function getEventScanSummary(eventCode, vertical = '') {
+  if (!pool || !eventCode) {
+    return { scans: 0, uniqueScans: 0 };
+  }
+
+  await ensureEventScansTable();
+  const query = buildEventScanSummaryQuery(eventCode, vertical);
+  const result = await pool.query(query.text, query.values);
 
   const row = result.rows[0] || {};
   return {
@@ -331,21 +337,27 @@ async function getEventScanSummary(eventCode) {
   };
 }
 
-async function getEventRegistrationSummary(eventCode) {
+function buildEventRegistrationSummaryQuery(eventCode, vertical = '') {
+  const normalizedVertical = String(vertical || '').trim().toLowerCase();
+  return {
+    text: `
+      SELECT COUNT(*)::INTEGER AS registrations
+      FROM event_registrations
+      WHERE event_code = $1
+        AND ($2::text = '' OR vertical = $2)
+    `,
+    values: [eventCode, normalizedVertical],
+  };
+}
+
+async function getEventRegistrationSummary(eventCode, vertical = '') {
   if (!pool || !eventCode) {
     return { registrations: 0 };
   }
 
   await ensureEventRegistrationsTable();
-
-  const result = await pool.query(
-    `
-      SELECT COUNT(*)::INTEGER AS registrations
-      FROM event_registrations
-      WHERE event_code = $1
-    `,
-    [eventCode]
-  );
+  const query = buildEventRegistrationSummaryQuery(eventCode, vertical);
+  const result = await pool.query(query.text, query.values);
 
   const row = result.rows[0] || {};
   return {
@@ -353,35 +365,36 @@ async function getEventRegistrationSummary(eventCode) {
   };
 }
 
-async function getEventRegistrations(eventCode, limit = 50) {
-  if (!pool || !eventCode) return [];
-
-  await ensureEventRegistrationsTable();
-
+function buildEventRegistrationsQuery(eventCode, limit = 50, vertical = '') {
   const safeLimit = Math.max(1, Math.min(Number(limit || 50), 200));
-
-  const result = await pool.query(
-    `
+  const normalizedVertical = String(vertical || '').trim().toLowerCase();
+  return {
+    text: `
       SELECT *
       FROM event_registrations
       WHERE event_code = $1
+        AND ($3::text = '' OR vertical = $3)
       ORDER BY created_at DESC
       LIMIT $2
     `,
-    [eventCode, safeLimit]
-  );
+    values: [eventCode, safeLimit, normalizedVertical],
+  };
+}
+
+async function getEventRegistrations(eventCode, limit = 50, vertical = '') {
+  if (!pool || !eventCode) return [];
+
+  await ensureEventRegistrationsTable();
+  const query = buildEventRegistrationsQuery(eventCode, limit, vertical);
+  const result = await pool.query(query.text, query.values);
 
   return result.rows || [];
 }
 
-async function getCodePodReportRows(eventCode) {
-  if (!pool || !eventCode) return [];
-
-  await ensureEventScansTable();
-  await ensureCodePodGoldXtraRedemptionsTable();
-
-  const result = await pool.query(
-    `
+function buildCodePodReportRowsQuery(eventCode, vertical = 'codepod') {
+  const normalizedVertical = String(vertical || 'codepod').trim().toLowerCase();
+  return {
+    text: `
       SELECT
         scans.event_code,
         scans.event_id,
@@ -409,10 +422,20 @@ async function getCodePodReportRows(eventCode) {
         ON redemptions.event_code = scans.event_code
        AND redemptions.scan_id = scans.scan_id
       WHERE scans.event_code = $1
+        AND scans.vertical = $2
       ORDER BY scans.created_at DESC
     `,
-    [eventCode]
-  );
+    values: [eventCode, normalizedVertical],
+  };
+}
+
+async function getCodePodReportRows(eventCode, vertical = 'codepod') {
+  if (!pool || !eventCode) return [];
+
+  await ensureEventScansTable();
+  await ensureCodePodGoldXtraRedemptionsTable();
+  const query = buildCodePodReportRowsQuery(eventCode, vertical);
+  const result = await pool.query(query.text, query.values);
 
   return result.rows || [];
 }
@@ -1948,4 +1971,8 @@ module.exports = {
   saveEventRegistration,
   getEventRegistrations,
   getCodePodReportRows,
+  buildEventScanSummaryQuery,
+  buildEventRegistrationSummaryQuery,
+  buildEventRegistrationsQuery,
+  buildCodePodReportRowsQuery,
 };
