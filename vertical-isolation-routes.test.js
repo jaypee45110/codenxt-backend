@@ -49,6 +49,7 @@ function assertNoCodeClipProviderInternals(payload) {
   assert.equal(Object.hasOwn(payload, 'persistenceGuaranteePolicy'), false);
   assert.equal(Object.hasOwn(payload, 'persistenceAction'), false);
   assert.equal(Object.hasOwn(payload, 'resolution'), false);
+  assert.equal(Object.hasOwn(payload, 'verification'), false);
   assert.equal(Object.hasOwn(payload, 'envelope'), false);
   assert.equal(Object.hasOwn(payload, 'rawBody'), false);
   assert.equal(Object.hasOwn(payload, 'rawHeaders'), false);
@@ -466,7 +467,10 @@ test('POST /codeclip/provider/test/keyword accepts generic provider keyword inpu
 
     const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        'x-codeclip-test-signature': 'valid',
+      },
       body: JSON.stringify({
         eventCode: code,
         text: ' GOLD ',
@@ -561,7 +565,10 @@ test('POST /codeclip/provider/:provider/keyword accepts test-provider style payl
 
     const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        'x-codeclip-test-signature': 'valid',
+      },
       body: JSON.stringify({
         keyword: ' clip ',
         providerEventId,
@@ -574,6 +581,90 @@ test('POST /codeclip/provider/:provider/keyword accepts test-provider style payl
     assert.equal(keywordEntry.eventCode, code);
     assert.equal(keywordEntry.messageId, providerEventId);
     assertNoCodeClipProviderInternals(keywordEntry);
+  });
+});
+
+test('POST /codeclip/provider/test/keyword requires test provider signature without leaking internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-PROVIDER-VERIFY-${Date.now()}`;
+    const keyword = `VERIFY-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip provider verification route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'keyword',
+        activationKeyword: keyword,
+        activationChannels: ['test'],
+        providerAccountIds: ['test'],
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const missingSignatureResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        keyword,
+        providerEventId: `missing-signature-${Date.now()}`,
+      }),
+    });
+    const missingSignature = await missingSignatureResponse.json();
+
+    assert.equal(missingSignatureResponse.status, 400);
+    assert.equal(missingSignature.ok, false);
+    assert.equal(missingSignature.error, 'Invalid provider keyword payload');
+    assert.equal(Object.hasOwn(missingSignature, 'reason'), false);
+    assertNoCodeClipProviderInternals(missingSignature);
+
+    const invalidSignatureResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-codeclip-test-signature': 'invalid',
+      },
+      body: JSON.stringify({
+        keyword,
+        providerEventId: `invalid-signature-${Date.now()}`,
+      }),
+    });
+    const invalidSignature = await invalidSignatureResponse.json();
+
+    assert.equal(invalidSignatureResponse.status, 400);
+    assert.equal(invalidSignature.ok, false);
+    assert.equal(invalidSignature.error, 'Invalid provider keyword payload');
+    assert.equal(Object.hasOwn(invalidSignature, 'reason'), false);
+    assertNoCodeClipProviderInternals(invalidSignature);
+
+    const validSignatureResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-codeclip-test-signature': 'valid',
+      },
+      body: JSON.stringify({
+        keyword,
+        providerEventId: `valid-signature-${Date.now()}`,
+      }),
+    });
+    const validSignature = await validSignatureResponse.json();
+
+    assert.equal(validSignatureResponse.ok, true);
+    assert.equal(validSignature.success, true);
+    assert.equal(validSignature.eventCode, code);
+    assertNoCodeClipProviderInternals(validSignature);
   });
 });
 
@@ -907,6 +998,7 @@ test('POST /codeclip/provider/:provider/keyword enforces optional provider token
         headers: {
           'content-type': 'application/json',
           'x-codeclip-provider-token': 'provider-test-token',
+          'x-codeclip-test-signature': 'valid',
         },
         body: JSON.stringify({
           eventCode: code,
