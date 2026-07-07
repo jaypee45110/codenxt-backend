@@ -474,6 +474,7 @@ test('POST /codeclip/provider/test/keyword accepts generic provider keyword inpu
     assert.equal(keywordEntry.success, true);
     assert.equal(keywordEntry.eventCode, code);
     assert.equal(keywordEntry.messageId, providerEventId);
+    assert.equal(Object.hasOwn(keywordEntry, 'resolution'), false);
     assertNoCodeClipProviderInternals(keywordEntry);
   });
 });

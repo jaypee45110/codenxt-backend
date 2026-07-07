@@ -30,6 +30,27 @@ function buildInvalidProviderRequest(reason = "INVALID_PROVIDER_KEYWORD_PAYLOAD"
   };
 }
 
+function buildResolution({
+  provider,
+  providerAccountId,
+  eventCode,
+  eventId,
+  lookupMethod,
+  matchedBy,
+} = {}) {
+  const resolution = {
+    provider,
+    lookupMethod,
+  };
+
+  if (providerAccountId) resolution.providerAccountId = providerAccountId;
+  if (eventCode) resolution.eventCode = eventCode;
+  if (eventId) resolution.eventId = eventId;
+  if (matchedBy) resolution.matchedBy = matchedBy;
+
+  return resolution;
+}
+
 function buildCodeClipProviderActivationRequest({
   provider,
   normalizedProviderInput,
@@ -65,10 +86,14 @@ function buildCodeClipProviderActivationRequest({
   const messageId = normalizedProviderInput.messageId;
   let eventCode = normalizedProviderInput.eventCode;
   let event = null;
+  let lookupMethod = "eventCode";
+  let matchedBy = "eventCode";
 
   if (eventCode) {
     event = findCodeClipEventByCode(events, eventCode);
   } else {
+    lookupMethod = "activationKeyword";
+    matchedBy = "keyword";
     const activationLookup = resolveCodeClipProviderActivationEvent({
       provider: normalizedProvider,
       keyword,
@@ -77,7 +102,14 @@ function buildCodeClipProviderActivationRequest({
     });
 
     if (!activationLookup.ok) {
-      return buildInvalidProviderRequest(activationLookup.reason);
+      return {
+        ...buildInvalidProviderRequest(activationLookup.reason),
+        resolution: buildResolution({
+          provider: normalizedProvider,
+          providerAccountId,
+          lookupMethod,
+        }),
+      };
     }
 
     event = activationLookup.event;
@@ -92,6 +124,14 @@ function buildCodeClipProviderActivationRequest({
     messageId,
     providerAccountId,
     event,
+    resolution: buildResolution({
+      provider: normalizedProvider,
+      providerAccountId,
+      eventCode,
+      eventId: event?.id,
+      lookupMethod,
+      matchedBy,
+    }),
     idempotency: {
       provider: normalizedProvider,
       eventCode,

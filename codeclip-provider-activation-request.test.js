@@ -55,6 +55,13 @@ test("codeClip provider activation request preserves eventCode path", () => {
   assert.equal(result.keyword, "CLIP");
   assert.equal(result.messageId, "message-1");
   assert.equal(result.event, event);
+  assert.deepEqual(result.resolution, {
+    provider: "sms",
+    eventCode: "CC-1",
+    eventId: "event-1",
+    lookupMethod: "eventCode",
+    matchedBy: "eventCode",
+  });
   assert.deepEqual(result.idempotency, {
     provider: "sms",
     eventCode: "CC-1",
@@ -82,6 +89,13 @@ test("codeClip provider activation request resolves event from provider activati
   assert.equal(result.keyword, "open");
   assert.equal(result.messageId, "message-activation");
   assert.equal(result.event, event);
+  assert.deepEqual(result.resolution, {
+    provider: "sms",
+    eventCode: "CC-ACTIVATION",
+    eventId: "event-1",
+    lookupMethod: "activationKeyword",
+    matchedBy: "keyword",
+  });
   assert.deepEqual(result.idempotency, {
     provider: "sms",
     eventCode: "CC-ACTIVATION",
@@ -102,6 +116,10 @@ test("codeClip provider activation request returns no match", () => {
   assert.deepEqual(result, {
     ok: false,
     reason: "NO_MATCH",
+    resolution: {
+      provider: "sms",
+      lookupMethod: "activationKeyword",
+    },
   });
 });
 
@@ -121,6 +139,10 @@ test("codeClip provider activation request returns ambiguous match", () => {
   assert.deepEqual(result, {
     ok: false,
     reason: "AMBIGUOUS_MATCH",
+    resolution: {
+      provider: "sms",
+      lookupMethod: "activationKeyword",
+    },
   });
 });
 
@@ -138,6 +160,10 @@ test("codeClip provider activation request uses providerAccountId", () => {
   assert.deepEqual(missingAccount, {
     ok: false,
     reason: "NO_MATCH",
+    resolution: {
+      provider: "sms",
+      lookupMethod: "activationKeyword",
+    },
   });
 
   const matchedAccount = buildCodeClipProviderActivationRequest({
@@ -151,6 +177,7 @@ test("codeClip provider activation request uses providerAccountId", () => {
   assert.equal(matchedAccount.ok, true);
   assert.equal(matchedAccount.event, event);
   assert.equal(matchedAccount.providerAccountId, "account-1");
+  assert.equal(matchedAccount.resolution.providerAccountId, "account-1");
 });
 
 test("codeClip provider activation request uses provider account resolver sources", () => {
@@ -170,6 +197,7 @@ test("codeClip provider activation request uses provider account resolver source
   assert.equal(result.ok, true);
   assert.equal(result.event, event);
   assert.equal(result.providerAccountId, "sms-account-1");
+  assert.equal(result.resolution.providerAccountId, "sms-account-1");
 });
 
 test("codeClip provider activation request supports test provider fallback account", () => {
@@ -188,6 +216,7 @@ test("codeClip provider activation request supports test provider fallback accou
   assert.equal(result.ok, true);
   assert.equal(result.event, event);
   assert.equal(result.providerAccountId, "test");
+  assert.equal(result.resolution.providerAccountId, "test");
 });
 
 test("codeClip provider activation request allows lookup without account when event is unbound", () => {
@@ -207,6 +236,7 @@ test("codeClip provider activation request allows lookup without account when ev
   assert.equal(result.ok, true);
   assert.equal(result.event, event);
   assert.equal(result.providerAccountId, undefined);
+  assert.equal(result.resolution.providerAccountId, undefined);
 });
 
 test("codeClip provider activation request never matches other verticals", () => {
@@ -224,6 +254,10 @@ test("codeClip provider activation request never matches other verticals", () =>
   assert.deepEqual(result, {
     ok: false,
     reason: "NO_MATCH",
+    resolution: {
+      provider: "sms",
+      lookupMethod: "activationKeyword",
+    },
   });
 });
 
