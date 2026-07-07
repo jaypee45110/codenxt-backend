@@ -1,6 +1,9 @@
 const {
   resolveCodeClipProviderActivationEvent,
 } = require("./provider-activation");
+const {
+  resolveCodeClipProviderAccount,
+} = require("./provider-account-resolver");
 
 function normalizeProvider(value) {
   return String(value || "").trim().toLowerCase();
@@ -31,10 +34,18 @@ function buildCodeClipProviderActivationRequest({
   provider,
   normalizedProviderInput,
   body,
+  headers,
+  metadata,
   events,
 } = {}) {
   const normalizedProvider = normalizeProvider(provider);
-  const providerAccountId = body?.providerAccountId;
+  const providerAccount = resolveCodeClipProviderAccount({
+    provider: normalizedProvider,
+    body,
+    headers,
+    metadata,
+  });
+  const providerAccountId = providerAccount.ok ? providerAccount.providerAccountId : undefined;
   const errorCodes = normalizeErrorCodes(normalizedProviderInput);
   const canUseActivationLookup =
     !normalizedProviderInput?.ok &&

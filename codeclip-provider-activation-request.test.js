@@ -150,7 +150,63 @@ test("codeClip provider activation request uses providerAccountId", () => {
   });
   assert.equal(matchedAccount.ok, true);
   assert.equal(matchedAccount.event, event);
-  assert.equal(matchedAccount.providerAccountId, " account-1 ");
+  assert.equal(matchedAccount.providerAccountId, "account-1");
+});
+
+test("codeClip provider activation request uses provider account resolver sources", () => {
+  const event = codeClipEvent({
+    providerAccountIds: ["sms-account-1"],
+  });
+
+  const result = buildCodeClipProviderActivationRequest({
+    provider: "sms",
+    normalizedProviderInput: missingEventCodeProviderInput(),
+    body: {
+      MessagingServiceSid: " sms-account-1 ",
+    },
+    events: [event],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.event, event);
+  assert.equal(result.providerAccountId, "sms-account-1");
+});
+
+test("codeClip provider activation request supports test provider fallback account", () => {
+  const event = codeClipEvent({
+    activationChannels: ["test"],
+    providerAccountIds: ["test"],
+  });
+
+  const result = buildCodeClipProviderActivationRequest({
+    provider: "test",
+    normalizedProviderInput: missingEventCodeProviderInput(),
+    body: {},
+    events: [event],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.event, event);
+  assert.equal(result.providerAccountId, "test");
+});
+
+test("codeClip provider activation request allows lookup without account when event is unbound", () => {
+  const event = codeClipEvent({
+    activationKeyword: "WOW",
+  });
+
+  const result = buildCodeClipProviderActivationRequest({
+    provider: "sms",
+    normalizedProviderInput: missingEventCodeProviderInput({
+      keyword: "WOW",
+    }),
+    body: {},
+    events: [event],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.event, event);
+  assert.equal(result.providerAccountId, undefined);
 });
 
 test("codeClip provider activation request never matches other verticals", () => {
