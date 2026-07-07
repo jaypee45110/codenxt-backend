@@ -3175,8 +3175,8 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
 
     const { normalizeProviderKeywordIngress } = require("./verticals/codeclip/provider-adapters");
     const {
-      resolveCodeClipProviderActivationEvent,
-    } = require("./verticals/codeclip/provider-activation");
+      buildCodeClipProviderActivationRequest,
+    } = require("./verticals/codeclip/provider-activation-request");
     const {
       buildProviderKeywordIdempotencyKey,
       claimProviderKeywordIdempotency,
@@ -3184,64 +3184,44 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
       recordProviderKeywordResponse,
     } = require("./verticals/codeclip/provider-idempotency");
     const normalizedProviderInput = normalizeProviderKeywordIngress(req.params.provider, req.body || {});
-    const normalizedProviderErrors = Array.isArray(normalizedProviderInput.errors)
-      ? normalizedProviderInput.errors.map((error) => error.code)
-      : [];
-    const shouldUseActivationLookup =
-      !normalizedProviderInput.ok &&
-      normalizedProviderErrors.length === 1 &&
-      normalizedProviderErrors[0] === "EVENT_CODE_REQUIRED" &&
-      normalizedProviderInput.keyword &&
-      normalizedProviderInput.messageId;
+    const activationRequest = buildCodeClipProviderActivationRequest({
+      provider: req.params.provider,
+      normalizedProviderInput,
+      body: req.body || {},
+      events,
+    });
 
-    if (!normalizedProviderInput.ok && !shouldUseActivationLookup) {
-      return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
-    }
-
-    let { eventCode } = normalizedProviderInput;
-    const { keyword, messageId } = normalizedProviderInput;
-    let eventId = null;
-    let meta = null;
-
-    if (eventCode) {
-      meta = Object.values(events).find(
-        (item) => item?.code === eventCode && String(item?.vertical || "").trim().toLowerCase() === "codeclip"
-      ) || null;
-    } else {
-      const activationLookup = resolveCodeClipProviderActivationEvent({
-        provider: req.params.provider,
-        keyword,
-        providerAccountId: req.body?.providerAccountId,
-        events,
-      });
-
-      if (!activationLookup.ok) {
-        if (["PROVIDER_REQUIRED", "KEYWORD_REQUIRED"].includes(activationLookup.reason)) {
-          return res.status(400).json({
-            ok: false,
-            error: "Invalid provider keyword payload",
-            reason: activationLookup.reason,
-          });
-        }
-
-        if (activationLookup.reason === "AMBIGUOUS_MATCH") {
-          return res.status(409).json({
-            ok: false,
-            error: "Ambiguous provider activation match",
-            reason: activationLookup.reason,
-          });
-        }
-
-        return res.status(404).json({
+    if (!activationRequest.ok) {
+      if (["PROVIDER_REQUIRED", "KEYWORD_REQUIRED"].includes(activationRequest.reason)) {
+        return res.status(400).json({
           ok: false,
-          error: "Event not found",
-          reason: activationLookup.reason,
+          error: "Invalid provider keyword payload",
+          reason: activationRequest.reason,
         });
       }
 
-      meta = activationLookup.event;
-      eventCode = String(meta?.code || "").trim();
+      if (activationRequest.reason === "AMBIGUOUS_MATCH") {
+        return res.status(409).json({
+          ok: false,
+          error: "Ambiguous provider activation match",
+          reason: activationRequest.reason,
+        });
+      }
+
+      if (activationRequest.reason === "NO_MATCH") {
+        return res.status(404).json({
+          ok: false,
+          error: "Event not found",
+          reason: activationRequest.reason,
+        });
+      }
+
+      return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
     }
+
+    let { eventCode, keyword, messageId } = activationRequest;
+    let eventId = null;
+    let meta = activationRequest.event || null;
 
     if (meta?.id) eventId = meta.id;
 
@@ -3276,9 +3256,8 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
 
     eventCode = String(eventCode || meta.code || "").trim();
     const idempotencyKey = buildProviderKeywordIdempotencyKey({
-      provider: req.params.provider,
+      ...activationRequest.idempotency,
       eventCode,
-      messageId,
     });
     const idempotencyClaim = process.env.REDIS_URL
       ? await claimProviderKeywordIdempotency({
