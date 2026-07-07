@@ -478,6 +478,148 @@ test('POST /codeclip/provider/test/keyword accepts generic provider keyword inpu
   });
 });
 
+test('POST /codeclip/provider/:provider/keyword resolves codeClip event by provider activation keyword', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-PROVIDER-ACTIVATION-${Date.now()}`;
+    const providerEventId = `provider-activation-event-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip provider activation route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'keyword',
+        activationKeyword: 'CLIP',
+        activationChannels: ['sms'],
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        text: ' clip ',
+        providerEventId,
+      }),
+    });
+    const keywordEntry = await keywordResponse.json();
+
+    assert.equal(keywordResponse.ok, true);
+    assert.equal(keywordEntry.success, true);
+    assert.equal(keywordEntry.eventCode, code);
+    assert.equal(keywordEntry.messageId, providerEventId);
+    assertNoCodeClipProviderInternals(keywordEntry);
+  });
+});
+
+test('POST /codeclip/provider/:provider/keyword activation lookup never matches other verticals', async () => {
+  await withTestServer(async (baseUrl) => {
+    const providerEventId = `provider-activation-isolation-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code: `CP-PROVIDER-ACTIVATION-${Date.now()}`,
+        name: 'codePod provider activation isolation test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'keyword',
+        activationKeyword: 'OPEN',
+        activationChannels: ['sms'],
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        text: 'OPEN',
+        providerEventId,
+      }),
+    });
+    const body = await keywordResponse.json();
+
+    assert.equal(keywordResponse.status, 404);
+    assert.equal(body.ok, false);
+    assert.equal(body.reason, 'NO_MATCH');
+    assertNoCodeClipProviderInternals(body);
+  });
+});
+
+test('POST /codeclip/provider/:provider/keyword rejects ambiguous provider activation matches', async () => {
+  await withTestServer(async (baseUrl) => {
+    const providerEventId = `provider-activation-ambiguous-${Date.now()}`;
+    const eventBase = {
+      vertical: 'codeclip',
+      startAt: '2099-01-01T10:00:00.000Z',
+      unlockAt: '2099-01-01T10:00:00.000Z',
+      endAt: '2099-01-01T11:00:00.000Z',
+      activationMethod: 'keyword',
+      activationKeyword: 'VIP',
+      activationChannels: ['sms'],
+      rewards: {
+        openClip: {
+          enabled: true,
+          title: 'OpenClip',
+        },
+      },
+    };
+
+    const firstCreateResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...eventBase,
+        code: `CC-PROVIDER-ACTIVATION-A-${Date.now()}`,
+        name: 'codeClip provider activation ambiguity test A',
+      }),
+    });
+    const secondCreateResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...eventBase,
+        code: `CC-PROVIDER-ACTIVATION-B-${Date.now()}`,
+        name: 'codeClip provider activation ambiguity test B',
+      }),
+    });
+
+    assert.equal(firstCreateResponse.ok, true);
+    assert.equal(secondCreateResponse.ok, true);
+
+    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        text: 'VIP',
+        providerEventId,
+      }),
+    });
+    const body = await keywordResponse.json();
+
+    assert.equal(keywordResponse.status, 409);
+    assert.equal(body.ok, false);
+    assert.equal(body.reason, 'AMBIGUOUS_MATCH');
+    assertNoCodeClipProviderInternals(body);
+  });
+});
+
 test('POST /codeclip/provider/unknown/keyword rejects unknown providers without COAS internals', async () => {
   await withTestServer(async (baseUrl) => {
     const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/unknown/keyword`, {

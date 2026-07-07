@@ -3175,54 +3175,73 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
 
     const { normalizeProviderKeywordIngress } = require("./verticals/codeclip/provider-adapters");
     const {
+      resolveCodeClipProviderActivationEvent,
+    } = require("./verticals/codeclip/provider-activation");
+    const {
       buildProviderKeywordIdempotencyKey,
       claimProviderKeywordIdempotency,
       readProviderKeywordResponse,
       recordProviderKeywordResponse,
     } = require("./verticals/codeclip/provider-idempotency");
     const normalizedProviderInput = normalizeProviderKeywordIngress(req.params.provider, req.body || {});
+    const normalizedProviderErrors = Array.isArray(normalizedProviderInput.errors)
+      ? normalizedProviderInput.errors.map((error) => error.code)
+      : [];
+    const shouldUseActivationLookup =
+      !normalizedProviderInput.ok &&
+      normalizedProviderErrors.length === 1 &&
+      normalizedProviderErrors[0] === "EVENT_CODE_REQUIRED" &&
+      normalizedProviderInput.keyword &&
+      normalizedProviderInput.messageId;
 
-    if (!normalizedProviderInput.ok) {
+    if (!normalizedProviderInput.ok && !shouldUseActivationLookup) {
       return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
     }
 
-    const { eventCode, keyword, messageId } = normalizedProviderInput;
-    const idempotencyKey = buildProviderKeywordIdempotencyKey({
-      provider: req.params.provider,
-      eventCode,
-      messageId,
-    });
-    const idempotencyClaim = process.env.REDIS_URL
-      ? await claimProviderKeywordIdempotency({
-          redis,
-          key: idempotencyKey,
-          ttlSeconds: 300,
-        })
-      : { enabled: false, claimed: true };
+    let { eventCode } = normalizedProviderInput;
+    const { keyword, messageId } = normalizedProviderInput;
+    let eventId = null;
+    let meta = null;
 
-    if (idempotencyClaim.enabled && !idempotencyClaim.claimed) {
-      const storedResponse = await readProviderKeywordResponse({
-        redis,
-        key: idempotencyKey,
+    if (eventCode) {
+      meta = Object.values(events).find(
+        (item) => item?.code === eventCode && String(item?.vertical || "").trim().toLowerCase() === "codeclip"
+      ) || null;
+    } else {
+      const activationLookup = resolveCodeClipProviderActivationEvent({
+        provider: req.params.provider,
+        keyword,
+        providerAccountId: req.body?.providerAccountId,
+        events,
       });
 
-      if (storedResponse) {
-        return res.status(200).json(storedResponse);
+      if (!activationLookup.ok) {
+        if (["PROVIDER_REQUIRED", "KEYWORD_REQUIRED"].includes(activationLookup.reason)) {
+          return res.status(400).json({
+            ok: false,
+            error: "Invalid provider keyword payload",
+            reason: activationLookup.reason,
+          });
+        }
+
+        if (activationLookup.reason === "AMBIGUOUS_MATCH") {
+          return res.status(409).json({
+            ok: false,
+            error: "Ambiguous provider activation match",
+            reason: activationLookup.reason,
+          });
+        }
+
+        return res.status(404).json({
+          ok: false,
+          error: "Event not found",
+          reason: activationLookup.reason,
+        });
       }
 
-      return res.status(202).json({
-        ok: false,
-        duplicate: true,
-        status: "processing",
-        eventCode,
-        messageId,
-      });
+      meta = activationLookup.event;
+      eventCode = String(meta?.code || "").trim();
     }
-
-    let eventId = null;
-    let meta = Object.values(events).find(
-      (item) => item?.code === eventCode && String(item?.vertical || "").trim().toLowerCase() === "codeclip"
-    ) || null;
 
     if (meta?.id) eventId = meta.id;
 
@@ -3253,6 +3272,39 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
 
     if (!meta || String(meta.vertical || "").trim().toLowerCase() !== "codeclip") {
       return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    eventCode = String(eventCode || meta.code || "").trim();
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider: req.params.provider,
+      eventCode,
+      messageId,
+    });
+    const idempotencyClaim = process.env.REDIS_URL
+      ? await claimProviderKeywordIdempotency({
+          redis,
+          key: idempotencyKey,
+          ttlSeconds: 300,
+        })
+      : { enabled: false, claimed: true };
+
+    if (idempotencyClaim.enabled && !idempotencyClaim.claimed) {
+      const storedResponse = await readProviderKeywordResponse({
+        redis,
+        key: idempotencyKey,
+      });
+
+      if (storedResponse) {
+        return res.status(200).json(storedResponse);
+      }
+
+      return res.status(202).json({
+        ok: false,
+        duplicate: true,
+        status: "processing",
+        eventCode,
+        messageId,
+      });
     }
 
     const result = await codeClipVertical.service.handleCodeClipKeywordEntry({
