@@ -2,6 +2,7 @@ const { buildCodeClipXtraTokenKey } = require("./tokens");
 
 function buildCodeClipXtraValidationPayload(clipXtra = {}) {
   return {
+    ok: true,
     valid: true,
     vertical: "codeclip",
     rewardType: "clip_xtra",

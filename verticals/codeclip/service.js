@@ -106,6 +106,7 @@ async function validateClipXtraToken({
 async function redeemClipXtraToken({
   token,
   redeemedBy,
+  redis,
   redeemCodeClipXtraRedemption,
   getCodeClipXtraRedemptionByToken,
   codeClipVertical,
@@ -114,6 +115,53 @@ async function redeemClipXtraToken({
   const row = result.row;
 
   if (result.status === REDEMPTION_STATES.NOT_FOUND || !row) {
+    if (redis) {
+      const tokenKey = codeClipVertical.tokens.buildCodeClipXtraTokenKey(token);
+      const rawClipXtra = await redis.get(tokenKey);
+      const clipXtra = rawClipXtra ? JSON.parse(rawClipXtra) : null;
+
+      if (clipXtra) {
+        if (clipXtra.redeemedAt || clipXtra.status === REDEMPTION_STATES.REDEEMED) {
+          const attempts = Number(clipXtra.alreadyRedeemedAttempts || 0) + 1;
+          const updated = {
+            ...clipXtra,
+            status: REDEMPTION_STATES.REDEEMED,
+            alreadyRedeemedAttempts: attempts,
+          };
+          await redis.set(tokenKey, JSON.stringify(updated));
+
+          return {
+            httpStatus: 409,
+            payload: {
+              ok: false,
+              status: REDEMPTION_STATES.ALREADY_REDEEMED,
+              redeemedAt: updated.redeemedAt || null,
+            },
+          };
+        }
+
+        const redeemedAt = new Date().toISOString();
+        const updated = {
+          ...clipXtra,
+          status: REDEMPTION_STATES.REDEEMED,
+          redeemedAt,
+          redeemedBy: String(redeemedBy || "partner").trim() || "partner",
+        };
+        await redis.set(tokenKey, JSON.stringify(updated));
+
+        return {
+          httpStatus: 200,
+          payload: {
+            ...codeClipVertical.validation.buildCodeClipXtraValidationPayload(updated),
+            ok: true,
+            status: REDEMPTION_STATES.REDEEMED,
+            redeemed: true,
+            redeemedAt,
+          },
+        };
+      }
+    }
+
     return {
       httpStatus: 404,
       payload: {

@@ -5858,6 +5858,7 @@ app.post("/redemption/:token/redeem", limitClaimStatus, async (req, res) => {
       const result = await codeClipVertical.service.redeemClipXtraToken({
         token,
         redeemedBy,
+        redis: process.env.REDIS_URL ? redis : null,
         redeemCodeClipXtraRedemption,
         getCodeClipXtraRedemptionByToken,
         codeClipVertical,
