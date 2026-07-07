@@ -3175,6 +3175,9 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
 
     const { normalizeProviderKeywordIngress } = require("./verticals/codeclip/provider-adapters");
     const {
+      normalizeCodeClipProviderEnvelope,
+    } = require("./verticals/codeclip/provider-envelope-normalizer");
+    const {
       buildCodeClipProviderActivationRequest,
     } = require("./verticals/codeclip/provider-activation-request");
     const {
@@ -3183,11 +3186,30 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
       readProviderKeywordResponse,
       recordProviderKeywordResponse,
     } = require("./verticals/codeclip/provider-idempotency");
-    const normalizedProviderInput = normalizeProviderKeywordIngress(req.params.provider, req.body || {});
+    const providerEnvelope = normalizeCodeClipProviderEnvelope({
+      provider: req.params.provider,
+      body: req.body || {},
+      headers: req.headers || {},
+      query: req.query || {},
+    });
+
+    if (!providerEnvelope.ok) {
+      return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
+    }
+
+    const providerAdapterInput = {
+      ...(req.body || {}),
+      text: providerEnvelope.envelope.text,
+      messageId: providerEnvelope.envelope.messageId,
+      providerAccountId: providerEnvelope.envelope.providerAccountId,
+    };
+    const normalizedProviderInput = normalizeProviderKeywordIngress(req.params.provider, providerAdapterInput);
     const activationRequest = buildCodeClipProviderActivationRequest({
       provider: req.params.provider,
       normalizedProviderInput,
-      body: req.body || {},
+      body: providerAdapterInput,
+      headers: req.headers || {},
+      metadata: providerEnvelope.envelope.metadata,
       events,
     });
 

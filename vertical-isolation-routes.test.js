@@ -48,6 +48,11 @@ function assertNoCodeClipProviderInternals(payload) {
   assert.equal(Object.hasOwn(payload, 'persistenceDecision'), false);
   assert.equal(Object.hasOwn(payload, 'persistenceGuaranteePolicy'), false);
   assert.equal(Object.hasOwn(payload, 'persistenceAction'), false);
+  assert.equal(Object.hasOwn(payload, 'resolution'), false);
+  assert.equal(Object.hasOwn(payload, 'envelope'), false);
+  assert.equal(Object.hasOwn(payload, 'rawBody'), false);
+  assert.equal(Object.hasOwn(payload, 'rawHeaders'), false);
+  assert.equal(Object.hasOwn(payload, 'rawQuery'), false);
 }
 
 test('codeClip and codePod report routes are both available for missing events', async () => {
@@ -525,8 +530,196 @@ test('POST /codeclip/provider/:provider/keyword resolves codeClip event by provi
   });
 });
 
+test('POST /codeclip/provider/:provider/keyword accepts test-provider style payload through envelope normalization', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-PROVIDER-ENVELOPE-TEST-${Date.now()}`;
+    const providerEventId = `provider-envelope-test-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip provider envelope test route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'keyword',
+        activationKeyword: 'CLIP',
+        activationChannels: ['test'],
+        providerAccountIds: ['test'],
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        keyword: ' clip ',
+        providerEventId,
+      }),
+    });
+    const keywordEntry = await keywordResponse.json();
+
+    assert.equal(keywordResponse.ok, true);
+    assert.equal(keywordEntry.success, true);
+    assert.equal(keywordEntry.eventCode, code);
+    assert.equal(keywordEntry.messageId, providerEventId);
+    assertNoCodeClipProviderInternals(keywordEntry);
+  });
+});
+
+test('POST /codeclip/provider/:provider/keyword accepts SMS envelope payload', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-PROVIDER-ENVELOPE-SMS-${Date.now()}`;
+    const messageId = `sms-envelope-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip provider envelope sms route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'keyword',
+        activationKeyword: 'OPEN',
+        activationChannels: ['sms'],
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        MessageSid: messageId,
+        Body: ' open ',
+        To: '+15550000001',
+        From: '+15550000002',
+      }),
+    });
+    const keywordEntry = await keywordResponse.json();
+
+    assert.equal(keywordResponse.ok, true);
+    assert.equal(keywordEntry.success, true);
+    assert.equal(keywordEntry.eventCode, code);
+    assert.equal(keywordEntry.messageId, messageId);
+    assertNoCodeClipProviderInternals(keywordEntry);
+  });
+});
+
+test('POST /codeclip/provider/:provider/keyword accepts Meta Messenger envelope payload', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-PROVIDER-ENVELOPE-META-${Date.now()}`;
+    const messageId = `meta-envelope-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip provider envelope meta route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'keyword',
+        activationKeyword: 'VIP',
+        activationChannels: ['Messenger'],
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        entry: [
+          {
+            id: 'page-1',
+            messaging: [
+              {
+                sender: { id: 'sender-1' },
+                recipient: { id: 'page-1' },
+                message: {
+                  mid: messageId,
+                  text: ' vip ',
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    const keywordEntry = await keywordResponse.json();
+
+    assert.equal(keywordResponse.ok, true);
+    assert.equal(keywordEntry.success, true);
+    assert.equal(keywordEntry.eventCode, code);
+    assert.equal(keywordEntry.messageId, messageId);
+    assertNoCodeClipProviderInternals(keywordEntry);
+  });
+});
+
+test('POST /codeclip/provider/:provider/keyword rejects invalid envelope payload without internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    const missingTextResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        MessageSid: `sms-missing-text-${Date.now()}`,
+      }),
+    });
+    const missingText = await missingTextResponse.json();
+
+    assert.equal(missingTextResponse.status, 400);
+    assert.equal(missingText.ok, false);
+    assert.equal(missingText.error, 'Invalid provider keyword payload');
+    assertNoCodeClipProviderInternals(missingText);
+
+    const unsupportedProviderResponse = await fetch(`${baseUrl}/codeclip/provider/unknown/keyword`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        providerEventId: `unknown-provider-event-${Date.now()}`,
+        text: 'CLIP',
+      }),
+    });
+    const unsupportedProvider = await unsupportedProviderResponse.json();
+
+    assert.equal(unsupportedProviderResponse.status, 400);
+    assert.equal(unsupportedProvider.ok, false);
+    assert.equal(unsupportedProvider.error, 'Invalid provider keyword payload');
+    assertNoCodeClipProviderInternals(unsupportedProvider);
+  });
+});
+
 test('POST /codeclip/provider/:provider/keyword activation lookup never matches other verticals', async () => {
   await withTestServer(async (baseUrl) => {
+    const keyword = `ISOLATE-${Date.now()}`;
     const providerEventId = `provider-activation-isolation-${Date.now()}`;
     const createResponse = await fetch(`${baseUrl}/event`, {
       method: 'POST',
@@ -539,7 +732,7 @@ test('POST /codeclip/provider/:provider/keyword activation lookup never matches 
         unlockAt: '2099-01-01T10:00:00.000Z',
         endAt: '2099-01-01T11:00:00.000Z',
         activationMethod: 'keyword',
-        activationKeyword: 'OPEN',
+        activationKeyword: keyword,
         activationChannels: ['sms'],
       }),
     });
@@ -550,7 +743,7 @@ test('POST /codeclip/provider/:provider/keyword activation lookup never matches 
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        text: 'OPEN',
+        text: keyword,
         providerEventId,
       }),
     });
