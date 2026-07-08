@@ -1,7 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 
 const { app } = require('./server');
+
+const CODECLIP_SMS_TEST_SECRET = 'codeclip-sms-test-secret';
 
 async function withTestServer(run) {
   const server = app.listen(0);
@@ -23,6 +26,50 @@ async function readBody(response) {
     return { text, json: JSON.parse(text) };
   } catch {
     return { text, json: null };
+  }
+}
+
+function signCodeClipSmsBody(rawBody, secret = CODECLIP_SMS_TEST_SECRET) {
+  return crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+}
+
+async function withCodeClipSmsSecret(secret, run) {
+  const previousSecret = process.env.CODECLIP_SMS_WEBHOOK_SECRET;
+
+  if (secret == null) {
+    delete process.env.CODECLIP_SMS_WEBHOOK_SECRET;
+  } else {
+    process.env.CODECLIP_SMS_WEBHOOK_SECRET = secret;
+  }
+
+  try {
+    await run();
+  } finally {
+    if (previousSecret === undefined) {
+      delete process.env.CODECLIP_SMS_WEBHOOK_SECRET;
+    } else {
+      process.env.CODECLIP_SMS_WEBHOOK_SECRET = previousSecret;
+    }
+  }
+}
+
+function codeClipSmsHeaders(rawBody, secret = CODECLIP_SMS_TEST_SECRET) {
+  return {
+    'content-type': 'application/json',
+    'x-provider-signature': `sha256=${signCodeClipSmsBody(rawBody, secret)}`,
+  };
+}
+
+function assertProviderKeywordPublicFailure(response, body, forbiddenTerms = []) {
+  assert.equal(response.status, 400);
+  assert.equal(body.ok, false);
+  assert.equal(body.error, 'Invalid provider keyword payload');
+  assert.equal(Object.hasOwn(body, 'reason'), false);
+  assertNoCodeClipProviderInternals(body);
+
+  const serialized = JSON.stringify(body);
+  for (const term of forbiddenTerms) {
+    assert.equal(serialized.includes(term), false);
   }
 }
 
@@ -584,21 +631,24 @@ test('POST /codeclip/provider/:provider/keyword resolves codeClip event by provi
 
     assert.equal(createResponse.ok, true);
 
-    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
+    await withCodeClipSmsSecret(CODECLIP_SMS_TEST_SECRET, async () => {
+      const requestBody = JSON.stringify({
         text: ' clip ',
         providerEventId,
-      }),
-    });
-    const keywordEntry = await keywordResponse.json();
+      });
+      const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+        method: 'POST',
+        headers: codeClipSmsHeaders(requestBody),
+        body: requestBody,
+      });
+      const keywordEntry = await keywordResponse.json();
 
-    assert.equal(keywordResponse.ok, true);
-    assert.equal(keywordEntry.success, true);
-    assert.equal(keywordEntry.eventCode, code);
-    assert.equal(keywordEntry.messageId, providerEventId);
-    assertNoCodeClipProviderInternals(keywordEntry);
+      assert.equal(keywordResponse.ok, true);
+      assert.equal(keywordEntry.success, true);
+      assert.equal(keywordEntry.eventCode, code);
+      assert.equal(keywordEntry.messageId, providerEventId);
+      assertNoCodeClipProviderInternals(keywordEntry);
+    });
   });
 });
 
@@ -764,23 +814,105 @@ test('POST /codeclip/provider/:provider/keyword accepts SMS envelope payload', a
 
     assert.equal(createResponse.ok, true);
 
-    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
+    await withCodeClipSmsSecret(CODECLIP_SMS_TEST_SECRET, async () => {
+      const requestBody = JSON.stringify({
         MessageSid: messageId,
         Body: ' open ',
         To: '+15550000001',
         From: '+15550000002',
-      }),
-    });
-    const keywordEntry = await keywordResponse.json();
+      });
+      const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+        method: 'POST',
+        headers: codeClipSmsHeaders(requestBody),
+        body: requestBody,
+      });
+      const keywordEntry = await keywordResponse.json();
 
-    assert.equal(keywordResponse.ok, true);
-    assert.equal(keywordEntry.success, true);
-    assert.equal(keywordEntry.eventCode, code);
-    assert.equal(keywordEntry.messageId, messageId);
-    assertNoCodeClipProviderInternals(keywordEntry);
+      assert.equal(keywordResponse.ok, true);
+      assert.equal(keywordEntry.success, true);
+      assert.equal(keywordEntry.eventCode, code);
+      assert.equal(keywordEntry.messageId, messageId);
+      assertNoCodeClipProviderInternals(keywordEntry);
+    });
+  });
+});
+
+test('POST /codeclip/provider/sms/keyword requires configured HMAC secret without leaking internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    const requestBody = JSON.stringify({
+      MessageSid: `sms-missing-secret-${Date.now()}`,
+      Body: ' open ',
+      To: '+15550000001',
+      From: '+15550000002',
+    });
+
+    await withCodeClipSmsSecret(null, async () => {
+      const response = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+        method: 'POST',
+        headers: codeClipSmsHeaders(requestBody),
+        body: requestBody,
+      });
+      const body = await response.json();
+
+      assertProviderKeywordPublicFailure(response, body, [
+        'SECRET_NOT_CONFIGURED',
+        'SECRET_REQUIRED',
+        CODECLIP_SMS_TEST_SECRET,
+      ]);
+    });
+  });
+});
+
+test('POST /codeclip/provider/sms/keyword requires HMAC signature without leaking internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    const requestBody = JSON.stringify({
+      MessageSid: `sms-missing-signature-${Date.now()}`,
+      Body: ' open ',
+      To: '+15550000001',
+      From: '+15550000002',
+    });
+
+    await withCodeClipSmsSecret(CODECLIP_SMS_TEST_SECRET, async () => {
+      const response = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: requestBody,
+      });
+      const body = await response.json();
+
+      assertProviderKeywordPublicFailure(response, body, [
+        'SIGNATURE_REQUIRED',
+        CODECLIP_SMS_TEST_SECRET,
+      ]);
+    });
+  });
+});
+
+test('POST /codeclip/provider/sms/keyword rejects invalid HMAC signature without leaking internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    const requestBody = JSON.stringify({
+      MessageSid: `sms-invalid-signature-${Date.now()}`,
+      Body: ' open ',
+      To: '+15550000001',
+      From: '+15550000002',
+    });
+
+    await withCodeClipSmsSecret(CODECLIP_SMS_TEST_SECRET, async () => {
+      const response = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-provider-signature': 'sha256=0000',
+        },
+        body: requestBody,
+      });
+      const body = await response.json();
+
+      assertProviderKeywordPublicFailure(response, body, [
+        'SIGNATURE_MISMATCH',
+        CODECLIP_SMS_TEST_SECRET,
+      ]);
+    });
   });
 });
 
@@ -845,19 +977,22 @@ test('POST /codeclip/provider/:provider/keyword accepts Meta Messenger envelope 
 
 test('POST /codeclip/provider/:provider/keyword rejects invalid envelope payload without internals', async () => {
   await withTestServer(async (baseUrl) => {
-    const missingTextResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
+    await withCodeClipSmsSecret(CODECLIP_SMS_TEST_SECRET, async () => {
+      const missingTextBody = JSON.stringify({
         MessageSid: `sms-missing-text-${Date.now()}`,
-      }),
-    });
-    const missingText = await missingTextResponse.json();
+      });
+      const missingTextResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+        method: 'POST',
+        headers: codeClipSmsHeaders(missingTextBody),
+        body: missingTextBody,
+      });
+      const missingText = await missingTextResponse.json();
 
-    assert.equal(missingTextResponse.status, 400);
-    assert.equal(missingText.ok, false);
-    assert.equal(missingText.error, 'Invalid provider keyword payload');
-    assertNoCodeClipProviderInternals(missingText);
+      assert.equal(missingTextResponse.status, 400);
+      assert.equal(missingText.ok, false);
+      assert.equal(missingText.error, 'Invalid provider keyword payload');
+      assertNoCodeClipProviderInternals(missingText);
+    });
 
     const unsupportedProviderResponse = await fetch(`${baseUrl}/codeclip/provider/unknown/keyword`, {
       method: 'POST',
@@ -898,20 +1033,23 @@ test('POST /codeclip/provider/:provider/keyword activation lookup never matches 
 
     assert.equal(createResponse.ok, true);
 
-    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
+    await withCodeClipSmsSecret(CODECLIP_SMS_TEST_SECRET, async () => {
+      const requestBody = JSON.stringify({
         text: keyword,
         providerEventId,
-      }),
-    });
-    const body = await keywordResponse.json();
+      });
+      const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+        method: 'POST',
+        headers: codeClipSmsHeaders(requestBody),
+        body: requestBody,
+      });
+      const body = await keywordResponse.json();
 
-    assert.equal(keywordResponse.status, 404);
-    assert.equal(body.ok, false);
-    assert.equal(body.reason, 'NO_MATCH');
-    assertNoCodeClipProviderInternals(body);
+      assert.equal(keywordResponse.status, 404);
+      assert.equal(body.ok, false);
+      assert.equal(body.reason, 'NO_MATCH');
+      assertNoCodeClipProviderInternals(body);
+    });
   });
 });
 
@@ -956,20 +1094,23 @@ test('POST /codeclip/provider/:provider/keyword rejects ambiguous provider activ
     assert.equal(firstCreateResponse.ok, true);
     assert.equal(secondCreateResponse.ok, true);
 
-    const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
+    await withCodeClipSmsSecret(CODECLIP_SMS_TEST_SECRET, async () => {
+      const requestBody = JSON.stringify({
         text: 'VIP',
         providerEventId,
-      }),
-    });
-    const body = await keywordResponse.json();
+      });
+      const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+        method: 'POST',
+        headers: codeClipSmsHeaders(requestBody),
+        body: requestBody,
+      });
+      const body = await keywordResponse.json();
 
-    assert.equal(keywordResponse.status, 409);
-    assert.equal(body.ok, false);
-    assert.equal(body.reason, 'AMBIGUOUS_MATCH');
-    assertNoCodeClipProviderInternals(body);
+      assert.equal(keywordResponse.status, 409);
+      assert.equal(body.ok, false);
+      assert.equal(body.reason, 'AMBIGUOUS_MATCH');
+      assertNoCodeClipProviderInternals(body);
+    });
   });
 });
 

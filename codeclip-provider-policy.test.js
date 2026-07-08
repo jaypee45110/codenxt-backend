@@ -14,7 +14,12 @@ function assertDefaultIdempotency(policy) {
   });
 }
 
-function assertDefaultCapabilities(policy, { runtimeVerification }) {
+function assertDefaultCapabilities(policy, {
+  runtimeVerification,
+  hmacVerification = false,
+  rawBodyRequired = false,
+  liveProvider = false,
+}) {
   assert.deepEqual(policy.capabilities, {
     route: true,
     envelope: true,
@@ -25,9 +30,9 @@ function assertDefaultCapabilities(policy, { runtimeVerification }) {
     idempotency: true,
     webhookVerification: true,
     runtimeVerification,
-    hmacVerification: false,
-    rawBodyRequired: false,
-    liveProvider: false,
+    hmacVerification,
+    rawBodyRequired,
+    liveProvider,
   });
 }
 
@@ -72,9 +77,13 @@ test("codeClip provider policy returns sms provider policy", () => {
   assert.equal(result.policy.routeEnabled, true);
   assert.equal(result.policy.adapter, "sms");
   assert.equal(result.policy.envelopeType, "sms");
-  assert.equal(result.policy.verificationMode, "disabled");
+  assert.equal(result.policy.verificationMode, "hmac-sha256");
   assert.equal(result.policy.secretEnvName, "CODECLIP_SMS_WEBHOOK_SECRET");
-  assertDefaultCapabilities(result.policy, { runtimeVerification: false });
+  assertDefaultCapabilities(result.policy, {
+    runtimeVerification: true,
+    hmacVerification: true,
+    rawBodyRequired: true,
+  });
   assertRuntimeVerificationInvariant(result.policy);
   assertDefaultIdempotency(result.policy);
 });
@@ -144,33 +153,76 @@ test("codeClip provider policy builds verifier request for test provider", () =>
   );
 });
 
-test("codeClip provider policy builds disabled verifier request for sms and meta", () => {
+test("codeClip provider policy builds disabled verifier request for meta", () => {
   const headers = { "x-provider-signature": "unused" };
   const rawBody = "";
 
-  for (const provider of ["sms", "meta"]) {
-    const { policy } = resolveCodeClipProviderPolicy(provider);
-    const request = buildCodeClipProviderVerificationRequest({
+  const { policy } = resolveCodeClipProviderPolicy("meta");
+  const request = buildCodeClipProviderVerificationRequest({
+    policy,
+    provider: "meta",
+    headers,
+    rawBody,
+  });
+
+  assert.equal(request.provider, "meta");
+  assert.equal(request.headers, headers);
+  assert.equal(request.rawBody, rawBody);
+  assert.equal(request.mode, "disabled");
+  assert.equal(Object.hasOwn(request, "secret"), false);
+  assert.equal(Object.hasOwn(request, "secretResolution"), false);
+  assert.equal(Object.hasOwn(request, "signatureHeader"), false);
+  assert.equal(Object.hasOwn(request, "signatureHeaders"), false);
+  assert.equal(Object.hasOwn(request, "verificationMethod"), false);
+  assert.equal(Object.hasOwn(request, "rawBodyRequired"), false);
+  assert.equal(policy.capabilities.hmacVerification, false);
+  assert.equal(policy.capabilities.rawBodyRequired, false);
+  assert.equal(policy.capabilities.liveProvider, false);
+});
+
+test("codeClip provider policy builds hmac verifier request for sms with configured secret", () => {
+  const { policy } = resolveCodeClipProviderPolicy("sms");
+  const headers = { "x-provider-signature": "unused" };
+  const rawBody = "Body=OPEN";
+
+  assert.deepEqual(
+    buildCodeClipProviderVerificationRequest({
       policy,
-      provider,
+      provider: "sms",
       headers,
       rawBody,
-    });
+      env: {
+        CODECLIP_SMS_WEBHOOK_SECRET: " sms-secret ",
+      },
+    }),
+    {
+      provider: "sms",
+      headers,
+      rawBody,
+      mode: "hmac-sha256",
+      secret: "sms-secret",
+    }
+  );
+});
 
-    assert.equal(request.provider, provider);
-    assert.equal(request.headers, headers);
-    assert.equal(request.rawBody, rawBody);
-    assert.equal(request.mode, "disabled");
-    assert.equal(Object.hasOwn(request, "secret"), false);
-    assert.equal(Object.hasOwn(request, "secretResolution"), false);
-    assert.equal(Object.hasOwn(request, "signatureHeader"), false);
-    assert.equal(Object.hasOwn(request, "signatureHeaders"), false);
-    assert.equal(Object.hasOwn(request, "verificationMethod"), false);
-    assert.equal(Object.hasOwn(request, "rawBodyRequired"), false);
-    assert.equal(policy.capabilities.hmacVerification, false);
-    assert.equal(policy.capabilities.rawBodyRequired, false);
-    assert.equal(policy.capabilities.liveProvider, false);
-  }
+test("codeClip provider policy builds missing-secret signal for sms without configured secret", () => {
+  const { policy } = resolveCodeClipProviderPolicy("sms");
+  const request = buildCodeClipProviderVerificationRequest({
+    policy,
+    provider: "sms",
+    headers: { "x-provider-signature": "unused" },
+    rawBody: "Body=OPEN",
+    env: {},
+  });
+
+  assert.equal(request.provider, "sms");
+  assert.equal(request.mode, "hmac-sha256");
+  assert.equal(Object.hasOwn(request, "secret"), false);
+  assert.deepEqual(request.secretResolution, {
+    ok: false,
+    reason: "SECRET_NOT_CONFIGURED",
+    required: true,
+  });
 });
 
 test("codeClip provider policy builds verifier request with secret when required and configured", () => {

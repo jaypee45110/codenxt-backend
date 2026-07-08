@@ -10,7 +10,12 @@ function isCodeClipRuntimeVerificationEnabled(verificationMode) {
   return String(verificationMode || "").trim().toLowerCase() !== "disabled";
 }
 
-function buildCapabilities({ verificationMode }) {
+function buildCapabilities({
+  verificationMode,
+  hmacVerification = false,
+  rawBodyRequired = false,
+  liveProvider = false,
+}) {
   return {
     route: true,
     envelope: true,
@@ -21,9 +26,9 @@ function buildCapabilities({ verificationMode }) {
     idempotency: true,
     webhookVerification: true,
     runtimeVerification: isCodeClipRuntimeVerificationEnabled(verificationMode),
-    hmacVerification: false,
-    rawBodyRequired: false,
-    liveProvider: false,
+    hmacVerification,
+    rawBodyRequired,
+    liveProvider,
   };
 }
 
@@ -47,9 +52,13 @@ const PROVIDER_POLICIES = {
     routeEnabled: true,
     adapter: "sms",
     envelopeType: "sms",
-    verificationMode: "disabled",
+    verificationMode: "hmac-sha256",
     secretEnvName: "CODECLIP_SMS_WEBHOOK_SECRET",
-    capabilities: buildCapabilities({ verificationMode: "disabled" }),
+    capabilities: buildCapabilities({
+      verificationMode: "hmac-sha256",
+      hmacVerification: true,
+      rawBodyRequired: true,
+    }),
     idempotency: {
       enabled: true,
       claimTtlSeconds: 300,
