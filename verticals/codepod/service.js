@@ -584,6 +584,76 @@ function createCodePodKeywordAudienceContextSnapshot(input = {}) {
   return context;
 }
 
+function createCodePodRewardAssignmentDecision(input = {}) {
+  const audienceContext = input.audienceContext || null;
+  const interaction = input.interaction || null;
+  const routingOutcome = input.routingOutcome || null;
+  const source = normalizeString(audienceContext?.source || interaction?.source || routingOutcome?.source);
+  const eventCode = normalizeString(audienceContext?.eventCode || interaction?.eventCode || routingOutcome?.eventCode);
+
+  if (!eventCode || !source) return null;
+
+  const outcome = normalizeString(routingOutcome?.routingOutcome || interaction?.routingOutcome || "MATCH") || "MATCH";
+  const interactionType = normalizeString(routingOutcome?.interactionType || interaction?.interactionType || source);
+  const decision = outcome === "MATCH" ? "eligible" : "not_eligible";
+  const rewardDomain = source === "scan" ? "digitalSouvenir" : "deferred";
+  const assignmentStatus = source === "scan" && decision === "eligible" ? "pending" : "not_assigned";
+
+  const result = {
+    vertical: "codepod",
+    source,
+    transport: normalizeString(audienceContext?.transport || interaction?.transport || routingOutcome?.transport),
+    eventCode,
+    entryCode: normalizeString(audienceContext?.entryCode || interaction?.entryCode || routingOutcome?.entryCode || eventCode),
+    interactionType,
+    routingOutcome: outcome,
+    decision,
+    rewardDomain,
+    assignmentStatus,
+  };
+
+  const eventId = normalizeString(audienceContext?.eventId || interaction?.eventId || routingOutcome?.eventId);
+  const scanId = normalizeString(audienceContext?.scanId || interaction?.scanId || routingOutcome?.scanId);
+  const keyword = normalizeString(audienceContext?.keyword || interaction?.keyword || routingOutcome?.keyword);
+  const messageId = normalizeString(audienceContext?.messageId || interaction?.messageId || routingOutcome?.messageId);
+  const provider = normalizeString(audienceContext?.provider || interaction?.provider || routingOutcome?.provider);
+  const providerAccountId = normalizeString(audienceContext?.providerAccountId || interaction?.providerAccountId || routingOutcome?.providerAccountId);
+
+  if (eventId) result.eventId = eventId;
+  if (scanId) result.scanId = scanId;
+  if (keyword) result.keyword = keyword;
+  if (messageId) result.messageId = messageId;
+  if (provider) result.provider = provider;
+  if (providerAccountId) result.providerAccountId = providerAccountId;
+
+  return result;
+}
+
+function createCodePodRewardAssignmentSnapshot(input = {}) {
+  const decision = input.decision || createCodePodRewardAssignmentDecision(input);
+
+  if (!decision) return null;
+
+  return {
+    vertical: "codepod",
+    source: decision.source,
+    transport: decision.transport,
+    eventCode: decision.eventCode,
+    entryCode: decision.entryCode,
+    interactionType: decision.interactionType,
+    routingOutcome: decision.routingOutcome,
+    decision: decision.decision,
+    rewardDomain: decision.rewardDomain,
+    assignmentStatus: decision.assignmentStatus,
+    eventId: decision.eventId || "",
+    scanId: decision.scanId || "",
+    keyword: decision.keyword || "",
+    messageId: decision.messageId || "",
+    provider: decision.provider || "",
+    providerAccountId: decision.providerAccountId || "",
+  };
+}
+
 function buildCodePodRuntimeChain(input = {}) {
   const audienceEntry = input.audienceEntry || null;
   const audienceIntent = input.audienceIntent || null;
@@ -603,18 +673,30 @@ function buildCodePodRuntimeChain(input = {}) {
 
     if (!interaction) return null;
 
+    const audienceContext = createCodePodAudienceContextSnapshot({
+      ...input,
+      eventCode: interaction.eventCode,
+      eventId: interaction.eventId,
+      scanId: interaction.scanId,
+      audienceEntry,
+      audienceIntent,
+    });
+    const routingOutcome = createCodePodScanRoutingOutcome({ interaction });
+    const rewardAssignmentDecision = createCodePodRewardAssignmentDecision({
+      audienceContext,
+      interaction,
+      routingOutcome,
+    });
+
     return {
       audienceEntry,
       audienceIntent,
       interaction,
-      routingOutcome: createCodePodScanRoutingOutcome({ interaction }),
-      audienceContext: createCodePodAudienceContextSnapshot({
-        ...input,
-        eventCode: interaction.eventCode,
-        eventId: interaction.eventId,
-        scanId: interaction.scanId,
-        audienceEntry,
-        audienceIntent,
+      routingOutcome,
+      audienceContext,
+      rewardAssignmentDecision,
+      rewardAssignmentSnapshot: createCodePodRewardAssignmentSnapshot({
+        decision: rewardAssignmentDecision,
       }),
     };
   }
@@ -628,22 +710,34 @@ function buildCodePodRuntimeChain(input = {}) {
 
     if (!interaction) return null;
 
+    const audienceContext = createCodePodKeywordAudienceContextSnapshot({
+      ...input,
+      eventCode: interaction.eventCode,
+      eventId: interaction.eventId,
+      entryCode: interaction.entryCode,
+      keyword: interaction.keyword,
+      messageId: interaction.messageId,
+      provider: interaction.provider,
+      providerAccountId: interaction.providerAccountId,
+      audienceEntry,
+      audienceIntent,
+    });
+    const routingOutcome = createCodePodKeywordRoutingOutcome({ interaction });
+    const rewardAssignmentDecision = createCodePodRewardAssignmentDecision({
+      audienceContext,
+      interaction,
+      routingOutcome,
+    });
+
     return {
       audienceEntry,
       audienceIntent,
       interaction,
-      routingOutcome: createCodePodKeywordRoutingOutcome({ interaction }),
-      audienceContext: createCodePodKeywordAudienceContextSnapshot({
-        ...input,
-        eventCode: interaction.eventCode,
-        eventId: interaction.eventId,
-        entryCode: interaction.entryCode,
-        keyword: interaction.keyword,
-        messageId: interaction.messageId,
-        provider: interaction.provider,
-        providerAccountId: interaction.providerAccountId,
-        audienceEntry,
-        audienceIntent,
+      routingOutcome,
+      audienceContext,
+      rewardAssignmentDecision,
+      rewardAssignmentSnapshot: createCodePodRewardAssignmentSnapshot({
+        decision: rewardAssignmentDecision,
       }),
     };
   }
@@ -660,6 +754,8 @@ module.exports = {
   createCodePodKeywordAudienceContextSnapshot,
   createCodePodKeywordInteractionSnapshot,
   createCodePodKeywordRoutingOutcome,
+  createCodePodRewardAssignmentDecision,
+  createCodePodRewardAssignmentSnapshot,
   createCodePodScanRoutingOutcome,
   normalizeCodePodDigitalSouvenir,
   normalizeCodePodKeywordAudienceEntry,

@@ -604,6 +604,38 @@ test('codePod COAS foundation builds shared runtime chain for scan', () => {
   assert.equal(chain.audienceContext.vertical, 'codepod');
   assert.equal(chain.audienceContext.source, 'scan');
   assert.equal(chain.audienceContext.transport, 'http');
+  assert.deepEqual(chain.rewardAssignmentDecision, {
+    vertical: 'codepod',
+    source: 'scan',
+    transport: 'http',
+    eventCode: 'CP-SCAN-CHAIN',
+    entryCode: 'CP-SCAN-CHAIN',
+    interactionType: 'scan',
+    routingOutcome: 'MATCH',
+    decision: 'eligible',
+    rewardDomain: 'digitalSouvenir',
+    assignmentStatus: 'pending',
+    eventId: 'event-codepod-scan-chain',
+    scanId: 'scan-codepod-chain',
+  });
+  assert.deepEqual(chain.rewardAssignmentSnapshot, {
+    vertical: 'codepod',
+    source: 'scan',
+    transport: 'http',
+    eventCode: 'CP-SCAN-CHAIN',
+    entryCode: 'CP-SCAN-CHAIN',
+    interactionType: 'scan',
+    routingOutcome: 'MATCH',
+    decision: 'eligible',
+    rewardDomain: 'digitalSouvenir',
+    assignmentStatus: 'pending',
+    eventId: 'event-codepod-scan-chain',
+    scanId: 'scan-codepod-chain',
+    keyword: '',
+    messageId: '',
+    provider: '',
+    providerAccountId: '',
+  });
 });
 
 test('codePod COAS foundation builds shared runtime chain for keyword', () => {
@@ -647,6 +679,41 @@ test('codePod COAS foundation builds shared runtime chain for keyword', () => {
   assert.equal(chain.audienceContext.source, 'keyword');
   assert.equal(chain.audienceContext.transport, 'message');
   assert.equal(chain.audienceContext.keyword, 'LISTEN');
+  assert.deepEqual(chain.rewardAssignmentDecision, {
+    vertical: 'codepod',
+    source: 'keyword',
+    transport: 'message',
+    eventCode: 'CP-KEYWORD-CHAIN',
+    entryCode: 'CP-KEYWORD-CHAIN',
+    interactionType: 'keyword',
+    routingOutcome: 'MATCH',
+    decision: 'eligible',
+    rewardDomain: 'deferred',
+    assignmentStatus: 'not_assigned',
+    eventId: 'event-codepod-keyword-chain',
+    keyword: 'LISTEN',
+    messageId: 'message-codepod-keyword-chain',
+    provider: 'test',
+    providerAccountId: 'account-codepod-keyword-chain',
+  });
+  assert.deepEqual(chain.rewardAssignmentSnapshot, {
+    vertical: 'codepod',
+    source: 'keyword',
+    transport: 'message',
+    eventCode: 'CP-KEYWORD-CHAIN',
+    entryCode: 'CP-KEYWORD-CHAIN',
+    interactionType: 'keyword',
+    routingOutcome: 'MATCH',
+    decision: 'eligible',
+    rewardDomain: 'deferred',
+    assignmentStatus: 'not_assigned',
+    eventId: 'event-codepod-keyword-chain',
+    scanId: '',
+    keyword: 'LISTEN',
+    messageId: 'message-codepod-keyword-chain',
+    provider: 'test',
+    providerAccountId: 'account-codepod-keyword-chain',
+  });
 
   const serializedOutput = JSON.stringify(chain);
   for (const forbidden of ['rawPayload', '127.0.0.1', 'test-agent', '+4712345678', '@participant', 'OpenClip', 'Clip+', 'ClipXtra', 'openClip', 'clipPlus', 'clipXtra', 'Screen Video', 'screenVideoUrl']) {
