@@ -1,7 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const codePod = require('./verticals/codepod');
+
+const codePodServiceSource = fs.readFileSync(
+  path.join(__dirname, 'verticals', 'codepod', 'service.js'),
+  'utf8'
+);
 
 function createFakeRedis(initialEntries = {}) {
   const store = new Map(Object.entries(initialEntries));
@@ -397,4 +404,69 @@ test('codePod service GoldXtra assignment backfills token for existing assigned 
   const storedScan = redis.calls.find((call) => call[0] === 'set' && call[1] === 'codepod:partnerReward:scan:CP-GX-BACKFILL:scan-backfill');
   assert.ok(storedScan);
   assert.equal(JSON.parse(storedScan[2]).redemptionToken, 'GX-BACKFILLED');
+});
+
+test('codePod reward source of truth stays native and isolated', async () => {
+  const event = {};
+  const digitalSouvenir = codePod.service.normalizeCodePodDigitalSouvenir({
+    general: {
+      enabled: true,
+      title: 'Native Digital Souvenir',
+      type: 'url',
+      contentUrl: 'https://codepod.example/digital-souvenir',
+      quantity: 0,
+    },
+    openClip: {
+      enabled: true,
+      title: 'codeClip reward must be ignored',
+    },
+    clipPlus: {
+      enabled: true,
+      title: 'codeClip Clip+ must be ignored',
+    },
+    screenVideoUrl: 'https://screen-video.example/legacy.mp4',
+  });
+
+  assert.deepEqual(Object.keys(digitalSouvenir).sort(), ['general', 'gold', 'goldXtra', 'silver']);
+  assert.equal(Object.hasOwn(digitalSouvenir, 'openClip'), false);
+  assert.equal(Object.hasOwn(digitalSouvenir, 'clipPlus'), false);
+  assert.equal(Object.hasOwn(digitalSouvenir, 'clipXtra'), false);
+  assert.equal(Object.hasOwn(digitalSouvenir, 'screenVideoUrl'), false);
+
+  const assignment = await codePod.service.assignCodePodDigitalSouvenirTier(
+    'CP-SOURCE-GUARDRAIL',
+    'scan-native-source',
+    digitalSouvenir,
+    event
+  );
+
+  assert.equal(assignment.tier, 'general');
+  assert.equal(assignment.unlimited, true);
+  assert.equal(event._codepodDigitalSouvenirAssigned.general, 1);
+
+  const partnerReward = codePod.service.normalizeCodePodPartnerReward({
+    active: true,
+    quantity: 1,
+    title: 'Native GoldXtra',
+    openClip: { title: 'codeClip reward must be ignored' },
+    clipXtra: { title: 'codeClip ClipXtra must be ignored' },
+    screenVideoUrl: 'https://screen-video.example/legacy.mp4',
+  });
+
+  assert.equal(partnerReward.rewardType, 'partner_reward');
+  assert.equal(partnerReward.tier, 'gold');
+  assert.equal(partnerReward.displayTier, 'GoldXtra');
+  assert.equal(Object.hasOwn(partnerReward, 'openClip'), false);
+  assert.equal(Object.hasOwn(partnerReward, 'clipXtra'), false);
+  assert.equal(Object.hasOwn(partnerReward, 'screenVideoUrl'), false);
+
+  assert.match(codePodServiceSource, /normalizeCodePodDigitalSouvenir/);
+  assert.match(codePodServiceSource, /assignCodePodGoldXtra/);
+  assert.equal(codePodServiceSource.includes('normalizeCodeClipRewards'), false);
+  assert.equal(codePodServiceSource.includes('openClip'), false);
+  assert.equal(codePodServiceSource.includes('clipPlus'), false);
+  assert.equal(codePodServiceSource.includes('clipXtra'), false);
+  assert.equal(codePodServiceSource.includes('screenVideoUrl'), false);
+  assert.equal(codePodServiceSource.includes('generate-screen-video'), false);
+  assert.equal(codePodServiceSource.includes('runScreenVideoGenerator'), false);
 });
