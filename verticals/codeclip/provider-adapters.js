@@ -1,3 +1,5 @@
+const { normalizeCodeClipProviderName } = require("./provider-registry");
+
 function normalizeTestProviderKeyword(input = {}) {
   const eventCode = String(input.eventCode || "").trim();
   const keyword = String(input.text || "").trim();
@@ -115,7 +117,7 @@ function emptyProviderKeywordResult(errors = []) {
 }
 
 function normalizeProviderKeywordIngress(provider, input = {}) {
-  const normalizedProvider = String(provider || "").trim().toLowerCase();
+  const normalizedProvider = normalizeCodeClipProviderName(provider);
 
   if (!normalizedProvider) {
     return emptyProviderKeywordResult([{ code: "PROVIDER_REQUIRED" }]);
