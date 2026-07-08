@@ -3164,7 +3164,7 @@ app.post("/codeclip/test-provider/keyword", async (req, res) => {
   }
 });
 
-app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
+async function handleCodeClipProviderKeywordRoute(req, res) {
   try {
     const expectedToken = process.env.CODECLIP_PROVIDER_WEBHOOK_TOKEN || "";
     const providedToken = String(req.headers["x-codeclip-provider-token"] || "").trim();
@@ -3360,7 +3360,9 @@ app.post("/codeclip/provider/:provider/keyword", async (req, res) => {
     console.error("codeClip provider keyword failed:", err.message);
     return res.status(500).json({ ok: false, error: "Failed to process provider keyword" });
   }
-});
+}
+
+app.post("/codeclip/provider/:provider/keyword", handleCodeClipProviderKeywordRoute);
 
 app.get("/report/:eventCode", requireCodePerksAdmin, async (req, res) => {
   try {
