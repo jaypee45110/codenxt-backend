@@ -30,6 +30,13 @@ function assertDefaultCapabilities(policy, { runtimeVerification }) {
   });
 }
 
+function assertRuntimeVerificationInvariant(policy) {
+  assert.equal(
+    policy.capabilities.runtimeVerification,
+    policy.verificationMode !== "disabled"
+  );
+}
+
 test("codeClip provider policy returns test provider policy", () => {
   const result = resolveCodeClipProviderPolicy("test");
 
@@ -41,6 +48,7 @@ test("codeClip provider policy returns test provider policy", () => {
   assert.equal(result.policy.verificationMode, "test");
   assert.equal(result.policy.secretEnvName, "");
   assertDefaultCapabilities(result.policy, { runtimeVerification: true });
+  assertRuntimeVerificationInvariant(result.policy);
   assertDefaultIdempotency(result.policy);
 });
 
@@ -55,6 +63,7 @@ test("codeClip provider policy returns sms provider policy", () => {
   assert.equal(result.policy.verificationMode, "disabled");
   assert.equal(result.policy.secretEnvName, "CODECLIP_SMS_WEBHOOK_SECRET");
   assertDefaultCapabilities(result.policy, { runtimeVerification: false });
+  assertRuntimeVerificationInvariant(result.policy);
   assertDefaultIdempotency(result.policy);
 });
 
@@ -69,6 +78,7 @@ test("codeClip provider policy returns meta provider policy", () => {
   assert.equal(result.policy.verificationMode, "disabled");
   assert.equal(result.policy.secretEnvName, "CODECLIP_META_WEBHOOK_SECRET");
   assertDefaultCapabilities(result.policy, { runtimeVerification: false });
+  assertRuntimeVerificationInvariant(result.policy);
   assertDefaultIdempotency(result.policy);
 });
 

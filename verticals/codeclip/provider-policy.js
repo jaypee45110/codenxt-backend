@@ -3,7 +3,11 @@ const {
   normalizeCodeClipProviderName,
 } = require("./provider-registry");
 
-function buildCapabilities({ runtimeVerification }) {
+function isCodeClipRuntimeVerificationEnabled(verificationMode) {
+  return String(verificationMode || "").trim().toLowerCase() !== "disabled";
+}
+
+function buildCapabilities({ verificationMode }) {
   return {
     route: true,
     envelope: true,
@@ -13,7 +17,7 @@ function buildCapabilities({ runtimeVerification }) {
     activationLookup: true,
     idempotency: true,
     webhookVerification: true,
-    runtimeVerification,
+    runtimeVerification: isCodeClipRuntimeVerificationEnabled(verificationMode),
     hmacVerification: false,
     rawBodyRequired: false,
     liveProvider: false,
@@ -28,7 +32,7 @@ const PROVIDER_POLICIES = {
     envelopeType: "meta",
     verificationMode: "disabled",
     secretEnvName: "CODECLIP_META_WEBHOOK_SECRET",
-    capabilities: buildCapabilities({ runtimeVerification: false }),
+    capabilities: buildCapabilities({ verificationMode: "disabled" }),
     idempotency: {
       enabled: true,
       claimTtlSeconds: 300,
@@ -42,7 +46,7 @@ const PROVIDER_POLICIES = {
     envelopeType: "sms",
     verificationMode: "disabled",
     secretEnvName: "CODECLIP_SMS_WEBHOOK_SECRET",
-    capabilities: buildCapabilities({ runtimeVerification: false }),
+    capabilities: buildCapabilities({ verificationMode: "disabled" }),
     idempotency: {
       enabled: true,
       claimTtlSeconds: 300,
@@ -56,7 +60,7 @@ const PROVIDER_POLICIES = {
     envelopeType: "test",
     verificationMode: "test",
     secretEnvName: "",
-    capabilities: buildCapabilities({ runtimeVerification: true }),
+    capabilities: buildCapabilities({ verificationMode: "test" }),
     idempotency: {
       enabled: true,
       claimTtlSeconds: 300,
