@@ -445,6 +445,70 @@ test('codePod COAS foundation builds observational Interaction snapshot', () => 
   assert.equal(interaction.handle, undefined);
 });
 
+test('codePod COAS foundation builds scan RoutingOutcome', () => {
+  const normalized = codePod.service.normalizeCodePodScanAudienceEntry({
+    eventCode: ' CP-SCAN-ROUTING ',
+    eventId: ' event-codepod-scan-routing ',
+    scanId: ' scan-codepod-routing ',
+    requestedVertical: ' codepod ',
+  });
+  const interaction = codePod.service.createCodePodInteractionSnapshot({
+    eventCode: ' CP-SCAN-ROUTING ',
+    eventId: ' event-codepod-scan-routing ',
+    scanId: ' scan-codepod-routing ',
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    timestamp: '2026-07-01T00:05:00.000Z',
+  });
+
+  const outcome = codePod.service.createCodePodScanRoutingOutcome({ interaction });
+
+  assert.deepEqual(outcome, {
+    vertical: 'codepod',
+    source: 'scan',
+    transport: 'http',
+    routingOutcome: 'MATCH',
+    interactionType: 'scan',
+    eventCode: 'CP-SCAN-ROUTING',
+    entryCode: 'CP-SCAN-ROUTING',
+    eventId: 'event-codepod-scan-routing',
+    scanId: 'scan-codepod-routing',
+  });
+});
+
+test('codePod COAS foundation does not build scan RoutingOutcome without eventCode', () => {
+  const outcome = codePod.service.createCodePodScanRoutingOutcome({
+    scanId: 'scan-missing-event-code',
+  });
+
+  assert.equal(outcome, null);
+});
+
+test('codePod scan RoutingOutcome foundation stays native and isolated', () => {
+  const outcome = codePod.service.createCodePodScanRoutingOutcome({
+    eventCode: 'CP-SCAN-ROUTING-ISOLATION',
+    scanId: 'scan-routing-isolation',
+    openClip: 'must be ignored',
+    clipPlus: 'must be ignored',
+    clipXtra: 'must be ignored',
+    screenVideoUrl: 'https://screen-video.example/legacy.mp4',
+  });
+
+  assert.equal(outcome.vertical, 'codepod');
+  assert.equal(outcome.source, 'scan');
+  assert.equal(outcome.transport, 'http');
+  assert.equal(outcome.routingOutcome, 'MATCH');
+  assert.equal(outcome.interactionType, 'scan');
+  assert.equal(outcome.scanId, 'scan-routing-isolation');
+
+  const serializedOutput = JSON.stringify(outcome);
+  const scanRoutingSource = codePod.service.createCodePodScanRoutingOutcome.toString();
+  for (const forbidden of ['OpenClip', 'Clip+', 'ClipXtra', 'openClip', 'clipPlus', 'clipXtra', 'Screen Video', 'screenVideoUrl']) {
+    assert.equal(serializedOutput.includes(forbidden), false);
+    assert.equal(scanRoutingSource.includes(forbidden), false);
+  }
+});
+
 test('codePod COAS foundation does not build Interaction snapshot without eventCode', () => {
   const interaction = codePod.service.createCodePodInteractionSnapshot({
     scanId: 'scan-missing-event-code',

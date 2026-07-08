@@ -501,6 +501,32 @@ function createCodePodKeywordRoutingOutcome(input = {}) {
   return outcome;
 }
 
+function createCodePodScanRoutingOutcome(input = {}) {
+  const interaction = input.interaction || input;
+  const eventCode = normalizeString(input.eventCode || interaction?.eventCode);
+
+  if (!eventCode) return null;
+
+  const routingOutcome = normalizeString(input.routingOutcome || interaction?.routingOutcome || "MATCH") || "MATCH";
+  const eventId = normalizeString(input.eventId || interaction?.eventId);
+  const scanId = normalizeString(input.scanId || interaction?.scanId);
+
+  const outcome = {
+    vertical: "codepod",
+    source: "scan",
+    transport: "http",
+    routingOutcome,
+    interactionType: "scan",
+    eventCode,
+    entryCode: normalizeString(input.entryCode || interaction?.entryCode || eventCode),
+  };
+
+  if (eventId) outcome.eventId = eventId;
+  if (scanId) outcome.scanId = scanId;
+
+  return outcome;
+}
+
 function createCodePodAudienceContextSnapshot(input = {}) {
   const eventCode = normalizeString(input.eventCode);
 
@@ -529,6 +555,7 @@ module.exports = {
   createCodePodInteractionSnapshot,
   createCodePodKeywordInteractionSnapshot,
   createCodePodKeywordRoutingOutcome,
+  createCodePodScanRoutingOutcome,
   normalizeCodePodDigitalSouvenir,
   normalizeCodePodKeywordAudienceEntry,
   normalizeCodePodPartnerReward,
