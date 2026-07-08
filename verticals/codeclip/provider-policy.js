@@ -1,3 +1,8 @@
+const {
+  isCodeClipProviderRegistered,
+  normalizeCodeClipProviderName,
+} = require("./provider-registry");
+
 function buildCapabilities({ runtimeVerification }) {
   return {
     route: true,
@@ -60,10 +65,6 @@ const PROVIDER_POLICIES = {
   },
 };
 
-function normalizeProvider(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
 function clonePolicy(policy) {
   return {
     ...policy,
@@ -77,16 +78,16 @@ function clonePolicy(policy) {
 }
 
 function resolveCodeClipProviderPolicy(provider) {
-  const normalizedProvider = normalizeProvider(provider);
+  const normalizedProvider = normalizeCodeClipProviderName(provider);
 
   if (!normalizedProvider) return { ok: false, reason: "PROVIDER_REQUIRED" };
-
-  const policy = PROVIDER_POLICIES[normalizedProvider];
-  if (!policy) return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
+  if (!isCodeClipProviderRegistered(normalizedProvider)) {
+    return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
+  }
 
   return {
     ok: true,
-    policy: clonePolicy(policy),
+    policy: clonePolicy(PROVIDER_POLICIES[normalizedProvider]),
   };
 }
 
