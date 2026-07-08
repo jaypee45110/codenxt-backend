@@ -38,6 +38,17 @@ function assertRuntimeVerificationInvariant(policy) {
   );
 }
 
+function buildHmacPolicy(overrides = {}) {
+  return {
+    verificationMode: "hmac-sha256",
+    secretEnvName: "CODECLIP_TEST_SECRET",
+    capabilities: {
+      hmacVerification: true,
+    },
+    ...overrides,
+  };
+}
+
 test("codeClip provider policy returns test provider policy", () => {
   const result = resolveCodeClipProviderPolicy("test");
 
@@ -151,6 +162,7 @@ test("codeClip provider policy builds disabled verifier request for sms and meta
     assert.equal(request.rawBody, rawBody);
     assert.equal(request.mode, "disabled");
     assert.equal(Object.hasOwn(request, "secret"), false);
+    assert.equal(Object.hasOwn(request, "secretResolution"), false);
     assert.equal(Object.hasOwn(request, "signatureHeader"), false);
     assert.equal(Object.hasOwn(request, "signatureHeaders"), false);
     assert.equal(Object.hasOwn(request, "verificationMethod"), false);
@@ -159,4 +171,50 @@ test("codeClip provider policy builds disabled verifier request for sms and meta
     assert.equal(policy.capabilities.rawBodyRequired, false);
     assert.equal(policy.capabilities.liveProvider, false);
   }
+});
+
+test("codeClip provider policy builds verifier request with secret when required and configured", () => {
+  const headers = { "x-provider-signature": "unused" };
+  const rawBody = "Body=CLIP";
+
+  assert.deepEqual(
+    buildCodeClipProviderVerificationRequest({
+      policy: buildHmacPolicy(),
+      provider: "sms",
+      headers,
+      rawBody,
+      env: {
+        CODECLIP_TEST_SECRET: " test-secret ",
+      },
+    }),
+    {
+      provider: "sms",
+      headers,
+      rawBody,
+      mode: "hmac-sha256",
+      secret: "test-secret",
+    }
+  );
+});
+
+test("codeClip provider policy builds safe missing-secret signal when required secret is not configured", () => {
+  const request = buildCodeClipProviderVerificationRequest({
+    policy: buildHmacPolicy(),
+    provider: "meta",
+    headers: { "x-hub-signature-256": "sha256=unused" },
+    rawBody: "{\"text\":\"CLIP\"}",
+    env: {
+      OTHER_SECRET: "must-not-leak",
+    },
+  });
+
+  assert.equal(request.provider, "meta");
+  assert.equal(request.mode, "hmac-sha256");
+  assert.equal(Object.hasOwn(request, "secret"), false);
+  assert.deepEqual(request.secretResolution, {
+    ok: false,
+    reason: "SECRET_NOT_CONFIGURED",
+    required: true,
+  });
+  assert.equal(Object.values(request.secretResolution).includes("must-not-leak"), false);
 });

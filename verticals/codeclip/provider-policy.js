@@ -2,6 +2,9 @@ const {
   isCodeClipProviderRegistered,
   normalizeCodeClipProviderName,
 } = require("./provider-registry");
+const {
+  resolveCodeClipProviderVerificationSecret,
+} = require("./provider-secret-resolver");
 
 function isCodeClipRuntimeVerificationEnabled(verificationMode) {
   return String(verificationMode || "").trim().toLowerCase() !== "disabled";
@@ -86,13 +89,27 @@ function buildCodeClipProviderVerificationRequest({
   provider,
   headers,
   rawBody,
+  env = process.env,
 }) {
-  return {
+  const request = {
     provider,
     headers,
     rawBody,
     mode: policy.verificationMode,
   };
+  const secretResolution = resolveCodeClipProviderVerificationSecret(policy, env);
+
+  if (secretResolution.required && secretResolution.ok) {
+    request.secret = secretResolution.secret;
+  } else if (secretResolution.required && !secretResolution.ok) {
+    request.secretResolution = {
+      ok: false,
+      reason: secretResolution.reason,
+      required: true,
+    };
+  }
+
+  return request;
 }
 
 function resolveCodeClipProviderPolicy(provider) {
