@@ -51,6 +51,7 @@ function assertNoCodeClipProviderInternals(payload) {
   assert.equal(Object.hasOwn(payload, 'resolution'), false);
   assert.equal(Object.hasOwn(payload, 'verification'), false);
   assert.equal(Object.hasOwn(payload, 'envelope'), false);
+  assert.equal(Object.hasOwn(payload, 'codeClipRawBody'), false);
   assert.equal(Object.hasOwn(payload, 'rawBody'), false);
   assert.equal(Object.hasOwn(payload, 'rawHeaders'), false);
   assert.equal(Object.hasOwn(payload, 'rawQuery'), false);

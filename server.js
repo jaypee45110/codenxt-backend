@@ -311,8 +311,46 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization", "x-admin-key"]
 }));
 app.options(/.*/, cors());
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ limit: '20mb', extended: true }));
+
+const {
+  captureCodeClipProviderRawBody,
+  isCodeClipProviderWebhookPath,
+} = require("./verticals/codeclip/provider-raw-body");
+
+function captureCodeClipProviderWebhookRawBody(req, res, buf) {
+  if (isCodeClipProviderWebhookPath(req)) {
+    captureCodeClipProviderRawBody(req, buf);
+  }
+}
+
+const codeClipProviderJsonParser = express.json({
+  limit: '20mb',
+  verify: captureCodeClipProviderWebhookRawBody,
+});
+const codeClipProviderUrlencodedParser = express.urlencoded({
+  limit: '20mb',
+  extended: true,
+  verify: captureCodeClipProviderWebhookRawBody,
+});
+const globalJsonParser = express.json({ limit: '20mb' });
+const globalUrlencodedParser = express.urlencoded({ limit: '20mb', extended: true });
+
+app.use((req, res, next) => {
+  if (!isCodeClipProviderWebhookPath(req)) return next();
+  return codeClipProviderJsonParser(req, res, next);
+});
+app.use((req, res, next) => {
+  if (!isCodeClipProviderWebhookPath(req)) return next();
+  return codeClipProviderUrlencodedParser(req, res, next);
+});
+app.use((req, res, next) => {
+  if (isCodeClipProviderWebhookPath(req)) return next();
+  return globalJsonParser(req, res, next);
+});
+app.use((req, res, next) => {
+  if (isCodeClipProviderWebhookPath(req)) return next();
+  return globalUrlencodedParser(req, res, next);
+});
 
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = "codenxt-dev-secret-change-later";
