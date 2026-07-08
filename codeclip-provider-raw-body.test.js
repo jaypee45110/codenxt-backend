@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   captureCodeClipProviderRawBody,
+  isCodeClipProviderWebhookPath,
 } = require("./verticals/codeclip/provider-raw-body");
 
 test("codeClip provider raw body capture preserves Buffer bytes", () => {
@@ -82,4 +83,54 @@ test("codeClip provider raw body capture does not create verification fields", (
   assert.equal(Object.hasOwn(req, "signatureHeaders"), false);
   assert.equal(Object.hasOwn(req, "verification"), false);
   assert.equal(Object.hasOwn(req, "verificationMethod"), false);
+});
+
+test("codeClip provider raw body matcher recognizes provider webhook paths", () => {
+  for (const path of [
+    "/codeclip/provider/test/keyword",
+    "/codeclip/provider/sms/keyword",
+    "/codeclip/provider/meta/keyword",
+    "/codeclip/provider/test/keyword?debug=1",
+    "/codeclip/provider/test/keyword/",
+  ]) {
+    assert.equal(isCodeClipProviderWebhookPath(path), true);
+  }
+});
+
+test("codeClip provider raw body matcher recognizes request objects safely", () => {
+  assert.equal(
+    isCodeClipProviderWebhookPath({ path: "/codeclip/provider/test/keyword" }),
+    true
+  );
+  assert.equal(
+    isCodeClipProviderWebhookPath({
+      originalUrl: "/codeclip/provider/sms/keyword?debug=1",
+    }),
+    true
+  );
+  assert.equal(
+    isCodeClipProviderWebhookPath({
+      path: "/event",
+      originalUrl: "/codeclip/provider/test/keyword",
+    }),
+    false
+  );
+});
+
+test("codeClip provider raw body matcher rejects non-provider paths", () => {
+  for (const input of [
+    "/codeclip/test-provider/keyword",
+    "/codeclip/keyword-entry",
+    "/event",
+    "/scan",
+    "/codepod/provider/test/keyword",
+    "/codeclip/provider/test",
+    "/codeclip/provider/test/keyword/extra",
+    "",
+    null,
+    undefined,
+    {},
+  ]) {
+    assert.equal(isCodeClipProviderWebhookPath(input), false);
+  }
 });

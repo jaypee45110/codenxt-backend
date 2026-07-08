@@ -1,3 +1,18 @@
+function normalizeCodeClipProviderWebhookPathInput(pathOrReq) {
+  if (typeof pathOrReq === "string") return pathOrReq;
+  if (!pathOrReq || typeof pathOrReq !== "object") return "";
+
+  return String(pathOrReq.path || pathOrReq.originalUrl || "");
+}
+
+function isCodeClipProviderWebhookPath(pathOrReq) {
+  const path = normalizeCodeClipProviderWebhookPathInput(pathOrReq)
+    .split("?")[0]
+    .replace(/\/+$/, "");
+
+  return /^\/codeclip\/provider\/[^/]+\/keyword$/.test(path);
+}
+
 function captureCodeClipProviderRawBody(req, buf) {
   if (!req || typeof req !== "object") {
     return { ok: false, reason: "REQUEST_REQUIRED" };
@@ -18,4 +33,5 @@ function captureCodeClipProviderRawBody(req, buf) {
 
 module.exports = {
   captureCodeClipProviderRawBody,
+  isCodeClipProviderWebhookPath,
 };
