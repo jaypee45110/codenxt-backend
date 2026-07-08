@@ -239,6 +239,58 @@ test('GET /codepod/report returns a compatible empty report for a codePod event'
   });
 });
 
+test('GET /codeclip/report exposes runtimeSummary without changing rows or scans contract', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-RUNTIME-SUMMARY-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip runtime summary route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: 'OpenClip',
+          },
+        },
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
+    const reportResponse = await fetch(`${baseUrl}/codeclip/report/${code}`);
+    const report = await reportResponse.json();
+
+    assert.equal(reportResponse.ok, true);
+    assert.equal(report.ok, true);
+    assert.equal(report.vertical, 'codeclip');
+    assert.equal(report.eventCode, code);
+    assert.ok(report.event && typeof report.event === 'object');
+    assert.ok(report.metrics && typeof report.metrics === 'object');
+    assert.equal(Array.isArray(report.rows), true);
+    assert.equal(Array.isArray(report.scans), true);
+    assert.deepEqual(report.scans, report.rows);
+    assert.ok(report.runtimeSummary && typeof report.runtimeSummary === 'object');
+    assert.equal(typeof report.runtimeSummary.totalInteractions, 'number');
+    assert.equal(typeof report.runtimeSummary.matched, 'number');
+    assert.equal(typeof report.runtimeSummary.noCampaignMatch, 'number');
+    assert.equal(typeof report.runtimeSummary.routingConflict, 'number');
+    assert.ok(report.runtimeSummary.routingOutcomes && typeof report.runtimeSummary.routingOutcomes === 'object');
+    assert.equal(typeof report.runtimeSummary.routingOutcomes.MATCH, 'number');
+    assert.equal(typeof report.runtimeSummary.routingOutcomes.NO_CAMPAIGN_MATCH, 'number');
+    assert.equal(typeof report.runtimeSummary.routingOutcomes.ROUTING_CONFLICT, 'number');
+    assert.ok(report.runtimeSummary.persistence && typeof report.runtimeSummary.persistence === 'object');
+    assert.equal(typeof report.runtimeSummary.persistence.ok, 'number');
+    assert.equal(typeof report.runtimeSummary.persistence.degraded, 'number');
+    assert.equal(typeof report.runtimeSummary.persistence.critical, 'number');
+  });
+});
+
 test('POST /event defaults missing vertical to codeTone', async () => {
   await withTestServer(async (baseUrl) => {
     const response = await fetch(`${baseUrl}/event`, {
