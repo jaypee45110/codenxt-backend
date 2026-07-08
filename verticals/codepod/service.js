@@ -431,6 +431,44 @@ function createCodePodInteractionSnapshot(input = {}) {
   };
 }
 
+function createCodePodKeywordInteractionSnapshot(input = {}) {
+  const audienceEntry = input.audienceEntry || null;
+  const audienceIntent = input.audienceIntent || null;
+  const eventCode = normalizeString(input.eventCode || audienceEntry?.eventCode || audienceIntent?.eventCode);
+  const keyword = normalizeString(input.keyword || audienceEntry?.keyword || audienceIntent?.keyword);
+
+  if (!eventCode || !keyword) return null;
+
+  const eventId = normalizeString(input.eventId || audienceEntry?.eventId);
+  const messageId = normalizeString(input.messageId || audienceEntry?.messageId || audienceIntent?.messageId);
+  const provider = normalizeString(input.provider || audienceEntry?.provider || audienceIntent?.provider);
+  const providerAccountId = normalizeString(input.providerAccountId || audienceEntry?.providerAccountId || audienceIntent?.providerAccountId);
+
+  const interaction = {
+    interactionId: null,
+    vertical: "codepod",
+    interactionType: "keyword",
+    eventCode,
+    entryCode: normalizeString(input.entryCode || audienceEntry?.entryCode || audienceIntent?.entryCode || eventCode),
+    keyword,
+    source: "keyword",
+    transport: "message",
+    audienceEntry,
+    audienceIntent,
+    state: "observed",
+    stateTransitions: [],
+    timestamp: input.timestamp || new Date().toISOString(),
+    routingOutcome: "MATCH",
+  };
+
+  if (eventId) interaction.eventId = eventId;
+  if (messageId) interaction.messageId = messageId;
+  if (provider) interaction.provider = provider;
+  if (providerAccountId) interaction.providerAccountId = providerAccountId;
+
+  return interaction;
+}
+
 function createCodePodAudienceContextSnapshot(input = {}) {
   const eventCode = normalizeString(input.eventCode);
 
@@ -457,6 +495,7 @@ module.exports = {
   assignCodePodGoldXtra,
   createCodePodAudienceContextSnapshot,
   createCodePodInteractionSnapshot,
+  createCodePodKeywordInteractionSnapshot,
   normalizeCodePodDigitalSouvenir,
   normalizeCodePodKeywordAudienceEntry,
   normalizeCodePodPartnerReward,

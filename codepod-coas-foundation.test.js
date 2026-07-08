@@ -174,6 +174,100 @@ test('codePod keyword AudienceEntry foundation stays native and isolated', () =>
   }
 });
 
+test('codePod COAS foundation builds observational keyword Interaction snapshot', () => {
+  const normalized = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    eventCode: ' CP-KEYWORD-INTERACTION ',
+    eventId: ' event-codepod-keyword-interaction ',
+    keyword: ' LISTEN ',
+    messageId: ' message-codepod-keyword-interaction ',
+    provider: ' test ',
+    providerAccountId: ' account-codepod-keyword-interaction ',
+    requestedVertical: ' codepod ',
+    receivedAt: '2026-07-01T00:02:00.000Z',
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    rawPayload: { ignored: true },
+    phone: '+4712345678',
+    handle: '@participant',
+  });
+
+  const interaction = codePod.service.createCodePodKeywordInteractionSnapshot({
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    timestamp: '2026-07-01T00:03:00.000Z',
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    rawPayload: { ignored: true },
+    phone: '+4712345678',
+    handle: '@participant',
+  });
+
+  assert.deepEqual(interaction, {
+    interactionId: null,
+    vertical: 'codepod',
+    interactionType: 'keyword',
+    eventCode: 'CP-KEYWORD-INTERACTION',
+    eventId: 'event-codepod-keyword-interaction',
+    entryCode: 'CP-KEYWORD-INTERACTION',
+    keyword: 'LISTEN',
+    messageId: 'message-codepod-keyword-interaction',
+    provider: 'test',
+    providerAccountId: 'account-codepod-keyword-interaction',
+    source: 'keyword',
+    transport: 'message',
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    state: 'observed',
+    stateTransitions: [],
+    timestamp: '2026-07-01T00:03:00.000Z',
+    routingOutcome: 'MATCH',
+  });
+  assert.equal(interaction.ip, undefined);
+  assert.equal(interaction.userAgent, undefined);
+  assert.equal(interaction.rawPayload, undefined);
+  assert.equal(interaction.phone, undefined);
+  assert.equal(interaction.handle, undefined);
+});
+
+test('codePod COAS foundation does not build keyword Interaction snapshot without eventCode or keyword', () => {
+  const missingEventCode = codePod.service.createCodePodKeywordInteractionSnapshot({
+    keyword: 'LISTEN',
+  });
+  const missingKeyword = codePod.service.createCodePodKeywordInteractionSnapshot({
+    eventCode: 'CP-MISSING-KEYWORD-INTERACTION',
+  });
+
+  assert.equal(missingEventCode, null);
+  assert.equal(missingKeyword, null);
+});
+
+test('codePod keyword Interaction foundation stays native and isolated', () => {
+  const normalized = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    eventCode: 'CP-KEYWORD-INTERACTION-ISOLATION',
+    keyword: 'LISTEN',
+  });
+  const interaction = codePod.service.createCodePodKeywordInteractionSnapshot({
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    openClip: 'must be ignored',
+    clipPlus: 'must be ignored',
+    clipXtra: 'must be ignored',
+    screenVideoUrl: 'https://screen-video.example/legacy.mp4',
+  });
+
+  assert.equal(interaction.vertical, 'codepod');
+  assert.equal(interaction.source, 'keyword');
+  assert.equal(interaction.transport, 'message');
+  assert.equal(interaction.keyword, 'LISTEN');
+
+  const serializedOutput = JSON.stringify(interaction);
+  const keywordInteractionSource = codePod.service.createCodePodKeywordInteractionSnapshot.toString();
+  for (const forbidden of ['OpenClip', 'Clip+', 'ClipXtra', 'openClip', 'clipPlus', 'clipXtra', 'Screen Video', 'screenVideoUrl']) {
+    assert.equal(serializedOutput.includes(forbidden), false);
+    assert.equal(keywordInteractionSource.includes(forbidden), false);
+  }
+});
+
 test('codePod COAS foundation rejects missing entry code', () => {
   const result = codePod.service.normalizeCodePodScanAudienceEntry({
     scanId: 'scan-missing-entry-code',
