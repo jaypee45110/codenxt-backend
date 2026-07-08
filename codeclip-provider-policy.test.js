@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  buildCodeClipProviderVerificationRequest,
   resolveCodeClipProviderPolicy,
 } = require("./verticals/codeclip/provider-policy");
 
@@ -109,4 +110,46 @@ test("codeClip provider policy returns a defensive copy", () => {
   const second = resolveCodeClipProviderPolicy("test");
   assertDefaultCapabilities(second.policy, { runtimeVerification: true });
   assertDefaultIdempotency(second.policy);
+});
+
+test("codeClip provider policy builds verifier request for test provider", () => {
+  const { policy } = resolveCodeClipProviderPolicy("test");
+  const headers = { "x-codeclip-test-signature": "valid" };
+  const rawBody = "";
+
+  assert.deepEqual(
+    buildCodeClipProviderVerificationRequest({
+      policy,
+      provider: "test",
+      headers,
+      rawBody,
+    }),
+    {
+      provider: "test",
+      headers,
+      rawBody,
+      mode: "test",
+    }
+  );
+});
+
+test("codeClip provider policy builds disabled verifier request for sms and meta", () => {
+  const headers = { "x-provider-signature": "unused" };
+  const rawBody = "";
+
+  for (const provider of ["sms", "meta"]) {
+    const { policy } = resolveCodeClipProviderPolicy(provider);
+    const request = buildCodeClipProviderVerificationRequest({
+      policy,
+      provider,
+      headers,
+      rawBody,
+    });
+
+    assert.equal(request.provider, provider);
+    assert.equal(request.headers, headers);
+    assert.equal(request.rawBody, rawBody);
+    assert.equal(request.mode, "disabled");
+    assert.equal(Object.hasOwn(request, "secret"), false);
+  }
 });

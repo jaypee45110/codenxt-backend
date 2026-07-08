@@ -81,6 +81,20 @@ function clonePolicy(policy) {
   };
 }
 
+function buildCodeClipProviderVerificationRequest({
+  policy,
+  provider,
+  headers,
+  rawBody,
+}) {
+  return {
+    provider,
+    headers,
+    rawBody,
+    mode: policy.verificationMode,
+  };
+}
+
 function resolveCodeClipProviderPolicy(provider) {
   const normalizedProvider = normalizeCodeClipProviderName(provider);
 
@@ -96,5 +110,6 @@ function resolveCodeClipProviderPolicy(provider) {
 }
 
 module.exports = {
+  buildCodeClipProviderVerificationRequest,
   resolveCodeClipProviderPolicy,
 };
