@@ -2012,6 +2012,7 @@ test('codeClip report helper builds compatible rows from MATCH interactions only
           rawPayload: {
             interaction: { shouldNotLeak: true },
             stateTransitions: [{ to: 'processed' }],
+            persistenceGuaranteePolicy: { severity: 'ok' },
           },
           created_at: '2026-07-01T10:00:00.000Z',
         },
@@ -2020,7 +2021,18 @@ test('codeClip report helper builds compatible rows from MATCH interactions only
           scan_id: 'scan-no-match',
           routing_outcome: 'NO_CAMPAIGN_MATCH',
           interaction_state: 'unmatched',
+          rawPayload: {
+            persistenceGuaranteePolicy: { severity: 'degraded' },
+          },
           created_at: '2026-07-01T10:01:00.000Z',
+        },
+        {
+          event_code: 'CC-REPORT-TEST',
+          scan_id: 'scan-conflict',
+          routing_outcome: 'ROUTING_CONFLICT',
+          interaction_state: 'unmatched',
+          persistence_severity: 'critical',
+          created_at: '2026-07-01T10:02:00.000Z',
         },
       ];
     },
@@ -2075,6 +2087,24 @@ test('codeClip report helper builds compatible rows from MATCH interactions only
   assert.equal(report.rows[0].interaction, undefined);
   assert.equal(report.rows[0].stateTransitions, undefined);
   assert.equal(report.rows[0].interaction_state, undefined);
+  assert.equal(report.rows.find((item) => item.scanId === 'scan-no-match'), undefined);
+  assert.equal(report.rows.find((item) => item.scanId === 'scan-conflict'), undefined);
+  assert.deepEqual(report.runtimeSummary, {
+    totalInteractions: 3,
+    matched: 1,
+    noCampaignMatch: 1,
+    routingConflict: 1,
+    routingOutcomes: {
+      MATCH: 1,
+      NO_CAMPAIGN_MATCH: 1,
+      ROUTING_CONFLICT: 1,
+    },
+    persistence: {
+      ok: 1,
+      degraded: 1,
+      critical: 1,
+    },
+  });
 });
 
 test('codeClip report helper falls back to compatible empty rows without MATCH interactions', async () => {
@@ -2115,6 +2145,22 @@ test('codeClip report helper falls back to compatible empty rows without MATCH i
   assert.equal(report.metrics.scans, 3);
   assert.equal(report.metrics.uniqueScans, 2);
   assert.equal(report.metrics.goldXtraAssigned, 0);
+  assert.deepEqual(report.runtimeSummary, {
+    totalInteractions: 1,
+    matched: 0,
+    noCampaignMatch: 1,
+    routingConflict: 0,
+    routingOutcomes: {
+      MATCH: 0,
+      NO_CAMPAIGN_MATCH: 1,
+      ROUTING_CONFLICT: 0,
+    },
+    persistence: {
+      ok: 0,
+      degraded: 0,
+      critical: 0,
+    },
+  });
 });
 
 test('codeClip report helper matches stable legacy report compatibility fields', async () => {

@@ -22,9 +22,65 @@ function parseRawPayload(row = {}) {
 }
 
 function isRoutingMatch(interaction = {}) {
+  return getRoutingOutcome(interaction) === "MATCH";
+}
+
+function getRoutingOutcome(interaction = {}) {
   const rawPayload = parseRawPayload(interaction);
-  const routingOutcome = interaction.routingOutcome || interaction.routing_outcome || rawPayload.routingOutcome;
-  return routingOutcome === "MATCH";
+  return String(interaction.routingOutcome || interaction.routing_outcome || rawPayload.routingOutcome || "").trim();
+}
+
+function getPersistenceSeverity(interaction = {}) {
+  const rawPayload = parseRawPayload(interaction);
+  return String(
+    interaction.persistenceSeverity ||
+    interaction.persistence_severity ||
+    interaction.persistenceGuaranteePolicy?.severity ||
+    interaction.persistence_guarantee_policy?.severity ||
+    rawPayload.persistenceGuaranteePolicy?.severity ||
+    rawPayload.persistenceDecision?.severity ||
+    ""
+  ).trim().toLowerCase();
+}
+
+function buildRuntimeSummary(interactions = []) {
+  const summary = {
+    totalInteractions: interactions.length,
+    matched: 0,
+    noCampaignMatch: 0,
+    routingConflict: 0,
+    routingOutcomes: {
+      MATCH: 0,
+      NO_CAMPAIGN_MATCH: 0,
+      ROUTING_CONFLICT: 0,
+    },
+    persistence: {
+      ok: 0,
+      degraded: 0,
+      critical: 0,
+    },
+  };
+
+  for (const interaction of interactions) {
+    const routingOutcome = getRoutingOutcome(interaction);
+    if (routingOutcome === "MATCH") {
+      summary.matched += 1;
+      summary.routingOutcomes.MATCH += 1;
+    } else if (routingOutcome === "NO_CAMPAIGN_MATCH") {
+      summary.noCampaignMatch += 1;
+      summary.routingOutcomes.NO_CAMPAIGN_MATCH += 1;
+    } else if (routingOutcome === "ROUTING_CONFLICT") {
+      summary.routingConflict += 1;
+      summary.routingOutcomes.ROUTING_CONFLICT += 1;
+    }
+
+    const persistenceSeverity = getPersistenceSeverity(interaction);
+    if (Object.hasOwn(summary.persistence, persistenceSeverity)) {
+      summary.persistence[persistenceSeverity] += 1;
+    }
+  }
+
+  return summary;
 }
 
 function normalizeTimestamp(value) {
@@ -144,6 +200,7 @@ async function buildCodeClipReport(eventCode, deps = {}) {
       .map((registration) => [String(registration.scanId), String(registration.phone)])
   );
   const assignmentsByScanId = groupRewardAssignmentsByScanId(rewardAssignments);
+  const runtimeSummary = buildRuntimeSummary(interactions);
   const rows = interactions
     .filter(isRoutingMatch)
     .map((interaction) => mapInteractionToReportRow(interaction, assignmentsByScanId, phoneByScanId, code));
@@ -172,11 +229,13 @@ async function buildCodeClipReport(eventCode, deps = {}) {
     rows,
     registrations: registrationRows,
     metrics,
+    runtimeSummary,
     scans: rows,
   };
 }
 
 module.exports = {
   buildCodeClipReport,
+  buildRuntimeSummary,
   groupRewardAssignmentsByScanId,
 };
