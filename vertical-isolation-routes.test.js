@@ -1792,12 +1792,13 @@ test('POST /scan uses stored codePod event vertical when request vertical is mis
     assert.equal(createResponse.ok, true);
     assert.equal(created.event.vertical, 'codepod');
 
+    const scanId = `scan-${Date.now()}`;
     const scanResponse = await fetch(`${baseUrl}/scan`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         eventCode: code,
-        scanId: `scan-${Date.now()}`,
+        scanId,
       }),
     });
     const scan = await scanResponse.json();
@@ -1807,6 +1808,9 @@ test('POST /scan uses stored codePod event vertical when request vertical is mis
     assert.equal(scan.eventCode, code);
     assert.ok(scan.digitalSouvenir && typeof scan.digitalSouvenir === 'object');
     assert.equal(capturedRuntimeChain?.interaction?.eventCode, code);
+    assert.equal(capturedRuntimeChain?.interaction?.eventId, scan.eventId);
+    assert.equal(capturedRuntimeChain?.interaction?.scanId, scanId);
+    assert.equal(capturedRuntimeChain?.interaction?.scanRank, scan.scanRank);
     assert.equal(capturedRuntimeChain?.interaction?.interactionType, 'scan');
     assert.equal(capturedRuntimeChain?.interaction?.tier, scan.tier);
     assert.equal(capturedRuntimeChain?.routingOutcome?.source, 'scan');

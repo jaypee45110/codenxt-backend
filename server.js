@@ -4635,6 +4635,7 @@ const codePodAudienceEntry = isCodePodScan
 void codePodAudienceEntry;
 let codePodSouvenirAssignment = null;
 let goldXtraAssignment = null;
+let codePodRuntimeChain = null;
 let tierLimits = null;
 
 if (isCodePodScan) {
@@ -4698,7 +4699,7 @@ if (isCodePodScan && goldXtraAssignment?.assigned) {
   };
 }
 if (isCodePodScan && codePodAudienceEntry?.ok) {
-  const codePodRuntimeChain = codePodVertical.service.buildCodePodRuntimeChain({
+  codePodRuntimeChain = codePodVertical.service.buildCodePodRuntimeChain({
     audienceEntry: codePodAudienceEntry.audienceEntry,
     audienceIntent: codePodAudienceEntry.audienceIntent,
     eventCode,
@@ -4714,7 +4715,6 @@ if (isCodePodScan && codePodAudienceEntry?.ok) {
       goldXtra: goldXtraAssignment,
     },
   });
-  void codePodRuntimeChain;
 }
 const responsePayload = {
   success: true,
@@ -4782,7 +4782,12 @@ if (isCodePodScan && goldXtraAssignment?.assigned) {
     };
 }
 
-await persistFinalScan(tier, { digitalSouvenir: codePodSouvenirAssignment });
+const persistenceTier = codePodRuntimeChain?.rewardAssignmentSnapshot?.tier || tier;
+await persistFinalScan(
+  persistenceTier,
+  { digitalSouvenir: codePodSouvenirAssignment },
+  codePodRuntimeChain?.interaction || null
+);
 	
 return res.json(responsePayload);
   } catch (err) {
