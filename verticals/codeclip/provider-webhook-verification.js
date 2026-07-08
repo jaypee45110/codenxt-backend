@@ -1,20 +1,19 @@
 const crypto = require("node:crypto");
 
-const SUPPORTED_PROVIDERS = new Set(["meta", "sms", "test"]);
-
-function normalizeProvider(value) {
-  return String(value || "").trim().toLowerCase();
-}
+const {
+  isCodeClipProviderRegistered,
+  normalizeCodeClipProviderName,
+} = require("./provider-registry");
 
 function normalizeMode(value) {
   return String(value || "disabled").trim().toLowerCase();
 }
 
 function headerValue(headers = {}, name) {
-  const normalizedName = normalizeProvider(name);
+  const normalizedName = normalizeCodeClipProviderName(name);
 
   for (const [key, value] of Object.entries(headers || {})) {
-    if (normalizeProvider(key) === normalizedName) return String(value || "").trim();
+    if (normalizeCodeClipProviderName(key) === normalizedName) return String(value || "").trim();
   }
 
   return "";
@@ -101,11 +100,11 @@ function verifyCodeClipProviderWebhook({
   secret,
   mode = "disabled",
 } = {}) {
-  const normalizedProvider = normalizeProvider(provider);
+  const normalizedProvider = normalizeCodeClipProviderName(provider);
   const normalizedMode = normalizeMode(mode);
 
   if (!normalizedProvider) return { ok: false, reason: "PROVIDER_REQUIRED" };
-  if (!SUPPORTED_PROVIDERS.has(normalizedProvider)) {
+  if (!isCodeClipProviderRegistered(normalizedProvider)) {
     return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
   }
 
