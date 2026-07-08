@@ -4699,7 +4699,9 @@ if (isCodePodScan && goldXtraAssignment?.assigned) {
   };
 }
 if (isCodePodScan && codePodAudienceEntry?.ok) {
-  const codePodInteractionSnapshot = codePodVertical.service.createCodePodInteractionSnapshot({
+  const codePodRuntimeChain = codePodVertical.service.buildCodePodRuntimeChain({
+    audienceEntry: codePodAudienceEntry.audienceEntry,
+    audienceIntent: codePodAudienceEntry.audienceIntent,
     eventCode,
     eventId,
     scanId,
@@ -4707,18 +4709,8 @@ if (isCodePodScan && codePodAudienceEntry?.ok) {
     uniqueScans,
     scanRank,
     tier,
-    audienceEntry: codePodAudienceEntry.audienceEntry,
-    audienceIntent: codePodAudienceEntry.audienceIntent,
   });
-  const codePodAudienceContext = codePodVertical.service.createCodePodAudienceContextSnapshot({
-    eventCode,
-    eventId,
-    scanId,
-    audienceEntry: codePodAudienceEntry.audienceEntry,
-    audienceIntent: codePodAudienceEntry.audienceIntent,
-  });
-  void codePodInteractionSnapshot;
-  void codePodAudienceContext;
+  void codePodRuntimeChain;
 }
 const responsePayload = {
   success: true,

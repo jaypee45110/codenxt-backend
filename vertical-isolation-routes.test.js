@@ -1731,7 +1731,19 @@ test('POST /codeclip/provider/:provider/keyword enforces optional provider token
   }
 });
 
-test('POST /scan uses stored codePod event vertical when request vertical is missing', async () => {
+test('POST /scan uses stored codePod event vertical when request vertical is missing', async (t) => {
+  const codePod = require('./verticals/codepod');
+  const originalBuildRuntimeChain = codePod.service.buildCodePodRuntimeChain;
+  let capturedRuntimeChain = null;
+
+  t.after(() => {
+    codePod.service.buildCodePodRuntimeChain = originalBuildRuntimeChain;
+  });
+  codePod.service.buildCodePodRuntimeChain = (input) => {
+    capturedRuntimeChain = originalBuildRuntimeChain(input);
+    return capturedRuntimeChain;
+  };
+
   await withTestServer(async (baseUrl) => {
     const code = `CP-STORED-VERTICAL-${Date.now()}`;
     const createResponse = await fetch(`${baseUrl}/event`, {
@@ -1771,6 +1783,13 @@ test('POST /scan uses stored codePod event vertical when request vertical is mis
     assert.equal(scan.success, true);
     assert.equal(scan.eventCode, code);
     assert.ok(scan.digitalSouvenir && typeof scan.digitalSouvenir === 'object');
+    assert.equal(capturedRuntimeChain?.interaction?.eventCode, code);
+    assert.equal(capturedRuntimeChain?.interaction?.interactionType, 'scan');
+    assert.equal(capturedRuntimeChain?.interaction?.tier, scan.tier);
+    assert.equal(capturedRuntimeChain?.routingOutcome?.source, 'scan');
+    assert.equal(capturedRuntimeChain?.audienceContext?.source, 'scan');
+    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.rewardDomain, 'digitalSouvenir');
+    assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persisted, false);
     assert.equal(Object.hasOwn(scan, 'tierLimits'), false);
     assert.equal(Object.hasOwn(scan, 'audienceEntry'), false);
     assert.equal(Object.hasOwn(scan, 'audienceIntent'), false);
