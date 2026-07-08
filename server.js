@@ -3090,11 +3090,10 @@ app.post("/codepod/keyword-entry", async (req, res) => {
       });
     }
 
-    const interaction = codePodVertical.service.createCodePodKeywordInteractionSnapshot({
+    const codePodRuntimeChain = codePodVertical.service.buildCodePodRuntimeChain({
       audienceEntry: normalized.audienceEntry,
       audienceIntent: normalized.audienceIntent,
     });
-    const routingOutcome = codePodVertical.service.createCodePodKeywordRoutingOutcome({ interaction });
 
     return res.json({
       ok: true,
@@ -3105,8 +3104,8 @@ app.post("/codepod/keyword-entry", async (req, res) => {
       keyword: normalized.audienceEntry.keyword,
       audienceEntry: normalized.audienceEntry,
       audienceIntent: normalized.audienceIntent,
-      interaction,
-      routingOutcome,
+      interaction: codePodRuntimeChain.interaction,
+      routingOutcome: codePodRuntimeChain.routingOutcome,
     });
   } catch (err) {
     console.error("codePod keyword entry failed:", err.message);

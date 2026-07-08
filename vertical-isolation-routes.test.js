@@ -647,7 +647,19 @@ test('POST /codeclip/keyword-entry accepts internal keyword entry without exposi
   });
 });
 
-test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots', async () => {
+test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots', async (t) => {
+  const codePod = require('./verticals/codepod');
+  const originalBuildRuntimeChain = codePod.service.buildCodePodRuntimeChain;
+  let capturedRuntimeChain = null;
+
+  t.after(() => {
+    codePod.service.buildCodePodRuntimeChain = originalBuildRuntimeChain;
+  });
+  codePod.service.buildCodePodRuntimeChain = (input) => {
+    capturedRuntimeChain = originalBuildRuntimeChain(input);
+    return capturedRuntimeChain;
+  };
+
   await withTestServer(async (baseUrl) => {
     const keywordResponse = await fetch(`${baseUrl}/codepod/keyword-entry`, {
       method: 'POST',
@@ -690,6 +702,17 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
     assert.equal(body.routingOutcome.vertical, 'codepod');
     assert.equal(body.routingOutcome.routingOutcome, 'MATCH');
     assert.equal(body.routingOutcome.interactionType, 'keyword');
+    assert.equal(capturedRuntimeChain?.interaction?.interactionType, 'keyword');
+    assert.equal(capturedRuntimeChain?.routingOutcome?.routingOutcome, 'MATCH');
+    assert.equal(capturedRuntimeChain?.rewardAssignmentDecision?.rewardDomain, 'deferred');
+    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.assignmentStatus, 'not_assigned');
+    assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persistenceAction, 'none');
+    assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persisted, false);
+    assert.equal(Object.hasOwn(body, 'audienceContext'), false);
+    assert.equal(Object.hasOwn(body, 'rewardAssignmentDecision'), false);
+    assert.equal(Object.hasOwn(body, 'rewardAssignmentSnapshot'), false);
+    assert.equal(Object.hasOwn(body, 'persistenceDecision'), false);
+    assert.equal(Object.hasOwn(body, 'persistenceSnapshot'), false);
 
     const serialized = JSON.stringify(body);
     for (const forbidden of [
