@@ -13,6 +13,23 @@ function assertDefaultIdempotency(policy) {
   });
 }
 
+function assertDefaultCapabilities(policy, { runtimeVerification }) {
+  assert.deepEqual(policy.capabilities, {
+    route: true,
+    envelope: true,
+    adapter: true,
+    keywordActivation: true,
+    accountResolution: true,
+    activationLookup: true,
+    idempotency: true,
+    webhookVerification: true,
+    runtimeVerification,
+    hmacVerification: false,
+    rawBodyRequired: false,
+    liveProvider: false,
+  });
+}
+
 test("codeClip provider policy returns test provider policy", () => {
   const result = resolveCodeClipProviderPolicy("test");
 
@@ -23,6 +40,7 @@ test("codeClip provider policy returns test provider policy", () => {
   assert.equal(result.policy.envelopeType, "test");
   assert.equal(result.policy.verificationMode, "test");
   assert.equal(result.policy.secretEnvName, "");
+  assertDefaultCapabilities(result.policy, { runtimeVerification: true });
   assertDefaultIdempotency(result.policy);
 });
 
@@ -36,6 +54,7 @@ test("codeClip provider policy returns sms provider policy", () => {
   assert.equal(result.policy.envelopeType, "sms");
   assert.equal(result.policy.verificationMode, "disabled");
   assert.equal(result.policy.secretEnvName, "CODECLIP_SMS_WEBHOOK_SECRET");
+  assertDefaultCapabilities(result.policy, { runtimeVerification: false });
   assertDefaultIdempotency(result.policy);
 });
 
@@ -49,6 +68,7 @@ test("codeClip provider policy returns meta provider policy", () => {
   assert.equal(result.policy.envelopeType, "meta");
   assert.equal(result.policy.verificationMode, "disabled");
   assert.equal(result.policy.secretEnvName, "CODECLIP_META_WEBHOOK_SECRET");
+  assertDefaultCapabilities(result.policy, { runtimeVerification: false });
   assertDefaultIdempotency(result.policy);
 });
 
@@ -73,8 +93,10 @@ test("codeClip provider policy rejects missing and unsupported providers", () =>
 
 test("codeClip provider policy returns a defensive copy", () => {
   const first = resolveCodeClipProviderPolicy("test");
+  first.policy.capabilities.runtimeVerification = false;
   first.policy.idempotency.claimTtlSeconds = 1;
 
   const second = resolveCodeClipProviderPolicy("test");
+  assertDefaultCapabilities(second.policy, { runtimeVerification: true });
   assertDefaultIdempotency(second.policy);
 });
