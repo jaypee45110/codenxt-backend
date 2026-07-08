@@ -674,6 +674,45 @@ test('codePod COAS foundation builds shared runtime chain for scan', () => {
   });
 });
 
+test('codePod COAS foundation models actual GoldXtra scan assignment result', () => {
+  const normalized = codePod.service.normalizeCodePodScanAudienceEntry({
+    eventCode: 'CP-SCAN-GOLDXTRA-RESULT',
+    eventId: 'event-codepod-goldxtra-result',
+    scanId: 'scan-codepod-goldxtra-result',
+  });
+
+  const chain = codePod.service.buildCodePodRuntimeChain({
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    tier: 'gold',
+    rewardAssignmentResult: {
+      tier: 'gold',
+      digitalSouvenir: null,
+      goldXtra: {
+        assigned: true,
+        redemptionToken: 'must-not-enter-runtime-snapshot',
+      },
+    },
+  });
+
+  assert.equal(chain.rewardAssignmentSnapshot.tier, 'gold');
+  assert.equal(chain.rewardAssignmentSnapshot.rewardDomain, 'goldXtra');
+  assert.equal(chain.rewardAssignmentSnapshot.assignmentStatus, 'assigned');
+  assert.deepEqual(chain.rewardAssignmentSnapshot.digitalSouvenir, {
+    assigned: false,
+    tier: '',
+    exhausted: false,
+    noReward: false,
+  });
+  assert.deepEqual(chain.rewardAssignmentSnapshot.goldXtra, {
+    assigned: true,
+  });
+  assert.equal(chain.rewardAssignmentSnapshot.exhausted, false);
+  assert.equal(chain.rewardAssignmentSnapshot.noReward, false);
+  assert.equal(chain.persistenceDecision.assignmentStatus, 'pending');
+  assert.equal(JSON.stringify(chain).includes('must-not-enter-runtime-snapshot'), false);
+});
+
 test('codePod COAS foundation builds shared runtime chain for keyword', () => {
   const normalized = codePod.service.normalizeCodePodKeywordAudienceEntry({
     eventCode: ' CP-KEYWORD-CHAIN ',
@@ -715,6 +754,8 @@ test('codePod COAS foundation builds shared runtime chain for keyword', () => {
   assert.equal(chain.audienceContext.source, 'keyword');
   assert.equal(chain.audienceContext.transport, 'message');
   assert.equal(chain.audienceContext.keyword, 'LISTEN');
+  assert.equal(chain.rewardAssignmentDecision.rewardDomain, 'deferred');
+  assert.equal(chain.rewardAssignmentDecision.assignmentStatus, 'not_assigned');
   assert.deepEqual(chain.rewardAssignmentDecision, {
     vertical: 'codepod',
     source: 'keyword',

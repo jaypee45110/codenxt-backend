@@ -634,7 +634,7 @@ function createCodePodRewardAssignmentSnapshot(input = {}) {
 
   if (!decision) return null;
 
-  return {
+  const snapshot = {
     vertical: "codepod",
     source: decision.source,
     transport: decision.transport,
@@ -651,6 +651,35 @@ function createCodePodRewardAssignmentSnapshot(input = {}) {
     messageId: decision.messageId || "",
     provider: decision.provider || "",
     providerAccountId: decision.providerAccountId || "",
+  };
+
+  const assignmentResult = input.assignmentResult || null;
+  if (!assignmentResult) return snapshot;
+
+  const digitalSouvenir = assignmentResult.digitalSouvenir || null;
+  const goldXtra = assignmentResult.goldXtra || null;
+  const goldXtraAssigned = goldXtra?.assigned === true;
+  const digitalSouvenirAssigned = Boolean(digitalSouvenir) && digitalSouvenir.noReward !== true;
+
+  return {
+    ...snapshot,
+    tier: normalizeString(
+      assignmentResult.tier ||
+      (goldXtraAssigned ? "gold" : digitalSouvenir?.tier)
+    ),
+    rewardDomain: goldXtraAssigned ? "goldXtra" : "digitalSouvenir",
+    assignmentStatus: goldXtraAssigned || digitalSouvenirAssigned ? "assigned" : "not_assigned",
+    digitalSouvenir: {
+      assigned: digitalSouvenirAssigned,
+      tier: normalizeString(digitalSouvenir?.tier),
+      exhausted: digitalSouvenir?.exhausted === true,
+      noReward: digitalSouvenir?.noReward === true,
+    },
+    goldXtra: {
+      assigned: goldXtraAssigned,
+    },
+    exhausted: digitalSouvenir?.exhausted === true,
+    noReward: digitalSouvenir?.noReward === true,
   };
 }
 
@@ -822,9 +851,10 @@ function buildCodePodRuntimeChain(input = {}) {
     });
     const rewardAssignmentSnapshot = createCodePodRewardAssignmentSnapshot({
       decision: rewardAssignmentDecision,
+      assignmentResult: input.rewardAssignmentResult,
     });
     const persistenceDecision = createCodePodPersistenceDecision({
-      rewardAssignmentSnapshot,
+      rewardAssignmentSnapshot: input.rewardAssignmentResult ? null : rewardAssignmentSnapshot,
       rewardAssignmentDecision,
       audienceContext,
       routingOutcome,
@@ -874,6 +904,7 @@ function buildCodePodRuntimeChain(input = {}) {
     });
     const rewardAssignmentSnapshot = createCodePodRewardAssignmentSnapshot({
       decision: rewardAssignmentDecision,
+      assignmentResult: input.rewardAssignmentResult,
     });
     const persistenceDecision = createCodePodPersistenceDecision({
       rewardAssignmentSnapshot,

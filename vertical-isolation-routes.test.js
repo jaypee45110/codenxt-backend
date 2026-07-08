@@ -1812,6 +1812,19 @@ test('POST /scan uses stored codePod event vertical when request vertical is mis
     assert.equal(capturedRuntimeChain?.routingOutcome?.source, 'scan');
     assert.equal(capturedRuntimeChain?.audienceContext?.source, 'scan');
     assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.rewardDomain, 'digitalSouvenir');
+    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.tier, scan.tier);
+    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.assignmentStatus, 'assigned');
+    assert.deepEqual(capturedRuntimeChain?.rewardAssignmentSnapshot?.digitalSouvenir, {
+      assigned: true,
+      tier: scan.tier,
+      exhausted: false,
+      noReward: false,
+    });
+    assert.deepEqual(capturedRuntimeChain?.rewardAssignmentSnapshot?.goldXtra, {
+      assigned: false,
+    });
+    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.exhausted, false);
+    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.noReward, false);
     assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persisted, false);
     assert.equal(Object.hasOwn(scan, 'tierLimits'), false);
     assert.equal(Object.hasOwn(scan, 'audienceEntry'), false);

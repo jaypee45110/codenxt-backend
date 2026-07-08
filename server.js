@@ -4708,6 +4708,11 @@ if (isCodePodScan && codePodAudienceEntry?.ok) {
     uniqueScans,
     scanRank,
     tier,
+    rewardAssignmentResult: {
+      tier,
+      digitalSouvenir: codePodSouvenirAssignment,
+      goldXtra: goldXtraAssignment,
+    },
   });
   void codePodRuntimeChain;
 }
