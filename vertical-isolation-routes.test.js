@@ -489,6 +489,73 @@ test('POST /codeclip/provider/test/keyword accepts generic provider keyword inpu
   });
 });
 
+test('POST /codeclip/provider/test/keyword forwards captured raw body to verifier request builder without leaking it', async () => {
+  const providerPolicy = require('./verticals/codeclip/provider-policy');
+  const originalBuilder = providerPolicy.buildCodeClipProviderVerificationRequest;
+  let observedRawBody = null;
+
+  providerPolicy.buildCodeClipProviderVerificationRequest = (args) => {
+    observedRawBody = args.rawBody;
+    return originalBuilder(args);
+  };
+
+  try {
+    await withTestServer(async (baseUrl) => {
+      const code = `CC-PROVIDER-RAW-BODY-${Date.now()}`;
+      const providerEventId = `provider-raw-body-${Date.now()}`;
+      const createResponse = await fetch(`${baseUrl}/event`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          vertical: 'codeclip',
+          code,
+          name: 'codeClip provider raw body forwarding test',
+          startAt: '2099-01-01T10:00:00.000Z',
+          unlockAt: '2099-01-01T10:00:00.000Z',
+          endAt: '2099-01-01T11:00:00.000Z',
+          activationMethod: 'keyword',
+          activationKeyword: 'RAWBODY',
+          activationChannels: ['test'],
+          providerAccountIds: ['test'],
+          rewards: {
+            openClip: {
+              enabled: true,
+              title: 'OpenClip',
+            },
+          },
+        }),
+      });
+
+      assert.equal(createResponse.ok, true);
+
+      const requestBody = JSON.stringify({
+        eventCode: code,
+        text: ' RAWBODY ',
+        providerEventId,
+      });
+      const keywordResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-codeclip-test-signature': 'valid',
+        },
+        body: requestBody,
+      });
+      const keywordEntry = await keywordResponse.json();
+
+      assert.equal(keywordResponse.ok, true);
+      assert.equal(keywordEntry.success, true);
+      assert.equal(keywordEntry.eventCode, code);
+      assert.equal(keywordEntry.messageId, providerEventId);
+      assert.ok(Buffer.isBuffer(observedRawBody));
+      assert.equal(observedRawBody.toString(), requestBody);
+      assertNoCodeClipProviderInternals(keywordEntry);
+    });
+  } finally {
+    providerPolicy.buildCodeClipProviderVerificationRequest = originalBuilder;
+  }
+});
+
 test('POST /codeclip/provider/:provider/keyword resolves codeClip event by provider activation keyword', async () => {
   await withTestServer(async (baseUrl) => {
     const code = `CC-PROVIDER-ACTIVATION-${Date.now()}`;

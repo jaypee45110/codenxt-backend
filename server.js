@@ -3241,7 +3241,7 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       policy: providerPolicy.policy,
       provider: req.params.provider,
       headers: req.headers || {},
-      rawBody: "",
+      rawBody: req.codeClipRawBody || "",
     }));
 
     if (!webhookVerification.ok) {
