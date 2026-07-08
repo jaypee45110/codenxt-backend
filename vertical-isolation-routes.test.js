@@ -1810,6 +1810,8 @@ test('POST /scan uses stored codePod event vertical when request vertical is mis
     assert.equal(capturedRuntimeChain?.interaction?.eventCode, code);
     assert.equal(capturedRuntimeChain?.interaction?.eventId, scan.eventId);
     assert.equal(capturedRuntimeChain?.interaction?.scanId, scanId);
+    assert.equal(capturedRuntimeChain?.interaction?.rawScans, scan.rawScans);
+    assert.equal(capturedRuntimeChain?.interaction?.uniqueScans, scan.uniqueScans);
     assert.equal(capturedRuntimeChain?.interaction?.scanRank, scan.scanRank);
     assert.equal(capturedRuntimeChain?.interaction?.interactionType, 'scan');
     assert.equal(capturedRuntimeChain?.interaction?.tier, scan.tier);

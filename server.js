@@ -4716,14 +4716,16 @@ if (isCodePodScan && codePodAudienceEntry?.ok) {
     },
   });
 }
+const codePodResponseInteraction = codePodRuntimeChain?.interaction || null;
+const codePodResponseReward = codePodRuntimeChain?.rewardAssignmentSnapshot || null;
 const responsePayload = {
   success: true,
-  eventCode,
-  eventId,
-  rawScans: Number(rawScans || 0),
-  uniqueScans: Number(uniqueScans || 0),
-  scanRank,
-  tier,
+  eventCode: codePodResponseInteraction?.eventCode || eventCode,
+  eventId: codePodResponseInteraction?.eventId || eventId,
+  rawScans: Number(codePodResponseInteraction?.rawScans ?? rawScans ?? 0),
+  uniqueScans: Number(codePodResponseInteraction?.uniqueScans ?? uniqueScans ?? 0),
+  scanRank: codePodResponseInteraction?.scanRank ?? scanRank,
+  tier: codePodResponseReward?.tier || codePodResponseInteraction?.tier || tier,
 };
 if (tierLimits) {
   responsePayload.tierLimits = tierLimits;
