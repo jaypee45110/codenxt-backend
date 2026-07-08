@@ -647,6 +647,112 @@ test('POST /codeclip/keyword-entry accepts internal keyword entry without exposi
   });
 });
 
+test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots', async () => {
+  await withTestServer(async (baseUrl) => {
+    const keywordResponse = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: ' CP-POD-KEYWORD ',
+        keyword: ' LISTEN ',
+        messageId: ' message-codepod-keyword-route ',
+        provider: ' test ',
+        providerAccountId: ' account-codepod-keyword-route ',
+        rawPayload: { mustNotLeak: true },
+        ip: '127.0.0.1',
+        userAgent: 'test-agent',
+        phone: '+4712345678',
+        handle: '@participant',
+        screenVideoUrl: 'https://screen-video.example/legacy.mp4',
+        openClip: 'must not leak',
+        clipPlus: 'must not leak',
+        clipXtra: 'must not leak',
+      }),
+    });
+    const body = await keywordResponse.json();
+
+    assert.equal(keywordResponse.ok, true);
+    assert.equal(body.ok, true);
+    assert.equal(body.vertical, 'codepod');
+    assert.equal(body.source, 'keyword');
+    assert.equal(body.transport, 'message');
+    assert.equal(body.eventCode, 'CP-POD-KEYWORD');
+    assert.equal(body.keyword, 'LISTEN');
+    assert.equal(body.audienceEntry.vertical, 'codepod');
+    assert.equal(body.audienceEntry.source, 'keyword');
+    assert.equal(body.audienceEntry.transport, 'message');
+    assert.equal(body.audienceIntent.vertical, 'codepod');
+    assert.equal(body.audienceIntent.source, 'keyword');
+    assert.equal(body.audienceIntent.transport, 'message');
+    assert.equal(body.interaction.vertical, 'codepod');
+    assert.equal(body.interaction.source, 'keyword');
+    assert.equal(body.interaction.transport, 'message');
+    assert.equal(body.routingOutcome.vertical, 'codepod');
+    assert.equal(body.routingOutcome.routingOutcome, 'MATCH');
+    assert.equal(body.routingOutcome.interactionType, 'keyword');
+
+    const serialized = JSON.stringify(body);
+    for (const forbidden of [
+      'rawPayload',
+      'mustNotLeak',
+      '127.0.0.1',
+      'test-agent',
+      '+4712345678',
+      '@participant',
+      'OpenClip',
+      'Clip+',
+      'ClipXtra',
+      'openClip',
+      'clipPlus',
+      'clipXtra',
+      'Screen Video',
+      'screenVideoUrl',
+    ]) {
+      assert.equal(serialized.includes(forbidden), false);
+    }
+  });
+});
+
+test('POST /codepod/keyword-entry rejects missing entry code or keyword safely', async () => {
+  await withTestServer(async (baseUrl) => {
+    const missingEntryCodeResponse = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        keyword: 'LISTEN',
+      }),
+    });
+    const missingEntryCode = await missingEntryCodeResponse.json();
+
+    assert.equal(missingEntryCodeResponse.status, 400);
+    assert.equal(missingEntryCode.ok, false);
+    assert.equal(missingEntryCode.vertical, 'codepod');
+    assert.equal(missingEntryCode.source, 'keyword');
+    assert.equal(missingEntryCode.transport, 'message');
+    assert.deepEqual(
+      missingEntryCode.errors.map((error) => error.code),
+      ['ENTRY_CODE_REQUIRED']
+    );
+
+    const missingKeywordResponse = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: 'CP-MISSING-KEYWORD',
+      }),
+    });
+    const missingKeyword = await missingKeywordResponse.json();
+
+    assert.equal(missingKeywordResponse.status, 400);
+    assert.equal(missingKeyword.ok, false);
+    assert.equal(missingKeyword.vertical, 'codepod');
+    assert.deepEqual(
+      missingKeyword.errors.map((error) => error.code),
+      ['KEYWORD_REQUIRED']
+    );
+  });
+});
+
 test('POST /codeclip/test-provider/keyword maps provider-like input without exposing COAS internals', async () => {
   await withTestServer(async (baseUrl) => {
     const code = `CC-TEST-PROVIDER-KEYWORD-${Date.now()}`;

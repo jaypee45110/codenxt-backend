@@ -3068,6 +3068,52 @@ app.get("/codeclip/report/:eventCode", async (req, res) => {
   }
 });
 
+app.post("/codepod/keyword-entry", async (req, res) => {
+  try {
+    const normalized = codePodVertical.service.normalizeCodePodKeywordAudienceEntry({
+      eventCode: req.body?.eventCode,
+      entryCode: req.body?.entryCode,
+      keyword: req.body?.keyword,
+      messageId: req.body?.messageId,
+      provider: req.body?.provider,
+      providerAccountId: req.body?.providerAccountId,
+      requestedVertical: "codepod",
+    });
+
+    if (!normalized.ok) {
+      return res.status(400).json({
+        ok: false,
+        vertical: "codepod",
+        source: "keyword",
+        transport: "message",
+        errors: normalized.errors,
+      });
+    }
+
+    const interaction = codePodVertical.service.createCodePodKeywordInteractionSnapshot({
+      audienceEntry: normalized.audienceEntry,
+      audienceIntent: normalized.audienceIntent,
+    });
+    const routingOutcome = codePodVertical.service.createCodePodKeywordRoutingOutcome({ interaction });
+
+    return res.json({
+      ok: true,
+      vertical: "codepod",
+      source: "keyword",
+      transport: "message",
+      eventCode: normalized.audienceEntry.eventCode,
+      keyword: normalized.audienceEntry.keyword,
+      audienceEntry: normalized.audienceEntry,
+      audienceIntent: normalized.audienceIntent,
+      interaction,
+      routingOutcome,
+    });
+  } catch (err) {
+    console.error("codePod keyword entry failed:", err.message);
+    return res.status(500).json({ ok: false, error: "Failed to process keyword entry" });
+  }
+});
+
 app.post("/codeclip/keyword-entry", async (req, res) => {
   try {
     const eventCode = String(req.body?.eventCode || "").trim();
