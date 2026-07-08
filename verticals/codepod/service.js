@@ -469,6 +469,38 @@ function createCodePodKeywordInteractionSnapshot(input = {}) {
   return interaction;
 }
 
+function createCodePodKeywordRoutingOutcome(input = {}) {
+  const interaction = input.interaction || input;
+  const eventCode = normalizeString(input.eventCode || interaction?.eventCode);
+  const keyword = normalizeString(input.keyword || interaction?.keyword);
+
+  if (!eventCode || !keyword) return null;
+
+  const routingOutcome = normalizeString(input.routingOutcome || interaction?.routingOutcome || "MATCH") || "MATCH";
+  const eventId = normalizeString(input.eventId || interaction?.eventId);
+  const messageId = normalizeString(input.messageId || interaction?.messageId);
+  const provider = normalizeString(input.provider || interaction?.provider);
+  const providerAccountId = normalizeString(input.providerAccountId || interaction?.providerAccountId);
+
+  const outcome = {
+    vertical: "codepod",
+    source: "keyword",
+    transport: "message",
+    routingOutcome,
+    interactionType: "keyword",
+    eventCode,
+    entryCode: normalizeString(input.entryCode || interaction?.entryCode || eventCode),
+    keyword,
+  };
+
+  if (eventId) outcome.eventId = eventId;
+  if (messageId) outcome.messageId = messageId;
+  if (provider) outcome.provider = provider;
+  if (providerAccountId) outcome.providerAccountId = providerAccountId;
+
+  return outcome;
+}
+
 function createCodePodAudienceContextSnapshot(input = {}) {
   const eventCode = normalizeString(input.eventCode);
 
@@ -496,6 +528,7 @@ module.exports = {
   createCodePodAudienceContextSnapshot,
   createCodePodInteractionSnapshot,
   createCodePodKeywordInteractionSnapshot,
+  createCodePodKeywordRoutingOutcome,
   normalizeCodePodDigitalSouvenir,
   normalizeCodePodKeywordAudienceEntry,
   normalizeCodePodPartnerReward,

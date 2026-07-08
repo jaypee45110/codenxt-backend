@@ -268,6 +268,77 @@ test('codePod keyword Interaction foundation stays native and isolated', () => {
   }
 });
 
+test('codePod COAS foundation builds keyword RoutingOutcome', () => {
+  const normalized = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    eventCode: ' CP-KEYWORD-ROUTING ',
+    eventId: ' event-codepod-keyword-routing ',
+    keyword: ' LISTEN ',
+    messageId: ' message-codepod-keyword-routing ',
+    provider: ' test ',
+    providerAccountId: ' account-codepod-keyword-routing ',
+    requestedVertical: ' codepod ',
+  });
+  const interaction = codePod.service.createCodePodKeywordInteractionSnapshot({
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    timestamp: '2026-07-01T00:04:00.000Z',
+  });
+
+  const outcome = codePod.service.createCodePodKeywordRoutingOutcome({ interaction });
+
+  assert.deepEqual(outcome, {
+    vertical: 'codepod',
+    source: 'keyword',
+    transport: 'message',
+    routingOutcome: 'MATCH',
+    interactionType: 'keyword',
+    eventCode: 'CP-KEYWORD-ROUTING',
+    entryCode: 'CP-KEYWORD-ROUTING',
+    keyword: 'LISTEN',
+    eventId: 'event-codepod-keyword-routing',
+    messageId: 'message-codepod-keyword-routing',
+    provider: 'test',
+    providerAccountId: 'account-codepod-keyword-routing',
+  });
+});
+
+test('codePod COAS foundation does not build keyword RoutingOutcome without eventCode or keyword', () => {
+  const missingEventCode = codePod.service.createCodePodKeywordRoutingOutcome({
+    keyword: 'LISTEN',
+  });
+  const missingKeyword = codePod.service.createCodePodKeywordRoutingOutcome({
+    eventCode: 'CP-MISSING-ROUTING-KEYWORD',
+  });
+
+  assert.equal(missingEventCode, null);
+  assert.equal(missingKeyword, null);
+});
+
+test('codePod keyword RoutingOutcome foundation stays native and isolated', () => {
+  const outcome = codePod.service.createCodePodKeywordRoutingOutcome({
+    eventCode: 'CP-KEYWORD-ROUTING-ISOLATION',
+    keyword: 'LISTEN',
+    openClip: 'must be ignored',
+    clipPlus: 'must be ignored',
+    clipXtra: 'must be ignored',
+    screenVideoUrl: 'https://screen-video.example/legacy.mp4',
+  });
+
+  assert.equal(outcome.vertical, 'codepod');
+  assert.equal(outcome.source, 'keyword');
+  assert.equal(outcome.transport, 'message');
+  assert.equal(outcome.routingOutcome, 'MATCH');
+  assert.equal(outcome.interactionType, 'keyword');
+  assert.equal(outcome.keyword, 'LISTEN');
+
+  const serializedOutput = JSON.stringify(outcome);
+  const keywordRoutingSource = codePod.service.createCodePodKeywordRoutingOutcome.toString();
+  for (const forbidden of ['OpenClip', 'Clip+', 'ClipXtra', 'openClip', 'clipPlus', 'clipXtra', 'Screen Video', 'screenVideoUrl']) {
+    assert.equal(serializedOutput.includes(forbidden), false);
+    assert.equal(keywordRoutingSource.includes(forbidden), false);
+  }
+});
+
 test('codePod COAS foundation rejects missing entry code', () => {
   const result = codePod.service.normalizeCodePodScanAudienceEntry({
     scanId: 'scan-missing-entry-code',
