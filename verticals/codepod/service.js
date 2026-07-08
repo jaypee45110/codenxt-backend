@@ -654,6 +654,139 @@ function createCodePodRewardAssignmentSnapshot(input = {}) {
   };
 }
 
+function createCodePodPersistenceDecision(input = {}) {
+  const rewardAssignmentSnapshot = input.rewardAssignmentSnapshot || null;
+  const rewardAssignmentDecision = input.rewardAssignmentDecision || null;
+  const audienceContext = input.audienceContext || null;
+  const routingOutcome = input.routingOutcome || null;
+  const source = normalizeString(
+    rewardAssignmentSnapshot?.source ||
+    rewardAssignmentDecision?.source ||
+    audienceContext?.source ||
+    routingOutcome?.source
+  );
+  const eventCode = normalizeString(
+    rewardAssignmentSnapshot?.eventCode ||
+    rewardAssignmentDecision?.eventCode ||
+    audienceContext?.eventCode ||
+    routingOutcome?.eventCode
+  );
+
+  if (!eventCode || !source) return null;
+
+  const decision = {
+    vertical: "codepod",
+    source,
+    transport: normalizeString(
+      rewardAssignmentSnapshot?.transport ||
+      rewardAssignmentDecision?.transport ||
+      audienceContext?.transport ||
+      routingOutcome?.transport
+    ),
+    eventCode,
+    entryCode: normalizeString(
+      rewardAssignmentSnapshot?.entryCode ||
+      rewardAssignmentDecision?.entryCode ||
+      audienceContext?.entryCode ||
+      routingOutcome?.entryCode ||
+      eventCode
+    ),
+    interactionType: normalizeString(
+      rewardAssignmentSnapshot?.interactionType ||
+      rewardAssignmentDecision?.interactionType ||
+      routingOutcome?.interactionType ||
+      source
+    ),
+    routingOutcome: normalizeString(
+      rewardAssignmentSnapshot?.routingOutcome ||
+      rewardAssignmentDecision?.routingOutcome ||
+      routingOutcome?.routingOutcome ||
+      "MATCH"
+    ) || "MATCH",
+    assignmentStatus: normalizeString(
+      rewardAssignmentSnapshot?.assignmentStatus ||
+      rewardAssignmentDecision?.assignmentStatus
+    ),
+    persistenceStatus: "planned",
+    persistenceMode: "foundation",
+    decision: "record_runtime_snapshot",
+  };
+
+  const eventId = normalizeString(
+    rewardAssignmentSnapshot?.eventId ||
+    rewardAssignmentDecision?.eventId ||
+    audienceContext?.eventId ||
+    routingOutcome?.eventId
+  );
+  const scanId = normalizeString(
+    rewardAssignmentSnapshot?.scanId ||
+    rewardAssignmentDecision?.scanId ||
+    audienceContext?.scanId ||
+    routingOutcome?.scanId
+  );
+  const keyword = normalizeString(
+    rewardAssignmentSnapshot?.keyword ||
+    rewardAssignmentDecision?.keyword ||
+    audienceContext?.keyword ||
+    routingOutcome?.keyword
+  );
+  const messageId = normalizeString(
+    rewardAssignmentSnapshot?.messageId ||
+    rewardAssignmentDecision?.messageId ||
+    audienceContext?.messageId ||
+    routingOutcome?.messageId
+  );
+  const provider = normalizeString(
+    rewardAssignmentSnapshot?.provider ||
+    rewardAssignmentDecision?.provider ||
+    audienceContext?.provider ||
+    routingOutcome?.provider
+  );
+  const providerAccountId = normalizeString(
+    rewardAssignmentSnapshot?.providerAccountId ||
+    rewardAssignmentDecision?.providerAccountId ||
+    audienceContext?.providerAccountId ||
+    routingOutcome?.providerAccountId
+  );
+
+  if (eventId) decision.eventId = eventId;
+  if (scanId) decision.scanId = scanId;
+  if (keyword) decision.keyword = keyword;
+  if (messageId) decision.messageId = messageId;
+  if (provider) decision.provider = provider;
+  if (providerAccountId) decision.providerAccountId = providerAccountId;
+
+  return decision;
+}
+
+function createCodePodPersistenceSnapshot(input = {}) {
+  const decision = input.decision || createCodePodPersistenceDecision(input);
+
+  if (!decision) return null;
+
+  return {
+    vertical: "codepod",
+    source: decision.source,
+    transport: decision.transport,
+    eventCode: decision.eventCode,
+    entryCode: decision.entryCode,
+    interactionType: decision.interactionType,
+    routingOutcome: decision.routingOutcome,
+    assignmentStatus: decision.assignmentStatus,
+    persistenceStatus: decision.persistenceStatus,
+    persistenceMode: decision.persistenceMode,
+    decision: decision.decision,
+    persistenceAction: "none",
+    persisted: false,
+    eventId: decision.eventId || "",
+    scanId: decision.scanId || "",
+    keyword: decision.keyword || "",
+    messageId: decision.messageId || "",
+    provider: decision.provider || "",
+    providerAccountId: decision.providerAccountId || "",
+  };
+}
+
 function buildCodePodRuntimeChain(input = {}) {
   const audienceEntry = input.audienceEntry || null;
   const audienceIntent = input.audienceIntent || null;
@@ -687,6 +820,15 @@ function buildCodePodRuntimeChain(input = {}) {
       interaction,
       routingOutcome,
     });
+    const rewardAssignmentSnapshot = createCodePodRewardAssignmentSnapshot({
+      decision: rewardAssignmentDecision,
+    });
+    const persistenceDecision = createCodePodPersistenceDecision({
+      rewardAssignmentSnapshot,
+      rewardAssignmentDecision,
+      audienceContext,
+      routingOutcome,
+    });
 
     return {
       audienceEntry,
@@ -695,8 +837,10 @@ function buildCodePodRuntimeChain(input = {}) {
       routingOutcome,
       audienceContext,
       rewardAssignmentDecision,
-      rewardAssignmentSnapshot: createCodePodRewardAssignmentSnapshot({
-        decision: rewardAssignmentDecision,
+      rewardAssignmentSnapshot,
+      persistenceDecision,
+      persistenceSnapshot: createCodePodPersistenceSnapshot({
+        decision: persistenceDecision,
       }),
     };
   }
@@ -728,6 +872,15 @@ function buildCodePodRuntimeChain(input = {}) {
       interaction,
       routingOutcome,
     });
+    const rewardAssignmentSnapshot = createCodePodRewardAssignmentSnapshot({
+      decision: rewardAssignmentDecision,
+    });
+    const persistenceDecision = createCodePodPersistenceDecision({
+      rewardAssignmentSnapshot,
+      rewardAssignmentDecision,
+      audienceContext,
+      routingOutcome,
+    });
 
     return {
       audienceEntry,
@@ -736,8 +889,10 @@ function buildCodePodRuntimeChain(input = {}) {
       routingOutcome,
       audienceContext,
       rewardAssignmentDecision,
-      rewardAssignmentSnapshot: createCodePodRewardAssignmentSnapshot({
-        decision: rewardAssignmentDecision,
+      rewardAssignmentSnapshot,
+      persistenceDecision,
+      persistenceSnapshot: createCodePodPersistenceSnapshot({
+        decision: persistenceDecision,
       }),
     };
   }
@@ -754,6 +909,8 @@ module.exports = {
   createCodePodKeywordAudienceContextSnapshot,
   createCodePodKeywordInteractionSnapshot,
   createCodePodKeywordRoutingOutcome,
+  createCodePodPersistenceDecision,
+  createCodePodPersistenceSnapshot,
   createCodePodRewardAssignmentDecision,
   createCodePodRewardAssignmentSnapshot,
   createCodePodScanRoutingOutcome,
