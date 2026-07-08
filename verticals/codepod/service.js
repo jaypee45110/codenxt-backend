@@ -548,11 +548,116 @@ function createCodePodAudienceContextSnapshot(input = {}) {
   };
 }
 
+function createCodePodKeywordAudienceContextSnapshot(input = {}) {
+  const audienceEntry = input.audienceEntry || null;
+  const audienceIntent = input.audienceIntent || null;
+  const eventCode = normalizeString(input.eventCode || audienceEntry?.eventCode || audienceIntent?.eventCode);
+  const keyword = normalizeString(input.keyword || audienceEntry?.keyword || audienceIntent?.keyword);
+
+  if (!eventCode || !keyword) return null;
+
+  const context = {
+    vertical: "codepod",
+    contextType: "audience",
+    eventCode,
+    entryCode: normalizeString(input.entryCode || audienceEntry?.entryCode || audienceIntent?.entryCode || eventCode),
+    keyword,
+    audienceEntry,
+    audienceIntent,
+    source: "keyword",
+    transport: "message",
+    metadata: {
+      vertical: "codepod",
+    },
+  };
+
+  const eventId = normalizeString(input.eventId || audienceEntry?.eventId);
+  const messageId = normalizeString(input.messageId || audienceEntry?.messageId || audienceIntent?.messageId);
+  const provider = normalizeString(input.provider || audienceEntry?.provider || audienceIntent?.provider);
+  const providerAccountId = normalizeString(input.providerAccountId || audienceEntry?.providerAccountId || audienceIntent?.providerAccountId);
+
+  if (eventId) context.eventId = eventId;
+  if (messageId) context.messageId = messageId;
+  if (provider) context.provider = provider;
+  if (providerAccountId) context.providerAccountId = providerAccountId;
+
+  return context;
+}
+
+function buildCodePodRuntimeChain(input = {}) {
+  const audienceEntry = input.audienceEntry || null;
+  const audienceIntent = input.audienceIntent || null;
+  const source = normalizeString(input.source || audienceEntry?.source || audienceIntent?.source);
+
+  if (!audienceEntry || !audienceIntent) return null;
+
+  if (source === "scan") {
+    const interaction = createCodePodInteractionSnapshot({
+      ...input,
+      eventCode: input.eventCode || audienceEntry.eventCode || audienceIntent.eventCode,
+      eventId: input.eventId || audienceEntry.eventId,
+      scanId: input.scanId || audienceEntry.scanId || audienceIntent.scanId,
+      audienceEntry,
+      audienceIntent,
+    });
+
+    if (!interaction) return null;
+
+    return {
+      audienceEntry,
+      audienceIntent,
+      interaction,
+      routingOutcome: createCodePodScanRoutingOutcome({ interaction }),
+      audienceContext: createCodePodAudienceContextSnapshot({
+        ...input,
+        eventCode: interaction.eventCode,
+        eventId: interaction.eventId,
+        scanId: interaction.scanId,
+        audienceEntry,
+        audienceIntent,
+      }),
+    };
+  }
+
+  if (source === "keyword") {
+    const interaction = createCodePodKeywordInteractionSnapshot({
+      ...input,
+      audienceEntry,
+      audienceIntent,
+    });
+
+    if (!interaction) return null;
+
+    return {
+      audienceEntry,
+      audienceIntent,
+      interaction,
+      routingOutcome: createCodePodKeywordRoutingOutcome({ interaction }),
+      audienceContext: createCodePodKeywordAudienceContextSnapshot({
+        ...input,
+        eventCode: interaction.eventCode,
+        eventId: interaction.eventId,
+        entryCode: interaction.entryCode,
+        keyword: interaction.keyword,
+        messageId: interaction.messageId,
+        provider: interaction.provider,
+        providerAccountId: interaction.providerAccountId,
+        audienceEntry,
+        audienceIntent,
+      }),
+    };
+  }
+
+  return null;
+}
+
 module.exports = {
   assignCodePodDigitalSouvenirTier,
   assignCodePodGoldXtra,
+  buildCodePodRuntimeChain,
   createCodePodAudienceContextSnapshot,
   createCodePodInteractionSnapshot,
+  createCodePodKeywordAudienceContextSnapshot,
   createCodePodKeywordInteractionSnapshot,
   createCodePodKeywordRoutingOutcome,
   createCodePodScanRoutingOutcome,

@@ -572,3 +572,84 @@ test('codePod COAS foundation does not build AudienceContext snapshot without ev
 
   assert.equal(context, null);
 });
+
+test('codePod COAS foundation builds shared runtime chain for scan', () => {
+  const normalized = codePod.service.normalizeCodePodScanAudienceEntry({
+    eventCode: ' CP-SCAN-CHAIN ',
+    eventId: ' event-codepod-scan-chain ',
+    scanId: ' scan-codepod-chain ',
+    requestedVertical: ' codepod ',
+  });
+
+  const chain = codePod.service.buildCodePodRuntimeChain({
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    rawScans: 12,
+    uniqueScans: 9,
+    scanRank: 4,
+    tier: ' silver ',
+    timestamp: '2026-07-01T00:06:00.000Z',
+  });
+
+  assert.equal(chain.audienceEntry, normalized.audienceEntry);
+  assert.equal(chain.audienceIntent, normalized.audienceIntent);
+  assert.equal(chain.interaction.vertical, 'codepod');
+  assert.equal(chain.interaction.interactionType, 'scan');
+  assert.equal(chain.interaction.eventCode, 'CP-SCAN-CHAIN');
+  assert.equal(chain.interaction.scanId, 'scan-codepod-chain');
+  assert.equal(chain.routingOutcome.vertical, 'codepod');
+  assert.equal(chain.routingOutcome.source, 'scan');
+  assert.equal(chain.routingOutcome.transport, 'http');
+  assert.equal(chain.routingOutcome.routingOutcome, 'MATCH');
+  assert.equal(chain.audienceContext.vertical, 'codepod');
+  assert.equal(chain.audienceContext.source, 'scan');
+  assert.equal(chain.audienceContext.transport, 'http');
+});
+
+test('codePod COAS foundation builds shared runtime chain for keyword', () => {
+  const normalized = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    eventCode: ' CP-KEYWORD-CHAIN ',
+    eventId: ' event-codepod-keyword-chain ',
+    keyword: ' LISTEN ',
+    messageId: ' message-codepod-keyword-chain ',
+    provider: ' test ',
+    providerAccountId: ' account-codepod-keyword-chain ',
+    requestedVertical: ' codepod ',
+    rawPayload: { ignored: true },
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    phone: '+4712345678',
+    handle: '@participant',
+  });
+
+  const chain = codePod.service.buildCodePodRuntimeChain({
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    timestamp: '2026-07-01T00:07:00.000Z',
+    rawPayload: { ignored: true },
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    phone: '+4712345678',
+    handle: '@participant',
+  });
+
+  assert.equal(chain.audienceEntry, normalized.audienceEntry);
+  assert.equal(chain.audienceIntent, normalized.audienceIntent);
+  assert.equal(chain.interaction.vertical, 'codepod');
+  assert.equal(chain.interaction.interactionType, 'keyword');
+  assert.equal(chain.interaction.eventCode, 'CP-KEYWORD-CHAIN');
+  assert.equal(chain.interaction.keyword, 'LISTEN');
+  assert.equal(chain.routingOutcome.vertical, 'codepod');
+  assert.equal(chain.routingOutcome.source, 'keyword');
+  assert.equal(chain.routingOutcome.transport, 'message');
+  assert.equal(chain.routingOutcome.routingOutcome, 'MATCH');
+  assert.equal(chain.audienceContext.vertical, 'codepod');
+  assert.equal(chain.audienceContext.source, 'keyword');
+  assert.equal(chain.audienceContext.transport, 'message');
+  assert.equal(chain.audienceContext.keyword, 'LISTEN');
+
+  const serializedOutput = JSON.stringify(chain);
+  for (const forbidden of ['rawPayload', '127.0.0.1', 'test-agent', '+4712345678', '@participant', 'OpenClip', 'Clip+', 'ClipXtra', 'openClip', 'clipPlus', 'clipXtra', 'Screen Video', 'screenVideoUrl']) {
+    assert.equal(serializedOutput.includes(forbidden), false);
+  }
+});
