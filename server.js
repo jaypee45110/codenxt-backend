@@ -3245,6 +3245,12 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
     }));
 
     if (!webhookVerification.ok) {
+      console.warn("codeClip provider verification rejected", {
+        provider: normalizedProvider,
+        route: "/codeclip/provider/:provider/keyword",
+        reason: webhookVerification.reason,
+        status: 400,
+      });
       return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
     }
 
@@ -3420,6 +3426,12 @@ function handleCodeClipMetaProviderChallengeRoute(req, res) {
     });
 
     if (!challengeVerification.ok) {
+      console.warn("codeClip provider challenge rejected", {
+        provider: "meta",
+        route: "/codeclip/provider/meta/keyword",
+        reason: challengeVerification.reason,
+        status: 403,
+      });
       return res.status(403).type("text/plain").send("Invalid provider challenge");
     }
 

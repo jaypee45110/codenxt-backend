@@ -74,6 +74,21 @@ async function withCodeClipMetaVerifyToken(token, run) {
   }
 }
 
+async function withConsoleWarnSpy(run) {
+  const originalWarn = console.warn;
+  const entries = [];
+
+  console.warn = (...args) => {
+    entries.push(args);
+  };
+
+  try {
+    await run(entries);
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
 function codeClipSmsHeaders(rawBody, secret = CODECLIP_SMS_TEST_SECRET) {
   return {
     'content-type': 'application/json',
@@ -98,6 +113,40 @@ function assertProviderKeywordPublicFailure(response, body, forbiddenTerms = [])
   assertNoCodeClipProviderInternals(body);
 
   const serialized = JSON.stringify(body);
+  for (const term of forbiddenTerms) {
+    assert.equal(serialized.includes(term), false);
+  }
+}
+
+function serializeWarnEntry(entry) {
+  return JSON.stringify(entry);
+}
+
+function assertSafeProviderWarning(entries, {
+  eventName,
+  provider,
+  reason,
+  status,
+  forbiddenTerms = [],
+}) {
+  const matchingEntry = entries.find((entry) => (
+    entry[0] === eventName &&
+    entry[1]?.provider === provider &&
+    entry[1]?.reason === reason &&
+    entry[1]?.status === status
+  ));
+
+  assert.ok(matchingEntry, `missing safe provider warning for ${eventName}:${reason}`);
+  assert.equal(Object.hasOwn(matchingEntry[1], 'headers'), false);
+  assert.equal(Object.hasOwn(matchingEntry[1], 'body'), false);
+  assert.equal(Object.hasOwn(matchingEntry[1], 'rawBody'), false);
+  assert.equal(Object.hasOwn(matchingEntry[1], 'query'), false);
+  assert.equal(Object.hasOwn(matchingEntry[1], 'secret'), false);
+  assert.equal(Object.hasOwn(matchingEntry[1], 'signature'), false);
+  assert.equal(Object.hasOwn(matchingEntry[1], 'verification'), false);
+  assert.equal(Object.hasOwn(matchingEntry[1], 'challengeVerification'), false);
+
+  const serialized = serializeWarnEntry(matchingEntry);
   for (const term of forbiddenTerms) {
     assert.equal(serialized.includes(term), false);
   }
@@ -584,15 +633,27 @@ test('GET /codeclip/provider/meta/keyword returns plain Meta challenge for valid
 test('GET /codeclip/provider/meta/keyword rejects missing verify token configuration without leaking internals', async () => {
   await withTestServer(async (baseUrl) => {
     await withCodeClipMetaVerifyToken(null, async () => {
-      const response = await fetch(
-        `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=${CODECLIP_META_TEST_VERIFY_TOKEN}&hub.challenge=meta-challenge-123`
-      );
-      const text = await response.text();
+      await withConsoleWarnSpy(async (warnEntries) => {
+        const response = await fetch(
+          `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=${CODECLIP_META_TEST_VERIFY_TOKEN}&hub.challenge=meta-challenge-123`
+        );
+        const text = await response.text();
 
-      assertProviderChallengePublicFailure(response, text, [
-        'VERIFY_TOKEN_REQUIRED',
-        CODECLIP_META_TEST_VERIFY_TOKEN,
-      ]);
+        assertProviderChallengePublicFailure(response, text, [
+          'VERIFY_TOKEN_REQUIRED',
+          CODECLIP_META_TEST_VERIFY_TOKEN,
+        ]);
+        assertSafeProviderWarning(warnEntries, {
+          eventName: 'codeClip provider challenge rejected',
+          provider: 'meta',
+          reason: 'VERIFY_TOKEN_REQUIRED',
+          status: 403,
+          forbiddenTerms: [
+            CODECLIP_META_TEST_VERIFY_TOKEN,
+            'meta-challenge-123',
+          ],
+        });
+      });
     });
   });
 });
@@ -600,16 +661,29 @@ test('GET /codeclip/provider/meta/keyword rejects missing verify token configura
 test('GET /codeclip/provider/meta/keyword rejects wrong verify token without leaking internals', async () => {
   await withTestServer(async (baseUrl) => {
     await withCodeClipMetaVerifyToken(CODECLIP_META_TEST_VERIFY_TOKEN, async () => {
-      const response = await fetch(
-        `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=wrong-token&hub.challenge=meta-challenge-123`
-      );
-      const text = await response.text();
+      await withConsoleWarnSpy(async (warnEntries) => {
+        const response = await fetch(
+          `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=wrong-token&hub.challenge=meta-challenge-123`
+        );
+        const text = await response.text();
 
-      assertProviderChallengePublicFailure(response, text, [
-        'VERIFY_TOKEN_MISMATCH',
-        CODECLIP_META_TEST_VERIFY_TOKEN,
-        'wrong-token',
-      ]);
+        assertProviderChallengePublicFailure(response, text, [
+          'VERIFY_TOKEN_MISMATCH',
+          CODECLIP_META_TEST_VERIFY_TOKEN,
+          'wrong-token',
+        ]);
+        assertSafeProviderWarning(warnEntries, {
+          eventName: 'codeClip provider challenge rejected',
+          provider: 'meta',
+          reason: 'VERIFY_TOKEN_MISMATCH',
+          status: 403,
+          forbiddenTerms: [
+            CODECLIP_META_TEST_VERIFY_TOKEN,
+            'wrong-token',
+            'meta-challenge-123',
+          ],
+        });
+      });
     });
   });
 });
@@ -617,15 +691,26 @@ test('GET /codeclip/provider/meta/keyword rejects wrong verify token without lea
 test('GET /codeclip/provider/meta/keyword rejects missing challenge without leaking internals', async () => {
   await withTestServer(async (baseUrl) => {
     await withCodeClipMetaVerifyToken(CODECLIP_META_TEST_VERIFY_TOKEN, async () => {
-      const response = await fetch(
-        `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=${CODECLIP_META_TEST_VERIFY_TOKEN}`
-      );
-      const text = await response.text();
+      await withConsoleWarnSpy(async (warnEntries) => {
+        const response = await fetch(
+          `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=${CODECLIP_META_TEST_VERIFY_TOKEN}`
+        );
+        const text = await response.text();
 
-      assertProviderChallengePublicFailure(response, text, [
-        'CHALLENGE_REQUIRED',
-        CODECLIP_META_TEST_VERIFY_TOKEN,
-      ]);
+        assertProviderChallengePublicFailure(response, text, [
+          'CHALLENGE_REQUIRED',
+          CODECLIP_META_TEST_VERIFY_TOKEN,
+        ]);
+        assertSafeProviderWarning(warnEntries, {
+          eventName: 'codeClip provider challenge rejected',
+          provider: 'meta',
+          reason: 'CHALLENGE_REQUIRED',
+          status: 403,
+          forbiddenTerms: [
+            CODECLIP_META_TEST_VERIFY_TOKEN,
+          ],
+        });
+      });
     });
   });
 });
@@ -839,40 +924,67 @@ test('POST /codeclip/provider/test/keyword requires test provider signature with
 
     assert.equal(createResponse.ok, true);
 
-    const missingSignatureResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
+    await withConsoleWarnSpy(async (warnEntries) => {
+      const missingSignatureBody = JSON.stringify({
         keyword,
         providerEventId: `missing-signature-${Date.now()}`,
-      }),
+      });
+      const missingSignatureResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: missingSignatureBody,
+      });
+      const missingSignature = await missingSignatureResponse.json();
+
+      assert.equal(missingSignatureResponse.status, 400);
+      assert.equal(missingSignature.ok, false);
+      assert.equal(missingSignature.error, 'Invalid provider keyword payload');
+      assert.equal(Object.hasOwn(missingSignature, 'reason'), false);
+      assertNoCodeClipProviderInternals(missingSignature);
+      assertSafeProviderWarning(warnEntries, {
+        eventName: 'codeClip provider verification rejected',
+        provider: 'test',
+        reason: 'SIGNATURE_REQUIRED',
+        status: 400,
+        forbiddenTerms: [
+          missingSignatureBody,
+          keyword,
+        ],
+      });
     });
-    const missingSignature = await missingSignatureResponse.json();
 
-    assert.equal(missingSignatureResponse.status, 400);
-    assert.equal(missingSignature.ok, false);
-    assert.equal(missingSignature.error, 'Invalid provider keyword payload');
-    assert.equal(Object.hasOwn(missingSignature, 'reason'), false);
-    assertNoCodeClipProviderInternals(missingSignature);
-
-    const invalidSignatureResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-codeclip-test-signature': 'invalid',
-      },
-      body: JSON.stringify({
+    await withConsoleWarnSpy(async (warnEntries) => {
+      const invalidSignatureBody = JSON.stringify({
         keyword,
         providerEventId: `invalid-signature-${Date.now()}`,
-      }),
-    });
-    const invalidSignature = await invalidSignatureResponse.json();
+      });
+      const invalidSignatureResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-codeclip-test-signature': 'invalid',
+        },
+        body: invalidSignatureBody,
+      });
+      const invalidSignature = await invalidSignatureResponse.json();
 
-    assert.equal(invalidSignatureResponse.status, 400);
-    assert.equal(invalidSignature.ok, false);
-    assert.equal(invalidSignature.error, 'Invalid provider keyword payload');
-    assert.equal(Object.hasOwn(invalidSignature, 'reason'), false);
-    assertNoCodeClipProviderInternals(invalidSignature);
+      assert.equal(invalidSignatureResponse.status, 400);
+      assert.equal(invalidSignature.ok, false);
+      assert.equal(invalidSignature.error, 'Invalid provider keyword payload');
+      assert.equal(Object.hasOwn(invalidSignature, 'reason'), false);
+      assertNoCodeClipProviderInternals(invalidSignature);
+      assertSafeProviderWarning(warnEntries, {
+        eventName: 'codeClip provider verification rejected',
+        provider: 'test',
+        reason: 'SIGNATURE_MISMATCH',
+        status: 400,
+        forbiddenTerms: [
+          invalidSignatureBody,
+          keyword,
+          'invalid',
+        ],
+      });
+    });
 
     const validSignatureResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`, {
       method: 'POST',
@@ -955,18 +1067,31 @@ test('POST /codeclip/provider/sms/keyword requires configured HMAC secret withou
     });
 
     await withCodeClipSmsSecret(null, async () => {
-      const response = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
-        method: 'POST',
-        headers: codeClipSmsHeaders(requestBody),
-        body: requestBody,
-      });
-      const body = await response.json();
+      await withConsoleWarnSpy(async (warnEntries) => {
+        const response = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+          method: 'POST',
+          headers: codeClipSmsHeaders(requestBody),
+          body: requestBody,
+        });
+        const body = await response.json();
 
-      assertProviderKeywordPublicFailure(response, body, [
-        'SECRET_NOT_CONFIGURED',
-        'SECRET_REQUIRED',
-        CODECLIP_SMS_TEST_SECRET,
-      ]);
+        assertProviderKeywordPublicFailure(response, body, [
+          'SECRET_NOT_CONFIGURED',
+          'SECRET_REQUIRED',
+          CODECLIP_SMS_TEST_SECRET,
+        ]);
+        assertSafeProviderWarning(warnEntries, {
+          eventName: 'codeClip provider verification rejected',
+          provider: 'sms',
+          reason: 'SECRET_NOT_CONFIGURED',
+          status: 400,
+          forbiddenTerms: [
+            requestBody,
+            CODECLIP_SMS_TEST_SECRET,
+            codeClipSmsHeaders(requestBody)['x-provider-signature'],
+          ],
+        });
+      });
     });
   });
 });
@@ -981,17 +1106,29 @@ test('POST /codeclip/provider/sms/keyword requires HMAC signature without leakin
     });
 
     await withCodeClipSmsSecret(CODECLIP_SMS_TEST_SECRET, async () => {
-      const response = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: requestBody,
-      });
-      const body = await response.json();
+      await withConsoleWarnSpy(async (warnEntries) => {
+        const response = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: requestBody,
+        });
+        const body = await response.json();
 
-      assertProviderKeywordPublicFailure(response, body, [
-        'SIGNATURE_REQUIRED',
-        CODECLIP_SMS_TEST_SECRET,
-      ]);
+        assertProviderKeywordPublicFailure(response, body, [
+          'SIGNATURE_REQUIRED',
+          CODECLIP_SMS_TEST_SECRET,
+        ]);
+        assertSafeProviderWarning(warnEntries, {
+          eventName: 'codeClip provider verification rejected',
+          provider: 'sms',
+          reason: 'SIGNATURE_REQUIRED',
+          status: 400,
+          forbiddenTerms: [
+            requestBody,
+            CODECLIP_SMS_TEST_SECRET,
+          ],
+        });
+      });
     });
   });
 });
@@ -1006,20 +1143,33 @@ test('POST /codeclip/provider/sms/keyword rejects invalid HMAC signature without
     });
 
     await withCodeClipSmsSecret(CODECLIP_SMS_TEST_SECRET, async () => {
-      const response = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-provider-signature': 'sha256=0000',
-        },
-        body: requestBody,
-      });
-      const body = await response.json();
+      await withConsoleWarnSpy(async (warnEntries) => {
+        const response = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-provider-signature': 'sha256=0000',
+          },
+          body: requestBody,
+        });
+        const body = await response.json();
 
-      assertProviderKeywordPublicFailure(response, body, [
-        'SIGNATURE_MISMATCH',
-        CODECLIP_SMS_TEST_SECRET,
-      ]);
+        assertProviderKeywordPublicFailure(response, body, [
+          'SIGNATURE_MISMATCH',
+          CODECLIP_SMS_TEST_SECRET,
+        ]);
+        assertSafeProviderWarning(warnEntries, {
+          eventName: 'codeClip provider verification rejected',
+          provider: 'sms',
+          reason: 'SIGNATURE_MISMATCH',
+          status: 400,
+          forbiddenTerms: [
+            requestBody,
+            CODECLIP_SMS_TEST_SECRET,
+            'sha256=0000',
+          ],
+        });
+      });
     });
   });
 });
