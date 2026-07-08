@@ -424,6 +424,89 @@ test('eventCode collisions stay isolated across codePod and codeClip event resol
   });
 });
 
+test('generic reward records do not override codeClip event rewards during scan', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-REWARD-SOURCE-${Date.now()}`;
+    const nativeRewardTitle = 'Native OpenClip reward';
+    const genericRewardTitle = 'Generic reward override';
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip reward source guardrail test',
+        startAt: '2024-01-01T10:00:00.000Z',
+        unlockAt: '2024-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        rewards: {
+          openClip: {
+            enabled: true,
+            title: nativeRewardTitle,
+            type: 'url',
+            contentUrl: 'https://native.example/openclip',
+          },
+        },
+      }),
+    });
+    const created = await createResponse.json();
+
+    assert.equal(createResponse.ok, true);
+    assert.ok(created.eventId);
+    assert.equal(created.event.rewards.openClip.title, nativeRewardTitle);
+
+    const genericRewardResponse = await fetch(`${baseUrl}/reward`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventId: created.eventId,
+        reward: {
+          tier: 'openClip',
+          title: genericRewardTitle,
+          type: 'url',
+          url: 'https://generic.example/openclip',
+          vertical: 'codeclip',
+        },
+      }),
+    });
+    const genericRewardSaved = await genericRewardResponse.json();
+
+    assert.equal(genericRewardResponse.ok, true);
+    assert.equal(genericRewardSaved.success, true);
+
+    const genericRewardReadResponse = await fetch(`${baseUrl}/reward/${created.eventId}?tier=openClip&vertical=codeclip`);
+    const genericRewardRead = await genericRewardReadResponse.json();
+
+    assert.equal(genericRewardReadResponse.ok, true);
+    assert.equal(genericRewardRead.openClip.title, genericRewardTitle);
+
+    const eventResponse = await fetch(`${baseUrl}/event/${code}?vertical=codeclip`);
+    const event = await eventResponse.json();
+
+    assert.equal(eventResponse.ok, true);
+    assert.equal(event.rewards.openClip.title, nativeRewardTitle);
+    assert.notEqual(event.rewards.openClip.title, genericRewardTitle);
+
+    const scanResponse = await fetch(`${baseUrl}/scan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: code,
+        scanId: `scan-${Date.now()}`,
+        vertical: 'codeclip',
+      }),
+    });
+    const scan = await scanResponse.json();
+
+    assert.equal(scanResponse.ok, true);
+    assert.equal(scan.success, true);
+    assert.equal(scan.rewards.openClip.title, nativeRewardTitle);
+    assert.notEqual(scan.rewards.openClip.title, genericRewardTitle);
+    assert.equal(Object.hasOwn(scan, 'digitalSouvenir'), false);
+    assert.equal(Object.hasOwn(scan, 'partnerReward'), false);
+  });
+});
+
 test('POST /scan uses stored codeClip event vertical when request vertical is missing', async () => {
   await withTestServer(async (baseUrl) => {
     const code = `CC-STORED-VERTICAL-${Date.now()}`;
