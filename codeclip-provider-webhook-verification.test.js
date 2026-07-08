@@ -114,6 +114,26 @@ test("codeClip provider webhook verification hmac requires secret and signature"
   );
 });
 
+test("codeClip provider webhook verification handles missing resolved secret safely", () => {
+  const result = verifyCodeClipProviderWebhook({
+    provider: "meta",
+    mode: "hmac-sha256",
+    rawBody: "body",
+    secretResolution: {
+      ok: false,
+      reason: "SECRET_NOT_CONFIGURED",
+      required: true,
+    },
+    headers: {
+      "x-hub-signature-256": "sha256=unused",
+    },
+  });
+
+  assert.deepEqual(result, { ok: false, reason: "SECRET_NOT_CONFIGURED" });
+  assert.equal(Object.hasOwn(result, "secret"), false);
+  assert.equal(Object.hasOwn(result, "metadata"), false);
+});
+
 test("codeClip provider webhook verification validates Meta hmac signature", () => {
   const rawBody = "{\"message\":\"CLIP\"}";
   const secret = "meta-secret";

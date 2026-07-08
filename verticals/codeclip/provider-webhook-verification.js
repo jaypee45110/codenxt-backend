@@ -98,6 +98,7 @@ function verifyCodeClipProviderWebhook({
   headers = {},
   rawBody,
   secret,
+  secretResolution,
   mode = "disabled",
 } = {}) {
   const normalizedProvider = normalizeCodeClipProviderName(provider);
@@ -123,6 +124,13 @@ function verifyCodeClipProviderWebhook({
   if (normalizedMode === "hmac-sha256") {
     if (!["meta", "sms"].includes(normalizedProvider)) {
       return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
+    }
+
+    if (secretResolution?.required && secretResolution.ok === false) {
+      return {
+        ok: false,
+        reason: secretResolution.reason || "SECRET_NOT_CONFIGURED",
+      };
     }
 
     return verifyHmacSha256({
