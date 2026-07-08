@@ -1,8 +1,7 @@
-const SUPPORTED_PROVIDERS = new Set(["meta", "sms", "test"]);
-
-function normalizeProvider(value) {
-  return String(value || "").trim().toLowerCase();
-}
+const {
+  isCodeClipProviderRegistered,
+  normalizeCodeClipProviderName,
+} = require("./provider-registry");
 
 function normalizeValue(value) {
   const normalized = String(value || "").trim();
@@ -173,10 +172,10 @@ function normalizeCodeClipProviderEnvelope({
   receivedAt,
 } = {}) {
   const rawProvider = provider;
-  const normalizedProvider = normalizeProvider(provider);
+  const normalizedProvider = normalizeCodeClipProviderName(provider);
 
   if (!normalizedProvider) return { ok: false, reason: "PROVIDER_REQUIRED" };
-  if (!SUPPORTED_PROVIDERS.has(normalizedProvider)) {
+  if (!isCodeClipProviderRegistered(normalizedProvider)) {
     return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
   }
 
