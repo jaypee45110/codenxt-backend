@@ -328,6 +328,84 @@ function normalizeCodePodScanAudienceEntry(input = {}) {
   };
 }
 
+function normalizeCodePodKeywordAudienceEntry(input = {}) {
+  const entryCode = normalizeString(input.eventCode || input.entryCode);
+  const keyword = normalizeString(input.keyword);
+  const warnings = [];
+  const errors = [];
+
+  if (!entryCode) {
+    errors.push({
+      code: "ENTRY_CODE_REQUIRED",
+      message: "entryCode is required",
+    });
+  }
+
+  if (!keyword) {
+    errors.push({
+      code: "KEYWORD_REQUIRED",
+      message: "keyword is required",
+    });
+  }
+
+  if (errors.length) {
+    return {
+      ok: false,
+      audienceEntry: null,
+      audienceIntent: null,
+      warnings,
+      errors,
+    };
+  }
+
+  const audienceEntry = {
+    vertical: "codepod",
+    entryCode,
+    eventCode: entryCode,
+    keyword,
+    requestedVertical: normalizeRequestedVertical(input.requestedVertical),
+    source: "keyword",
+    transport: "message",
+    metadata: {
+      vertical: "codepod",
+    },
+  };
+
+  const eventId = normalizeString(input.eventId);
+  const messageId = normalizeString(input.messageId);
+  const provider = normalizeString(input.provider);
+  const providerAccountId = normalizeString(input.providerAccountId);
+  const receivedAt = normalizeString(input.receivedAt);
+
+  if (eventId) audienceEntry.eventId = eventId;
+  if (messageId) audienceEntry.messageId = messageId;
+  if (provider) audienceEntry.provider = provider;
+  if (providerAccountId) audienceEntry.providerAccountId = providerAccountId;
+  if (receivedAt) audienceEntry.receivedAt = receivedAt;
+
+  const audienceIntent = {
+    vertical: "codepod",
+    intentType: "keyword",
+    entryCode,
+    eventCode: entryCode,
+    keyword,
+    source: "keyword",
+    transport: "message",
+  };
+
+  if (messageId) audienceIntent.messageId = messageId;
+  if (provider) audienceIntent.provider = provider;
+  if (providerAccountId) audienceIntent.providerAccountId = providerAccountId;
+
+  return {
+    ok: true,
+    audienceEntry,
+    audienceIntent,
+    warnings,
+    errors: [],
+  };
+}
+
 function createCodePodInteractionSnapshot(input = {}) {
   const eventCode = normalizeString(input.eventCode);
 
@@ -380,6 +458,7 @@ module.exports = {
   createCodePodAudienceContextSnapshot,
   createCodePodInteractionSnapshot,
   normalizeCodePodDigitalSouvenir,
+  normalizeCodePodKeywordAudienceEntry,
   normalizeCodePodPartnerReward,
   normalizeCodePodScanAudienceEntry,
   parseCodePodPartnerReward,

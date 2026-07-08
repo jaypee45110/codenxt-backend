@@ -54,6 +54,126 @@ test('codePod COAS foundation normalizes scan AudienceEntry', () => {
   assert.equal(result.audienceIntent.handle, undefined);
 });
 
+test('codePod COAS foundation normalizes keyword AudienceEntry', () => {
+  const result = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    eventCode: ' CP-KEYWORD ',
+    eventId: ' event-codepod-keyword ',
+    keyword: ' LISTEN ',
+    messageId: ' message-codepod-keyword ',
+    provider: ' test ',
+    providerAccountId: ' account-codepod-keyword ',
+    requestedVertical: ' codepod ',
+    receivedAt: '2026-07-01T00:02:00.000Z',
+    ip: '127.0.0.1',
+    userAgent: 'test-agent',
+    rawPayload: { ignored: true },
+    phone: '+4712345678',
+    handle: '@participant',
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.audienceEntry, {
+    vertical: 'codepod',
+    entryCode: 'CP-KEYWORD',
+    eventCode: 'CP-KEYWORD',
+    eventId: 'event-codepod-keyword',
+    keyword: 'LISTEN',
+    messageId: 'message-codepod-keyword',
+    provider: 'test',
+    providerAccountId: 'account-codepod-keyword',
+    requestedVertical: 'codepod',
+    source: 'keyword',
+    transport: 'message',
+    receivedAt: '2026-07-01T00:02:00.000Z',
+    metadata: {
+      vertical: 'codepod',
+    },
+  });
+  assert.deepEqual(result.audienceIntent, {
+    vertical: 'codepod',
+    intentType: 'keyword',
+    entryCode: 'CP-KEYWORD',
+    eventCode: 'CP-KEYWORD',
+    keyword: 'LISTEN',
+    messageId: 'message-codepod-keyword',
+    provider: 'test',
+    providerAccountId: 'account-codepod-keyword',
+    source: 'keyword',
+    transport: 'message',
+  });
+  assert.equal(result.audienceEntry.ip, undefined);
+  assert.equal(result.audienceEntry.userAgent, undefined);
+  assert.equal(result.audienceEntry.rawPayload, undefined);
+  assert.equal(result.audienceEntry.phone, undefined);
+  assert.equal(result.audienceEntry.handle, undefined);
+  assert.equal(result.audienceIntent.ip, undefined);
+  assert.equal(result.audienceIntent.userAgent, undefined);
+  assert.equal(result.audienceIntent.rawPayload, undefined);
+  assert.equal(result.audienceIntent.phone, undefined);
+  assert.equal(result.audienceIntent.handle, undefined);
+});
+
+test('codePod COAS foundation rejects missing keyword entry code', () => {
+  const result = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    keyword: 'LISTEN',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.audienceEntry, null);
+  assert.equal(result.audienceIntent, null);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(
+    result.errors.map((error) => error.code),
+    ['ENTRY_CODE_REQUIRED']
+  );
+});
+
+test('codePod COAS foundation rejects missing keyword', () => {
+  const result = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    eventCode: 'CP-MISSING-KEYWORD',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.audienceEntry, null);
+  assert.equal(result.audienceIntent, null);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(
+    result.errors.map((error) => error.code),
+    ['KEYWORD_REQUIRED']
+  );
+});
+
+test('codePod keyword AudienceEntry foundation stays native and isolated', () => {
+  const result = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    eventCode: 'CP-KEYWORD-ISOLATION',
+    keyword: 'LISTEN',
+    openClip: 'must be ignored',
+    clipPlus: 'must be ignored',
+    clipXtra: 'must be ignored',
+    screenVideoUrl: 'https://screen-video.example/legacy.mp4',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.audienceEntry.vertical, 'codepod');
+  assert.equal(result.audienceEntry.source, 'keyword');
+  assert.equal(result.audienceEntry.transport, 'message');
+  assert.equal(result.audienceIntent.vertical, 'codepod');
+  assert.equal(result.audienceIntent.source, 'keyword');
+  assert.equal(result.audienceIntent.transport, 'message');
+
+  const serializedOutput = JSON.stringify({
+    audienceEntry: result.audienceEntry,
+    audienceIntent: result.audienceIntent,
+  });
+  const keywordFoundationSource = codePod.service.normalizeCodePodKeywordAudienceEntry.toString();
+  for (const forbidden of ['OpenClip', 'Clip+', 'ClipXtra', 'openClip', 'clipPlus', 'clipXtra', 'Screen Video', 'screenVideoUrl']) {
+    assert.equal(serializedOutput.includes(forbidden), false);
+    assert.equal(keywordFoundationSource.includes(forbidden), false);
+  }
+});
+
 test('codePod COAS foundation rejects missing entry code', () => {
   const result = codePod.service.normalizeCodePodScanAudienceEntry({
     scanId: 'scan-missing-entry-code',
