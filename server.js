@@ -3400,6 +3400,37 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
   }
 }
 
+function handleCodeClipMetaProviderChallengeRoute(req, res) {
+  try {
+    const {
+      resolveCodeClipProviderPolicy,
+    } = require("./verticals/codeclip/provider-policy");
+    const {
+      verifyCodeClipProviderChallenge,
+    } = require("./verticals/codeclip/provider-challenge-verification");
+    const providerPolicy = resolveCodeClipProviderPolicy("meta");
+    const verifyTokenEnvName = providerPolicy.ok
+      ? providerPolicy.policy.verifyTokenEnvName
+      : "";
+    const verifyToken = verifyTokenEnvName ? process.env[verifyTokenEnvName] : "";
+    const challengeVerification = verifyCodeClipProviderChallenge({
+      provider: "meta",
+      query: req.query || {},
+      verifyToken,
+    });
+
+    if (!challengeVerification.ok) {
+      return res.status(403).type("text/plain").send("Invalid provider challenge");
+    }
+
+    return res.status(200).type("text/plain").send(challengeVerification.challenge);
+  } catch (err) {
+    console.error("codeClip Meta provider challenge failed:", err.message);
+    return res.status(500).type("text/plain").send("Invalid provider challenge");
+  }
+}
+
+app.get("/codeclip/provider/meta/keyword", handleCodeClipMetaProviderChallengeRoute);
 app.post("/codeclip/provider/:provider/keyword", handleCodeClipProviderKeywordRoute);
 
 app.get("/report/:eventCode", requireCodePerksAdmin, async (req, res) => {

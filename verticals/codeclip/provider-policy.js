@@ -40,6 +40,7 @@ const PROVIDER_POLICIES = {
     envelopeType: "meta",
     verificationMode: "disabled",
     secretEnvName: "CODECLIP_META_WEBHOOK_SECRET",
+    verifyTokenEnvName: "CODECLIP_META_VERIFY_TOKEN",
     capabilities: buildCapabilities({ verificationMode: "disabled" }),
     idempotency: {
       enabled: true,

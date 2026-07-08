@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const { app } = require('./server');
 
 const CODECLIP_SMS_TEST_SECRET = 'codeclip-sms-test-secret';
+const CODECLIP_META_TEST_VERIFY_TOKEN = 'codeclip-meta-test-verify-token';
 
 async function withTestServer(run) {
   const server = app.listen(0);
@@ -53,11 +54,40 @@ async function withCodeClipSmsSecret(secret, run) {
   }
 }
 
+async function withCodeClipMetaVerifyToken(token, run) {
+  const previousToken = process.env.CODECLIP_META_VERIFY_TOKEN;
+
+  if (token == null) {
+    delete process.env.CODECLIP_META_VERIFY_TOKEN;
+  } else {
+    process.env.CODECLIP_META_VERIFY_TOKEN = token;
+  }
+
+  try {
+    await run();
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.CODECLIP_META_VERIFY_TOKEN;
+    } else {
+      process.env.CODECLIP_META_VERIFY_TOKEN = previousToken;
+    }
+  }
+}
+
 function codeClipSmsHeaders(rawBody, secret = CODECLIP_SMS_TEST_SECRET) {
   return {
     'content-type': 'application/json',
     'x-provider-signature': `sha256=${signCodeClipSmsBody(rawBody, secret)}`,
   };
+}
+
+function assertProviderChallengePublicFailure(response, text, forbiddenTerms = []) {
+  assert.equal(response.status, 403);
+  assert.equal(text, 'Invalid provider challenge');
+
+  for (const term of forbiddenTerms) {
+    assert.equal(text.includes(term), false);
+  }
 }
 
 function assertProviderKeywordPublicFailure(response, body, forbiddenTerms = []) {
@@ -533,6 +563,84 @@ test('POST /codeclip/provider/test/keyword accepts generic provider keyword inpu
     assert.equal(keywordEntry.messageId, providerEventId);
     assert.equal(Object.hasOwn(keywordEntry, 'resolution'), false);
     assertNoCodeClipProviderInternals(keywordEntry);
+  });
+});
+
+test('GET /codeclip/provider/meta/keyword returns plain Meta challenge for valid verify token', async () => {
+  await withTestServer(async (baseUrl) => {
+    await withCodeClipMetaVerifyToken(CODECLIP_META_TEST_VERIFY_TOKEN, async () => {
+      const response = await fetch(
+        `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=${CODECLIP_META_TEST_VERIFY_TOKEN}&hub.challenge=meta-challenge-123`
+      );
+      const text = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get('content-type') || '', /^text\/plain/);
+      assert.equal(text, 'meta-challenge-123');
+    });
+  });
+});
+
+test('GET /codeclip/provider/meta/keyword rejects missing verify token configuration without leaking internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    await withCodeClipMetaVerifyToken(null, async () => {
+      const response = await fetch(
+        `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=${CODECLIP_META_TEST_VERIFY_TOKEN}&hub.challenge=meta-challenge-123`
+      );
+      const text = await response.text();
+
+      assertProviderChallengePublicFailure(response, text, [
+        'VERIFY_TOKEN_REQUIRED',
+        CODECLIP_META_TEST_VERIFY_TOKEN,
+      ]);
+    });
+  });
+});
+
+test('GET /codeclip/provider/meta/keyword rejects wrong verify token without leaking internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    await withCodeClipMetaVerifyToken(CODECLIP_META_TEST_VERIFY_TOKEN, async () => {
+      const response = await fetch(
+        `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=wrong-token&hub.challenge=meta-challenge-123`
+      );
+      const text = await response.text();
+
+      assertProviderChallengePublicFailure(response, text, [
+        'VERIFY_TOKEN_MISMATCH',
+        CODECLIP_META_TEST_VERIFY_TOKEN,
+        'wrong-token',
+      ]);
+    });
+  });
+});
+
+test('GET /codeclip/provider/meta/keyword rejects missing challenge without leaking internals', async () => {
+  await withTestServer(async (baseUrl) => {
+    await withCodeClipMetaVerifyToken(CODECLIP_META_TEST_VERIFY_TOKEN, async () => {
+      const response = await fetch(
+        `${baseUrl}/codeclip/provider/meta/keyword?hub.mode=subscribe&hub.verify_token=${CODECLIP_META_TEST_VERIFY_TOKEN}`
+      );
+      const text = await response.text();
+
+      assertProviderChallengePublicFailure(response, text, [
+        'CHALLENGE_REQUIRED',
+        CODECLIP_META_TEST_VERIFY_TOKEN,
+      ]);
+    });
+  });
+});
+
+test('GET /codeclip/provider/sms/keyword and test provider keyword remain unsupported', async () => {
+  await withTestServer(async (baseUrl) => {
+    const smsResponse = await fetch(`${baseUrl}/codeclip/provider/sms/keyword`);
+    const smsBody = await readBody(smsResponse);
+    const testResponse = await fetch(`${baseUrl}/codeclip/provider/test/keyword`);
+    const testBody = await readBody(testResponse);
+
+    assert.equal(smsResponse.status, 404);
+    assert.equal(testResponse.status, 404);
+    assert.equal(isExpressRouteMissing(smsBody), true);
+    assert.equal(isExpressRouteMissing(testBody), true);
   });
 });
 
