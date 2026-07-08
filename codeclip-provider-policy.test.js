@@ -151,5 +151,12 @@ test("codeClip provider policy builds disabled verifier request for sms and meta
     assert.equal(request.rawBody, rawBody);
     assert.equal(request.mode, "disabled");
     assert.equal(Object.hasOwn(request, "secret"), false);
+    assert.equal(Object.hasOwn(request, "signatureHeader"), false);
+    assert.equal(Object.hasOwn(request, "signatureHeaders"), false);
+    assert.equal(Object.hasOwn(request, "verificationMethod"), false);
+    assert.equal(Object.hasOwn(request, "rawBodyRequired"), false);
+    assert.equal(policy.capabilities.hmacVerification, false);
+    assert.equal(policy.capabilities.rawBodyRequired, false);
+    assert.equal(policy.capabilities.liveProvider, false);
   }
 });
