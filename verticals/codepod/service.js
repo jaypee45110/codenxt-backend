@@ -607,6 +607,7 @@ function createCodePodRewardAssignmentDecision(input = {}) {
   const audienceContext = input.audienceContext || null;
   const interaction = input.interaction || null;
   const routingOutcome = input.routingOutcome || null;
+  const assignmentResult = input.assignmentResult || null;
   const source = normalizeString(audienceContext?.source || interaction?.source || routingOutcome?.source);
   const eventCode = normalizeString(audienceContext?.eventCode || interaction?.eventCode || routingOutcome?.eventCode);
 
@@ -615,8 +616,10 @@ function createCodePodRewardAssignmentDecision(input = {}) {
   const outcome = normalizeString(routingOutcome?.routingOutcome || interaction?.routingOutcome || "MATCH") || "MATCH";
   const interactionType = normalizeString(routingOutcome?.interactionType || interaction?.interactionType || source);
   const decision = outcome === "MATCH" ? "eligible" : "not_eligible";
-  const rewardDomain = source === "scan" ? "digitalSouvenir" : "deferred";
-  const assignmentStatus = source === "scan" && decision === "eligible" ? "pending" : "not_assigned";
+  const hasDigitalSouvenirAssignment = Boolean(assignmentResult?.digitalSouvenir);
+  const assignsDigitalSouvenir = source === "scan" || hasDigitalSouvenirAssignment;
+  const rewardDomain = assignsDigitalSouvenir ? "digitalSouvenir" : "deferred";
+  const assignmentStatus = assignsDigitalSouvenir && decision === "eligible" ? "pending" : "not_assigned";
 
   const result = {
     vertical: "codepod",
@@ -920,6 +923,7 @@ function buildCodePodRuntimeChain(input = {}) {
       audienceContext,
       interaction,
       routingOutcome,
+      assignmentResult: input.rewardAssignmentResult,
     });
     const rewardAssignmentSnapshot = createCodePodRewardAssignmentSnapshot({
       decision: rewardAssignmentDecision,

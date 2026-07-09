@@ -673,6 +673,22 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
         unlockAt: '2099-01-01T10:00:00.000Z',
         endAt: '2099-01-01T11:00:00.000Z',
         activationKeyword: 'Listen',
+        digitalSouvenir: {
+          gold: {
+            enabled: true,
+            title: 'Keyword Gold Souvenir',
+            type: 'url',
+            contentUrl: 'https://codepod.example/keyword-gold',
+            quantity: 1,
+          },
+          general: {
+            enabled: true,
+            title: 'Keyword General Souvenir',
+            type: 'url',
+            contentUrl: 'https://codepod.example/keyword-general',
+            quantity: 0,
+          },
+        },
       }),
     });
 
@@ -719,10 +735,45 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
     assert.equal(body.routingOutcome.vertical, 'codepod');
     assert.equal(body.routingOutcome.routingOutcome, 'MATCH');
     assert.equal(body.routingOutcome.interactionType, 'keyword');
+    assert.equal(body.tier, 'gold');
+    assert.deepEqual(body.digitalSouvenir, {
+      tier: 'gold',
+      assignedCount: 1,
+      quantity: 1,
+      remaining: 0,
+      unlimited: false,
+      exhausted: false,
+      noReward: false,
+    });
+    assert.equal(body.exhausted, false);
+    assert.equal(body.noReward, false);
+    assert.equal(Object.hasOwn(body, 'scanId'), false);
+    assert.equal(Object.hasOwn(body, 'goldXtra'), false);
+    assert.equal(Object.hasOwn(body, 'partnerReward'), false);
+
+    const repeatedResponse = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode,
+        keyword: 'listen',
+        messageId: 'message-codepod-keyword-route',
+        provider: 'test',
+        providerAccountId: 'account-codepod-keyword-route',
+      }),
+    });
+    const repeatedBody = await repeatedResponse.json();
+
+    assert.equal(repeatedResponse.ok, true);
+    assert.deepEqual(repeatedBody.digitalSouvenir, body.digitalSouvenir);
+    assert.equal(repeatedBody.digitalSouvenir.assignedCount, 1);
     assert.equal(capturedRuntimeChain?.interaction?.interactionType, 'keyword');
     assert.equal(capturedRuntimeChain?.routingOutcome?.routingOutcome, 'MATCH');
-    assert.equal(capturedRuntimeChain?.rewardAssignmentDecision?.rewardDomain, 'deferred');
-    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.assignmentStatus, 'not_assigned');
+    assert.equal(capturedRuntimeChain?.rewardAssignmentDecision?.rewardDomain, 'digitalSouvenir');
+    assert.equal(capturedRuntimeChain?.rewardAssignmentDecision?.assignmentStatus, 'pending');
+    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.assignmentStatus, 'assigned');
+    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.tier, 'gold');
+    assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.goldXtra?.assigned, false);
     assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persistenceAction, 'none');
     assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persisted, false);
     assert.equal(Object.hasOwn(body, 'audienceContext'), false);
@@ -756,14 +807,21 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
 test('POST /codepod/keyword-entry rejects no-match and non-codePod events without runtime snapshots', async (t) => {
   const codePod = require('./verticals/codepod');
   const originalBuildRuntimeChain = codePod.service.buildCodePodRuntimeChain;
+  const originalAssignDigitalSouvenir = codePod.service.assignCodePodDigitalSouvenirTier;
   let runtimeChainCalls = 0;
+  let assignmentCalls = 0;
 
   t.after(() => {
     codePod.service.buildCodePodRuntimeChain = originalBuildRuntimeChain;
+    codePod.service.assignCodePodDigitalSouvenirTier = originalAssignDigitalSouvenir;
   });
   codePod.service.buildCodePodRuntimeChain = (input) => {
     runtimeChainCalls += 1;
     return originalBuildRuntimeChain(input);
+  };
+  codePod.service.assignCodePodDigitalSouvenirTier = (...args) => {
+    assignmentCalls += 1;
+    return originalAssignDigitalSouvenir(...args);
   };
 
   await withTestServer(async (baseUrl) => {
@@ -856,6 +914,7 @@ test('POST /codepod/keyword-entry rejects no-match and non-codePod events withou
     }
 
     assert.equal(runtimeChainCalls, 0);
+    assert.equal(assignmentCalls, 0);
   });
 });
 
@@ -895,6 +954,23 @@ test('POST /codepod/keyword-entry rejects missing entry code or keyword safely',
     assert.deepEqual(
       missingKeyword.errors.map((error) => error.code),
       ['KEYWORD_REQUIRED']
+    );
+
+    const missingMessageIdResponse = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: 'CP-MISSING-MESSAGE-ID',
+        keyword: 'LISTEN',
+      }),
+    });
+    const missingMessageId = await missingMessageIdResponse.json();
+
+    assert.equal(missingMessageIdResponse.status, 400);
+    assert.equal(missingMessageId.ok, false);
+    assert.deepEqual(
+      missingMessageId.errors.map((error) => error.code),
+      ['MESSAGE_ID_REQUIRED']
     );
   });
 });

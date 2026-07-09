@@ -881,3 +881,47 @@ test('codePod COAS foundation builds shared runtime chain for keyword', () => {
     assert.equal(serializedOutput.includes(forbidden), false);
   }
 });
+
+test('codePod keyword runtime chain models an actual Digital Souvenir assignment without persistence', () => {
+  const normalized = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    eventCode: 'CP-KEYWORD-ASSIGNMENT',
+    keyword: 'LISTEN',
+    messageId: 'message-keyword-assignment',
+    requestedVertical: 'codepod',
+  });
+  const digitalSouvenir = {
+    tier: 'silver',
+    assignedCount: 1,
+    quantity: 2,
+    remaining: 1,
+    unlimited: false,
+    exhausted: false,
+    noReward: false,
+  };
+  const chain = codePod.service.buildCodePodRuntimeChain({
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+    rewardAssignmentResult: {
+      tier: 'silver',
+      digitalSouvenir,
+      goldXtra: null,
+    },
+  });
+
+  assert.equal(chain.rewardAssignmentDecision.rewardDomain, 'digitalSouvenir');
+  assert.equal(chain.rewardAssignmentDecision.assignmentStatus, 'pending');
+  assert.equal(chain.rewardAssignmentSnapshot.rewardDomain, 'digitalSouvenir');
+  assert.equal(chain.rewardAssignmentSnapshot.assignmentStatus, 'assigned');
+  assert.equal(chain.rewardAssignmentSnapshot.tier, 'silver');
+  assert.deepEqual(chain.rewardAssignmentSnapshot.digitalSouvenir, {
+    assigned: true,
+    tier: 'silver',
+    exhausted: false,
+    noReward: false,
+  });
+  assert.deepEqual(chain.rewardAssignmentSnapshot.goldXtra, {
+    assigned: false,
+  });
+  assert.equal(chain.persistenceSnapshot.persistenceAction, 'none');
+  assert.equal(chain.persistenceSnapshot.persisted, false);
+});

@@ -3118,6 +3118,19 @@ app.post("/codepod/keyword-entry", async (req, res) => {
       });
     }
 
+    if (!normalized.audienceEntry.messageId) {
+      return res.status(400).json({
+        ok: false,
+        vertical: "codepod",
+        source: "keyword",
+        transport: "message",
+        errors: [{
+          code: "MESSAGE_ID_REQUIRED",
+          message: "messageId is required",
+        }],
+      });
+    }
+
     const resolvedEvent = await resolveCodePodKeywordEvent(
       normalized.audienceEntry.eventCode
     );
@@ -3148,9 +3161,21 @@ app.post("/codepod/keyword-entry", async (req, res) => {
       });
     }
 
+    const digitalSouvenirAssignment = await assignCodePodDigitalSouvenirTier(
+      normalized.audienceEntry.eventCode,
+      normalized.audienceEntry.messageId,
+      resolvedEvent.event.digitalSouvenir,
+      resolvedEvent.event
+    );
+
     const codePodRuntimeChain = codePodVertical.service.buildCodePodRuntimeChain({
       audienceEntry: normalized.audienceEntry,
       audienceIntent: normalized.audienceIntent,
+      rewardAssignmentResult: {
+        tier: digitalSouvenirAssignment.tier,
+        digitalSouvenir: digitalSouvenirAssignment,
+        goldXtra: null,
+      },
     });
 
     return res.json({
@@ -3164,6 +3189,10 @@ app.post("/codepod/keyword-entry", async (req, res) => {
       audienceIntent: normalized.audienceIntent,
       interaction: codePodRuntimeChain.interaction,
       routingOutcome: codePodRuntimeChain.routingOutcome,
+      tier: digitalSouvenirAssignment.tier,
+      digitalSouvenir: digitalSouvenirAssignment,
+      exhausted: Boolean(digitalSouvenirAssignment.exhausted),
+      noReward: Boolean(digitalSouvenirAssignment.noReward),
     });
   } catch (err) {
     console.error("codePod keyword entry failed:", err.message);
