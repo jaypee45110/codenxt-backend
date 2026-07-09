@@ -5,6 +5,7 @@ const { readFileSync } = require("node:fs");
 const {
   ensureCodePodKeywordInteractionsTable,
   getCodePodKeywordInteraction,
+  getCodePodKeywordInteractionSummary,
   insertCodePodKeywordInteraction,
 } = require("./db");
 
@@ -173,4 +174,119 @@ test("codePod keyword insert returns null on idempotency conflict", async () => 
   }, fakeClient);
 
   assert.equal(row, null);
+});
+
+test("codePod keyword report summary aggregates only native keyword interactions", async () => {
+  const calls = [];
+  const fakeClient = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      return {
+        rows: [{
+          total_interactions: "7",
+          assigned: "5",
+          no_reward: "1",
+          exhausted: "1",
+          tier_gold: "2",
+          tier_silver: "2",
+          tier_general: "1",
+        }],
+      };
+    },
+  };
+
+  const summary = await getCodePodKeywordInteractionSummary(
+    "CP-KEYWORD-REPORT",
+    fakeClient
+  );
+
+  assert.deepEqual(summary, {
+    totalInteractions: 7,
+    assigned: 5,
+    noReward: 1,
+    exhausted: 1,
+    tiers: {
+      gold: 2,
+      silver: 2,
+      general: 1,
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].params, ["CP-KEYWORD-REPORT"]);
+  assert.match(calls[0].sql, /FROM codepod_keyword_interactions/);
+  assert.match(calls[0].sql, /event_code = \$1/);
+  assert.match(calls[0].sql, /vertical = 'codepod'/);
+  assert.match(calls[0].sql, /source = 'keyword'/);
+  assert.match(calls[0].sql, /interaction_type = 'keyword'/);
+  assert.doesNotMatch(calls[0].sql, /event_scans/);
+
+  const serialized = JSON.stringify(summary);
+  for (const forbidden of [
+    "interaction",
+    "reward_assignment",
+    "goldXtra",
+    "partnerReward",
+    "redemption",
+  ]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test("codePod keyword report summary returns safe zero values without data access", async () => {
+  const noClientSummary = await getCodePodKeywordInteractionSummary(
+    "CP-KEYWORD-EMPTY",
+    null
+  );
+  const noEventSummary = await getCodePodKeywordInteractionSummary("", {
+    async query() {
+      throw new Error("query should not run");
+    },
+  });
+  const expected = {
+    totalInteractions: 0,
+    assigned: 0,
+    noReward: 0,
+    exhausted: 0,
+    tiers: {
+      gold: 0,
+      silver: 0,
+      general: 0,
+    },
+  };
+
+  assert.deepEqual(noClientSummary, expected);
+  assert.deepEqual(noEventSummary, expected);
+});
+
+test("codePod keyword report summary normalizes null aggregate values", async () => {
+  const summary = await getCodePodKeywordInteractionSummary(
+    "CP-KEYWORD-NULLS",
+    {
+      async query() {
+        return {
+          rows: [{
+            total_interactions: null,
+            assigned: null,
+            no_reward: null,
+            exhausted: null,
+            tier_gold: null,
+            tier_silver: null,
+            tier_general: null,
+          }],
+        };
+      },
+    }
+  );
+
+  assert.deepEqual(summary, {
+    totalInteractions: 0,
+    assigned: 0,
+    noReward: 0,
+    exhausted: 0,
+    tiers: {
+      gold: 0,
+      silver: 0,
+      general: 0,
+    },
+  });
 });

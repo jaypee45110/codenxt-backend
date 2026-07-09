@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
+const database = require('./db');
 const { app } = require('./server');
 
 const CODECLIP_SMS_TEST_SECRET = 'codeclip-sms-test-secret';
@@ -236,7 +237,130 @@ test('GET /codepod/report returns a compatible empty report for a codePod event'
     assert.equal(Array.isArray(report.rows), true);
     assert.equal(Array.isArray(report.scans), true);
     assert.ok(report.metrics && typeof report.metrics === 'object');
+    assert.deepEqual(report.keywordSummary, {
+      totalInteractions: 0,
+      assigned: 0,
+      noReward: 0,
+      exhausted: 0,
+      tiers: {
+        gold: 0,
+        silver: 0,
+        general: 0,
+      },
+    });
   });
+});
+
+test('GET /codepod/report exposes keyword summary without changing scan report data', async () => {
+  const originalGetKeywordSummary = database.getCodePodKeywordInteractionSummary;
+  const expectedKeywordSummary = {
+    totalInteractions: 4,
+    assigned: 2,
+    noReward: 1,
+    exhausted: 1,
+    tiers: {
+      gold: 1,
+      silver: 1,
+      general: 0,
+    },
+  };
+  database.getCodePodKeywordInteractionSummary = async () => expectedKeywordSummary;
+
+  try {
+    await withTestServer(async (baseUrl) => {
+      const code = `CP-KEYWORD-REPORT-${Date.now()}`;
+      const createResponse = await fetch(`${baseUrl}/event`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          vertical: 'codepod',
+          code,
+          name: 'codePod keyword report summary test',
+          startAt: '2024-01-01T10:00:00.000Z',
+          unlockAt: '2024-01-01T10:00:00.000Z',
+          endAt: '2099-01-01T11:00:00.000Z',
+        }),
+      });
+
+      assert.equal(createResponse.ok, true);
+
+      const reportResponse = await fetch(`${baseUrl}/codepod/report/${code}`);
+      const report = await reportResponse.json();
+
+      assert.equal(reportResponse.ok, true);
+      assert.deepEqual(report.keywordSummary, expectedKeywordSummary);
+      assert.deepEqual(report.rows, []);
+      assert.deepEqual(report.scans, []);
+      assert.equal(report.metrics.scans, 0);
+      assert.equal(report.metrics.uniqueScans, 0);
+      assert.equal(report.metrics.gold, 0);
+      assert.equal(report.metrics.silver, 0);
+      assert.equal(report.metrics.general, 0);
+
+      const serializedSummary = JSON.stringify(report.keywordSummary);
+      for (const forbidden of [
+        'interaction',
+        'reward_assignment',
+        'goldXtra',
+        'partnerReward',
+        'redemption',
+      ]) {
+        assert.equal(serializedSummary.includes(forbidden), false);
+      }
+    });
+  } finally {
+    database.getCodePodKeywordInteractionSummary = originalGetKeywordSummary;
+  }
+});
+
+test('GET /codepod/report uses safe keyword summary defaults when aggregation fails', async () => {
+  const originalGetKeywordSummary = database.getCodePodKeywordInteractionSummary;
+  database.getCodePodKeywordInteractionSummary = async () => {
+    throw new Error('keyword summary unavailable');
+  };
+
+  try {
+    await withConsoleWarnSpy(async () => {
+      await withTestServer(async (baseUrl) => {
+        const code = `CP-KEYWORD-REPORT-DEGRADED-${Date.now()}`;
+        const createResponse = await fetch(`${baseUrl}/event`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            vertical: 'codepod',
+            code,
+            name: 'codePod degraded keyword report summary test',
+            startAt: '2024-01-01T10:00:00.000Z',
+            unlockAt: '2024-01-01T10:00:00.000Z',
+            endAt: '2099-01-01T11:00:00.000Z',
+          }),
+        });
+
+        assert.equal(createResponse.ok, true);
+
+        const reportResponse = await fetch(`${baseUrl}/codepod/report/${code}`);
+        const report = await reportResponse.json();
+
+        assert.equal(reportResponse.ok, true);
+        assert.deepEqual(report.keywordSummary, {
+          totalInteractions: 0,
+          assigned: 0,
+          noReward: 0,
+          exhausted: 0,
+          tiers: {
+            gold: 0,
+            silver: 0,
+            general: 0,
+          },
+        });
+        assert.deepEqual(report.rows, []);
+        assert.deepEqual(report.scans, []);
+        assert.equal(report.metrics.scans, 0);
+      });
+    });
+  } finally {
+    database.getCodePodKeywordInteractionSummary = originalGetKeywordSummary;
+  }
 });
 
 test('GET /codeclip/report exposes runtimeSummary without changing rows or scans contract', async () => {

@@ -1321,6 +1321,63 @@ async function getCodePodKeywordInteraction(eventCode, messageId, queryClient = 
     : null;
 }
 
+function emptyCodePodKeywordInteractionSummary() {
+  return {
+    totalInteractions: 0,
+    assigned: 0,
+    noReward: 0,
+    exhausted: 0,
+    tiers: {
+      gold: 0,
+      silver: 0,
+      general: 0,
+    },
+  };
+}
+
+async function getCodePodKeywordInteractionSummary(eventCode, queryClient = pool) {
+  if (!queryClient || !eventCode) {
+    return emptyCodePodKeywordInteractionSummary();
+  }
+
+  const result = await queryClient.query(
+    `
+      SELECT
+        COUNT(*) AS total_interactions,
+        COUNT(*) FILTER (WHERE assignment_status = 'assigned') AS assigned,
+        COUNT(*) FILTER (
+          WHERE reward_assignment @> '{"noReward":true}'::jsonb
+        ) AS no_reward,
+        COUNT(*) FILTER (
+          WHERE reward_assignment @> '{"exhausted":true}'::jsonb
+        ) AS exhausted,
+        COUNT(*) FILTER (WHERE LOWER(tier) = 'gold') AS tier_gold,
+        COUNT(*) FILTER (WHERE LOWER(tier) = 'silver') AS tier_silver,
+        COUNT(*) FILTER (WHERE LOWER(tier) = 'general') AS tier_general
+      FROM codepod_keyword_interactions
+      WHERE event_code = $1
+        AND vertical = 'codepod'
+        AND source = 'keyword'
+        AND interaction_type = 'keyword'
+    `,
+    [eventCode]
+  );
+
+  const row = result.rows?.[0] || {};
+
+  return {
+    totalInteractions: Number(row.total_interactions || 0),
+    assigned: Number(row.assigned || 0),
+    noReward: Number(row.no_reward || 0),
+    exhausted: Number(row.exhausted || 0),
+    tiers: {
+      gold: Number(row.tier_gold || 0),
+      silver: Number(row.tier_silver || 0),
+      general: Number(row.tier_general || 0),
+    },
+  };
+}
+
 function normalizeCodeClipInteractionLimit(limit = 100) {
   const parsed = Number.parseInt(String(limit || 100), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return 100;
@@ -2047,6 +2104,7 @@ module.exports = {
   ensureCodePodKeywordInteractionsTable,
   insertCodePodKeywordInteraction,
   getCodePodKeywordInteraction,
+  getCodePodKeywordInteractionSummary,
   ensureCodeClipXtraRedemptionsTable,
   saveCodeClipXtraRedemption,
   ensureCodeClipInteractionsTable,

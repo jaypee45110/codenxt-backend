@@ -2914,6 +2914,24 @@ app.get("/codepod/report/:eventCode", async (req, res) => {
     const digitalSouvenir = normalizeCodePodDigitalSouvenir(meta.digitalSouvenir || {});
     const rows = await getCodePodReportRows(eventCode, "codepod");
     const registrations = await getEventRegistrations(eventCode, 1000, "codepod");
+    let keywordSummary = {
+      totalInteractions: 0,
+      assigned: 0,
+      noReward: 0,
+      exhausted: 0,
+      tiers: {
+        gold: 0,
+        silver: 0,
+        general: 0,
+      },
+    };
+
+    try {
+      keywordSummary = await database.getCodePodKeywordInteractionSummary(eventCode);
+    } catch (keywordSummaryError) {
+      console.warn("codePod keyword report summary failed:", keywordSummaryError.message);
+    }
+
     const phoneByScanId = new Map(
       registrations
         .filter((registration) => registration.scan_id && registration.phone)
@@ -3020,6 +3038,7 @@ app.get("/codepod/report/:eventCode", async (req, res) => {
         goldXtraRedeemed: goldXtraRows.filter((row) => row.redemptionStatus === "redeemed").length,
         alreadyRedeemedAttempts: scans.reduce((sum, row) => sum + Number(row.alreadyRedeemedAttempts || 0), 0),
       },
+      keywordSummary,
       scans,
     });
   } catch (err) {
