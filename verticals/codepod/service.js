@@ -328,6 +328,25 @@ function normalizeCodePodScanAudienceEntry(input = {}) {
   };
 }
 
+function matchCodePodActivationKeyword(input = {}) {
+  const event = input.event || null;
+  const eventVertical = normalizeString(event?.vertical).toLowerCase();
+  const activationKeyword = normalizeString(event?.activationKeyword);
+  const keyword = normalizeString(input.keyword);
+  const matched = (
+    eventVertical === "codepod" &&
+    Boolean(activationKeyword) &&
+    Boolean(keyword) &&
+    activationKeyword.toLowerCase() === keyword.toLowerCase()
+  );
+
+  return {
+    matched,
+    routingOutcome: matched ? "MATCH" : "NO_MATCH",
+    reason: matched ? null : "NO_MATCH",
+  };
+}
+
 function normalizeCodePodKeywordAudienceEntry(input = {}) {
   const entryCode = normalizeString(input.eventCode || input.entryCode);
   const keyword = normalizeString(input.keyword);
@@ -945,6 +964,7 @@ module.exports = {
   createCodePodRewardAssignmentDecision,
   createCodePodRewardAssignmentSnapshot,
   createCodePodScanRoutingOutcome,
+  matchCodePodActivationKeyword,
   normalizeCodePodDigitalSouvenir,
   normalizeCodePodKeywordAudienceEntry,
   normalizeCodePodPartnerReward,

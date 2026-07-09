@@ -661,11 +661,28 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
   };
 
   await withTestServer(async (baseUrl) => {
+    const eventCode = `CP-POD-KEYWORD-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code: eventCode,
+        name: 'codePod keyword entry route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationKeyword: 'Listen',
+      }),
+    });
+
+    assert.equal(createResponse.ok, true);
+
     const keywordResponse = await fetch(`${baseUrl}/codepod/keyword-entry`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        eventCode: ' CP-POD-KEYWORD ',
+        eventCode: ` ${eventCode} `,
         keyword: ' LISTEN ',
         messageId: ' message-codepod-keyword-route ',
         provider: ' test ',
@@ -688,7 +705,7 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
     assert.equal(body.vertical, 'codepod');
     assert.equal(body.source, 'keyword');
     assert.equal(body.transport, 'message');
-    assert.equal(body.eventCode, 'CP-POD-KEYWORD');
+    assert.equal(body.eventCode, eventCode);
     assert.equal(body.keyword, 'LISTEN');
     assert.equal(body.audienceEntry.vertical, 'codepod');
     assert.equal(body.audienceEntry.source, 'keyword');
@@ -733,6 +750,112 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
     ]) {
       assert.equal(serialized.includes(forbidden), false);
     }
+  });
+});
+
+test('POST /codepod/keyword-entry rejects no-match and non-codePod events without runtime snapshots', async (t) => {
+  const codePod = require('./verticals/codepod');
+  const originalBuildRuntimeChain = codePod.service.buildCodePodRuntimeChain;
+  let runtimeChainCalls = 0;
+
+  t.after(() => {
+    codePod.service.buildCodePodRuntimeChain = originalBuildRuntimeChain;
+  });
+  codePod.service.buildCodePodRuntimeChain = (input) => {
+    runtimeChainCalls += 1;
+    return originalBuildRuntimeChain(input);
+  };
+
+  await withTestServer(async (baseUrl) => {
+    const codePodEventCode = `CP-POD-NO-MATCH-${Date.now()}`;
+    const codeClipEventCode = `CC-POD-ISOLATION-${Date.now()}`;
+
+    for (const event of [
+      {
+        vertical: 'codepod',
+        code: codePodEventCode,
+        name: 'codePod no-match route test',
+        activationKeyword: 'LISTEN',
+      },
+      {
+        vertical: 'codeclip',
+        code: codeClipEventCode,
+        name: 'codeClip isolation route test',
+        activationKeyword: 'LISTEN',
+      },
+    ]) {
+      const createResponse = await fetch(`${baseUrl}/event`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...event,
+          startAt: '2099-01-01T10:00:00.000Z',
+          unlockAt: '2099-01-01T10:00:00.000Z',
+          endAt: '2099-01-01T11:00:00.000Z',
+        }),
+      });
+      assert.equal(createResponse.ok, true);
+    }
+
+    const noMatchResponse = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode: codePodEventCode,
+        keyword: 'WRONG',
+        messageId: `message-${Date.now()}`,
+      }),
+    });
+    const noMatch = await noMatchResponse.json();
+
+    assert.equal(noMatchResponse.status, 422);
+    assert.deepEqual(noMatch, {
+      ok: false,
+      vertical: 'codepod',
+      source: 'keyword',
+      transport: 'message',
+      routingOutcome: 'NO_MATCH',
+      reason: 'NO_MATCH',
+    });
+    for (const internalField of [
+      'audienceEntry',
+      'audienceIntent',
+      'interaction',
+      'audienceContext',
+      'rewardAssignmentDecision',
+      'rewardAssignmentSnapshot',
+      'persistenceDecision',
+      'persistenceSnapshot',
+    ]) {
+      assert.equal(Object.hasOwn(noMatch, internalField), false);
+    }
+
+    for (const eventCode of [
+      `CP-POD-MISSING-${Date.now()}`,
+      codeClipEventCode,
+    ]) {
+      const response = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          eventCode,
+          keyword: 'LISTEN',
+          messageId: `message-${Date.now()}`,
+        }),
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 404);
+      assert.deepEqual(body, {
+        ok: false,
+        vertical: 'codepod',
+        source: 'keyword',
+        transport: 'message',
+        error: 'Event not found',
+      });
+    }
+
+    assert.equal(runtimeChainCalls, 0);
   });
 });
 

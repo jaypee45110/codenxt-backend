@@ -115,6 +115,51 @@ test('codePod COAS foundation normalizes keyword AudienceEntry', () => {
   assert.equal(result.audienceIntent.handle, undefined);
 });
 
+test('codePod activation keyword matching is trimmed, case-insensitive, and vertically isolated', () => {
+  const event = {
+    vertical: 'codepod',
+    activationKeyword: ' ListenNow ',
+  };
+
+  assert.deepEqual(
+    codePod.service.matchCodePodActivationKeyword({
+      event,
+      keyword: '  LISTENnow  ',
+    }),
+    {
+      matched: true,
+      routingOutcome: 'MATCH',
+      reason: null,
+    }
+  );
+  assert.deepEqual(
+    codePod.service.matchCodePodActivationKeyword({
+      event,
+      keyword: 'DIFFERENT',
+    }),
+    {
+      matched: false,
+      routingOutcome: 'NO_MATCH',
+      reason: 'NO_MATCH',
+    }
+  );
+  assert.equal(
+    codePod.service.matchCodePodActivationKeyword({
+      event: { vertical: 'codepod', activationKeyword: '   ' },
+      keyword: 'LISTEN',
+    }).matched,
+    false
+  );
+  assert.equal(
+    codePod.service.matchCodePodActivationKeyword({
+      event: { vertical: 'codeclip', activationKeyword: 'LISTEN' },
+      keyword: 'LISTEN',
+    }).matched,
+    false
+  );
+  assert.equal(event.activationKeyword, ' ListenNow ');
+});
+
 test('codePod COAS foundation rejects missing keyword entry code', () => {
   const result = codePod.service.normalizeCodePodKeywordAudienceEntry({
     keyword: 'LISTEN',

@@ -283,6 +283,34 @@ async function resolveEventReference(eventCode, { requestedVertical = "", explic
   return { eventId: null, event: null };
 }
 
+async function resolveCodePodKeywordEvent(eventCode) {
+  const resolved = await resolveEventReference(eventCode, {
+    requestedVertical: "codepod",
+    explicitVertical: true,
+  });
+
+  if (resolved.event && eventMatchesVertical(resolved.event, "codepod")) {
+    return resolved;
+  }
+
+  if (getCampaignByCode) {
+    const campaign = await getCampaignByCode(String(eventCode || "").trim());
+    const rawEvent = campaign?.raw_event || null;
+    const campaignVertical = normalizeVerticalName(campaign?.vertical || rawEvent?.vertical);
+
+    if (campaign && campaignVertical === "codepod") {
+      return {
+        eventId: rawEvent?.id || campaign.id || null,
+        event: rawEvent?.vertical
+          ? rawEvent
+          : { ...(rawEvent || campaign), vertical: "codepod" },
+      };
+    }
+  }
+
+  return { eventId: null, event: null };
+}
+
 async function refreshCodePodGoldXtraRedisToken(token, row) {
   if (!process.env.REDIS_URL || !token || !row) return;
 
@@ -3087,6 +3115,36 @@ app.post("/codepod/keyword-entry", async (req, res) => {
         source: "keyword",
         transport: "message",
         errors: normalized.errors,
+      });
+    }
+
+    const resolvedEvent = await resolveCodePodKeywordEvent(
+      normalized.audienceEntry.eventCode
+    );
+
+    if (!resolvedEvent.event || !resolvedEvent.eventId) {
+      return res.status(404).json({
+        ok: false,
+        vertical: "codepod",
+        source: "keyword",
+        transport: "message",
+        error: "Event not found",
+      });
+    }
+
+    const keywordMatch = codePodVertical.service.matchCodePodActivationKeyword({
+      event: resolvedEvent.event,
+      keyword: normalized.audienceEntry.keyword,
+    });
+
+    if (!keywordMatch.matched) {
+      return res.status(422).json({
+        ok: false,
+        vertical: "codepod",
+        source: "keyword",
+        transport: "message",
+        routingOutcome: "NO_MATCH",
+        reason: "NO_MATCH",
       });
     }
 
