@@ -925,3 +925,58 @@ test('codePod keyword runtime chain models an actual Digital Souvenir assignment
   assert.equal(chain.persistenceSnapshot.persistenceAction, 'none');
   assert.equal(chain.persistenceSnapshot.persisted, false);
 });
+
+test('codePod keyword runtime chain reflects persisted, reused, and degraded persistence', () => {
+  const normalized = codePod.service.normalizeCodePodKeywordAudienceEntry({
+    eventCode: 'CP-KEYWORD-PERSISTENCE-SNAPSHOT',
+    keyword: 'LISTEN',
+    messageId: 'message-keyword-persistence-snapshot',
+    requestedVertical: 'codepod',
+  });
+  const chain = codePod.service.buildCodePodRuntimeChain({
+    audienceEntry: normalized.audienceEntry,
+    audienceIntent: normalized.audienceIntent,
+  });
+  const persisted = codePod.service.applyCodePodPersistenceResult(chain, {
+    attempted: true,
+    persisted: true,
+    status: 'persisted',
+    action: 'upsert_keyword_interaction',
+    mode: 'operational',
+  });
+  const reused = codePod.service.applyCodePodPersistenceResult(chain, {
+    attempted: true,
+    persisted: true,
+    status: 'reused',
+    action: 'reuse_keyword_interaction',
+    mode: 'operational',
+  });
+  const degraded = codePod.service.applyCodePodPersistenceResult(chain, {
+    attempted: true,
+    persisted: false,
+    status: 'degraded',
+    action: 'none',
+    mode: 'operational',
+  });
+
+  assert.deepEqual(
+    {
+      status: persisted.persistenceSnapshot.persistenceStatus,
+      action: persisted.persistenceSnapshot.persistenceAction,
+      persisted: persisted.persistenceSnapshot.persisted,
+      mode: persisted.persistenceSnapshot.persistenceMode,
+    },
+    {
+      status: 'persisted',
+      action: 'upsert_keyword_interaction',
+      persisted: true,
+      mode: 'operational',
+    }
+  );
+  assert.equal(reused.persistenceSnapshot.persistenceStatus, 'reused');
+  assert.equal(reused.persistenceSnapshot.persistenceAction, 'reuse_keyword_interaction');
+  assert.equal(reused.persistenceSnapshot.persisted, true);
+  assert.equal(degraded.persistenceSnapshot.persistenceStatus, 'degraded');
+  assert.equal(degraded.persistenceSnapshot.persistenceAction, 'none');
+  assert.equal(degraded.persistenceSnapshot.persisted, false);
+});

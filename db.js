@@ -1213,6 +1213,114 @@ function parseJsonPayload(value, fallback = null) {
   }
 }
 
+async function ensureCodePodKeywordInteractionsTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codepod_keyword_interactions (
+      id BIGSERIAL PRIMARY KEY,
+      event_code TEXT NOT NULL,
+      event_id TEXT,
+      message_id TEXT NOT NULL,
+      vertical TEXT NOT NULL DEFAULT 'codepod',
+      source TEXT NOT NULL DEFAULT 'keyword',
+      interaction_type TEXT NOT NULL DEFAULT 'keyword',
+      keyword TEXT NOT NULL,
+      routing_outcome TEXT NOT NULL DEFAULT 'MATCH',
+      tier TEXT,
+      assignment_status TEXT,
+      interaction JSONB,
+      reward_assignment JSONB,
+      occurred_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (event_code, message_id)
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codepod_keyword_interactions_event_code_created_at_idx
+    ON codepod_keyword_interactions (event_code, created_at DESC)
+  `);
+}
+
+function formatCodePodKeywordInteractionRow(row = {}) {
+  const rewardAssignment = parseJsonPayload(
+    row.reward_assignment,
+    row.reward_assignment || null
+  );
+
+  return {
+    ...row,
+    interaction: parseJsonPayload(row.interaction, row.interaction || null),
+    reward_assignment: rewardAssignment,
+    rewardAssignment,
+  };
+}
+
+async function insertCodePodKeywordInteraction(record = {}, queryClient = pool) {
+  if (!queryClient || !record.eventCode || !record.messageId) return null;
+
+  const result = await queryClient.query(
+    `
+      INSERT INTO codepod_keyword_interactions (
+        event_code,
+        event_id,
+        message_id,
+        vertical,
+        source,
+        interaction_type,
+        keyword,
+        routing_outcome,
+        tier,
+        assignment_status,
+        interaction,
+        reward_assignment,
+        occurred_at,
+        updated_at
+      )
+      VALUES ($1,$2,$3,'codepod','keyword','keyword',$4,$5,$6,$7,$8::jsonb,$9::jsonb,COALESCE($10::timestamptz,NOW()),NOW())
+      ON CONFLICT (event_code, message_id) DO NOTHING
+      RETURNING *
+    `,
+    [
+      record.eventCode,
+      record.eventId || null,
+      record.messageId,
+      record.keyword || "",
+      record.routingOutcome || "MATCH",
+      record.tier || null,
+      record.assignmentStatus || null,
+      JSON.stringify(record.interaction || {}),
+      JSON.stringify(record.rewardAssignment || {}),
+      record.occurredAt || null,
+    ]
+  );
+
+  return result.rows?.[0]
+    ? formatCodePodKeywordInteractionRow(result.rows[0])
+    : null;
+}
+
+async function getCodePodKeywordInteraction(eventCode, messageId, queryClient = pool) {
+  if (!queryClient || !eventCode || !messageId) return null;
+
+  const result = await queryClient.query(
+    `
+      SELECT *
+      FROM codepod_keyword_interactions
+      WHERE event_code = $1
+        AND message_id = $2
+      LIMIT 1
+    `,
+    [eventCode, messageId]
+  );
+
+  return result.rows?.[0]
+    ? formatCodePodKeywordInteractionRow(result.rows[0])
+    : null;
+}
+
 function normalizeCodeClipInteractionLimit(limit = 100) {
   const parsed = Number.parseInt(String(limit || 100), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return 100;
@@ -1936,6 +2044,9 @@ module.exports = {
   ensureCodeDemoExceptionsTable,
   ensureCodePodGoldXtraRedemptionsTable,
   saveCodePodGoldXtraRedemption,
+  ensureCodePodKeywordInteractionsTable,
+  insertCodePodKeywordInteraction,
+  getCodePodKeywordInteraction,
   ensureCodeClipXtraRedemptionsTable,
   saveCodeClipXtraRedemption,
   ensureCodeClipInteractionsTable,

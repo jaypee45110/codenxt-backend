@@ -815,6 +815,10 @@ function createCodePodPersistenceSnapshot(input = {}) {
 
   if (!decision) return null;
 
+  const persistenceResult = input.persistenceResult || null;
+  const attempted = persistenceResult?.attempted === true;
+  const persisted = persistenceResult?.persisted === true;
+
   return {
     vertical: "codepod",
     source: decision.source,
@@ -824,17 +828,35 @@ function createCodePodPersistenceSnapshot(input = {}) {
     interactionType: decision.interactionType,
     routingOutcome: decision.routingOutcome,
     assignmentStatus: decision.assignmentStatus,
-    persistenceStatus: decision.persistenceStatus,
-    persistenceMode: decision.persistenceMode,
+    persistenceStatus: attempted
+      ? normalizeString(persistenceResult.status || (persisted ? "persisted" : "degraded"))
+      : decision.persistenceStatus,
+    persistenceMode: attempted
+      ? normalizeString(persistenceResult.mode || "operational")
+      : decision.persistenceMode,
     decision: decision.decision,
-    persistenceAction: "none",
-    persisted: false,
+    persistenceAction: attempted
+      ? normalizeString(persistenceResult.action || "none")
+      : "none",
+    persisted,
     eventId: decision.eventId || "",
     scanId: decision.scanId || "",
     keyword: decision.keyword || "",
     messageId: decision.messageId || "",
     provider: decision.provider || "",
     providerAccountId: decision.providerAccountId || "",
+  };
+}
+
+function applyCodePodPersistenceResult(runtimeChain, persistenceResult = {}) {
+  if (!runtimeChain?.persistenceDecision) return runtimeChain || null;
+
+  return {
+    ...runtimeChain,
+    persistenceSnapshot: createCodePodPersistenceSnapshot({
+      decision: runtimeChain.persistenceDecision,
+      persistenceResult,
+    }),
   };
 }
 
@@ -955,6 +977,7 @@ function buildCodePodRuntimeChain(input = {}) {
 }
 
 module.exports = {
+  applyCodePodPersistenceResult,
   assignCodePodDigitalSouvenirTier,
   assignCodePodGoldXtra,
   buildCodePodRuntimeChain,

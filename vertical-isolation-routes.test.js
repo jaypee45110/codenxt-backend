@@ -649,15 +649,49 @@ test('POST /codeclip/keyword-entry accepts internal keyword entry without exposi
 
 test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots', async (t) => {
   const codePod = require('./verticals/codepod');
+  const database = require('./db');
   const originalBuildRuntimeChain = codePod.service.buildCodePodRuntimeChain;
+  const originalApplyPersistenceResult = codePod.service.applyCodePodPersistenceResult;
+  const originalAssignDigitalSouvenir = codePod.service.assignCodePodDigitalSouvenirTier;
+  const originalGetKeywordInteraction = database.getCodePodKeywordInteraction;
+  const originalInsertKeywordInteraction = database.insertCodePodKeywordInteraction;
   let capturedRuntimeChain = null;
+  let storedKeywordInteraction = null;
+  let assignmentCalls = 0;
+  let insertCalls = 0;
+  const persistenceResults = [];
 
   t.after(() => {
     codePod.service.buildCodePodRuntimeChain = originalBuildRuntimeChain;
+    codePod.service.applyCodePodPersistenceResult = originalApplyPersistenceResult;
+    codePod.service.assignCodePodDigitalSouvenirTier = originalAssignDigitalSouvenir;
+    database.getCodePodKeywordInteraction = originalGetKeywordInteraction;
+    database.insertCodePodKeywordInteraction = originalInsertKeywordInteraction;
   });
   codePod.service.buildCodePodRuntimeChain = (input) => {
     capturedRuntimeChain = originalBuildRuntimeChain(input);
     return capturedRuntimeChain;
+  };
+  codePod.service.applyCodePodPersistenceResult = (runtimeChain, persistenceResult) => {
+    persistenceResults.push(persistenceResult);
+    capturedRuntimeChain = originalApplyPersistenceResult(runtimeChain, persistenceResult);
+    return capturedRuntimeChain;
+  };
+  codePod.service.assignCodePodDigitalSouvenirTier = (...args) => {
+    assignmentCalls += 1;
+    return originalAssignDigitalSouvenir(...args);
+  };
+  database.getCodePodKeywordInteraction = async () => storedKeywordInteraction;
+  database.insertCodePodKeywordInteraction = async (record) => {
+    insertCalls += 1;
+    storedKeywordInteraction = {
+      event_code: record.eventCode,
+      event_id: record.eventId,
+      message_id: record.messageId,
+      interaction: record.interaction,
+      rewardAssignment: record.rewardAssignment,
+    };
+    return storedKeywordInteraction;
   };
 
   await withTestServer(async (baseUrl) => {
@@ -767,6 +801,16 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
     assert.equal(repeatedResponse.ok, true);
     assert.deepEqual(repeatedBody.digitalSouvenir, body.digitalSouvenir);
     assert.equal(repeatedBody.digitalSouvenir.assignedCount, 1);
+    assert.equal(assignmentCalls, 1);
+    assert.equal(insertCalls, 1);
+    assert.equal(storedKeywordInteraction.interaction.interactionType, 'keyword');
+    assert.equal(storedKeywordInteraction.interaction.source, 'keyword');
+    assert.equal(storedKeywordInteraction.interaction.scanId, undefined);
+    assert.deepEqual(storedKeywordInteraction.rewardAssignment, body.digitalSouvenir);
+    assert.equal(persistenceResults[0].status, 'persisted');
+    assert.equal(persistenceResults[0].action, 'upsert_keyword_interaction');
+    assert.equal(persistenceResults[1].status, 'reused');
+    assert.equal(persistenceResults[1].action, 'reuse_keyword_interaction');
     assert.equal(capturedRuntimeChain?.interaction?.interactionType, 'keyword');
     assert.equal(capturedRuntimeChain?.routingOutcome?.routingOutcome, 'MATCH');
     assert.equal(capturedRuntimeChain?.rewardAssignmentDecision?.rewardDomain, 'digitalSouvenir');
@@ -774,8 +818,9 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
     assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.assignmentStatus, 'assigned');
     assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.tier, 'gold');
     assert.equal(capturedRuntimeChain?.rewardAssignmentSnapshot?.goldXtra?.assigned, false);
-    assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persistenceAction, 'none');
-    assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persisted, false);
+    assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persistenceStatus, 'reused');
+    assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persistenceAction, 'reuse_keyword_interaction');
+    assert.equal(capturedRuntimeChain?.persistenceSnapshot?.persisted, true);
     assert.equal(Object.hasOwn(body, 'audienceContext'), false);
     assert.equal(Object.hasOwn(body, 'rewardAssignmentDecision'), false);
     assert.equal(Object.hasOwn(body, 'rewardAssignmentSnapshot'), false);
@@ -804,16 +849,266 @@ test('POST /codepod/keyword-entry returns codePod-native keyword COAS snapshots'
   });
 });
 
+test('POST /codepod/keyword-entry reuses the stored assignment after an insert conflict', async (t) => {
+  const codePod = require('./verticals/codepod');
+  const database = require('./db');
+  const originalApplyPersistenceResult = codePod.service.applyCodePodPersistenceResult;
+  const originalAssignDigitalSouvenir = codePod.service.assignCodePodDigitalSouvenirTier;
+  const originalGetKeywordInteraction = database.getCodePodKeywordInteraction;
+  const originalInsertKeywordInteraction = database.insertCodePodKeywordInteraction;
+  const persistedAssignment = {
+    tier: 'general',
+    assignedCount: 7,
+    quantity: 0,
+    remaining: null,
+    unlimited: true,
+    exhausted: false,
+    noReward: false,
+  };
+  let getCalls = 0;
+  let insertCalls = 0;
+  let assignmentCalls = 0;
+  let capturedPersistenceResult = null;
+
+  t.after(() => {
+    codePod.service.applyCodePodPersistenceResult = originalApplyPersistenceResult;
+    codePod.service.assignCodePodDigitalSouvenirTier = originalAssignDigitalSouvenir;
+    database.getCodePodKeywordInteraction = originalGetKeywordInteraction;
+    database.insertCodePodKeywordInteraction = originalInsertKeywordInteraction;
+  });
+  codePod.service.applyCodePodPersistenceResult = (runtimeChain, persistenceResult) => {
+    capturedPersistenceResult = persistenceResult;
+    return originalApplyPersistenceResult(runtimeChain, persistenceResult);
+  };
+  codePod.service.assignCodePodDigitalSouvenirTier = (...args) => {
+    assignmentCalls += 1;
+    return originalAssignDigitalSouvenir(...args);
+  };
+  database.getCodePodKeywordInteraction = async () => {
+    getCalls += 1;
+    return getCalls === 1
+      ? null
+      : {
+          message_id: 'message-keyword-conflict',
+          rewardAssignment: persistedAssignment,
+        };
+  };
+  database.insertCodePodKeywordInteraction = async () => {
+    insertCalls += 1;
+    return null;
+  };
+
+  await withTestServer(async (baseUrl) => {
+    const eventCode = `CP-POD-KEYWORD-CONFLICT-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code: eventCode,
+        name: 'codePod keyword conflict test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationKeyword: 'LISTEN',
+        digitalSouvenir: {
+          gold: { enabled: true, quantity: 1 },
+          general: { enabled: true, quantity: 0 },
+        },
+      }),
+    });
+    assert.equal(createResponse.ok, true);
+
+    const response = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode,
+        keyword: 'LISTEN',
+        messageId: 'message-keyword-conflict',
+      }),
+    });
+    const body = await response.json();
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(body.digitalSouvenir, persistedAssignment);
+    assert.equal(body.tier, 'general');
+    assert.equal(getCalls, 2);
+    assert.equal(insertCalls, 1);
+    assert.equal(assignmentCalls, 1);
+    assert.equal(capturedPersistenceResult.status, 'reused');
+    assert.equal(capturedPersistenceResult.action, 'reuse_keyword_interaction');
+    assert.equal(Object.hasOwn(body, 'persistenceSnapshot'), false);
+  });
+});
+
+test('POST /codepod/keyword-entry degrades safely when a stored row lacks reward assignment', async (t) => {
+  const codePod = require('./verticals/codepod');
+  const database = require('./db');
+  const originalApplyPersistenceResult = codePod.service.applyCodePodPersistenceResult;
+  const originalAssignDigitalSouvenir = codePod.service.assignCodePodDigitalSouvenirTier;
+  const originalGetKeywordInteraction = database.getCodePodKeywordInteraction;
+  const originalInsertKeywordInteraction = database.insertCodePodKeywordInteraction;
+  let assignmentCalls = 0;
+  let insertCalls = 0;
+  let capturedPersistenceResult = null;
+
+  t.after(() => {
+    codePod.service.applyCodePodPersistenceResult = originalApplyPersistenceResult;
+    codePod.service.assignCodePodDigitalSouvenirTier = originalAssignDigitalSouvenir;
+    database.getCodePodKeywordInteraction = originalGetKeywordInteraction;
+    database.insertCodePodKeywordInteraction = originalInsertKeywordInteraction;
+  });
+  codePod.service.applyCodePodPersistenceResult = (runtimeChain, persistenceResult) => {
+    capturedPersistenceResult = persistenceResult;
+    return originalApplyPersistenceResult(runtimeChain, persistenceResult);
+  };
+  codePod.service.assignCodePodDigitalSouvenirTier = (...args) => {
+    assignmentCalls += 1;
+    return originalAssignDigitalSouvenir(...args);
+  };
+  database.getCodePodKeywordInteraction = async () => ({
+    event_code: 'CP-POD-KEYWORD-CORRUPT',
+    message_id: 'message-keyword-corrupt',
+    interaction: {
+      vertical: 'codepod',
+      interactionType: 'keyword',
+    },
+    rewardAssignment: null,
+  });
+  database.insertCodePodKeywordInteraction = async () => {
+    insertCalls += 1;
+    return null;
+  };
+
+  await withTestServer(async (baseUrl) => {
+    const eventCode = `CP-POD-KEYWORD-CORRUPT-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code: eventCode,
+        name: 'codePod corrupt keyword persistence test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationKeyword: 'LISTEN',
+        digitalSouvenir: {
+          general: { enabled: true, quantity: 0 },
+        },
+      }),
+    });
+    assert.equal(createResponse.ok, true);
+
+    const response = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode,
+        keyword: 'LISTEN',
+        messageId: 'message-keyword-corrupt',
+      }),
+    });
+    const body = await response.json();
+
+    assert.equal(response.ok, true);
+    assert.equal(body.ok, true);
+    assert.equal(assignmentCalls, 0);
+    assert.equal(insertCalls, 0);
+    assert.equal(capturedPersistenceResult.status, 'degraded');
+    assert.equal(capturedPersistenceResult.action, 'none');
+    assert.equal(capturedPersistenceResult.persisted, false);
+    assert.equal(Object.hasOwn(body, 'tier'), false);
+    assert.equal(Object.hasOwn(body, 'digitalSouvenir'), false);
+    assert.equal(Object.hasOwn(body, 'exhausted'), false);
+    assert.equal(Object.hasOwn(body, 'noReward'), false);
+    assert.equal(Object.hasOwn(body, 'persistenceSnapshot'), false);
+  });
+});
+
+test('POST /codepod/keyword-entry keeps public success when keyword persistence degrades', async (t) => {
+  const codePod = require('./verticals/codepod');
+  const database = require('./db');
+  const originalApplyPersistenceResult = codePod.service.applyCodePodPersistenceResult;
+  const originalGetKeywordInteraction = database.getCodePodKeywordInteraction;
+  const originalInsertKeywordInteraction = database.insertCodePodKeywordInteraction;
+  let capturedPersistenceResult = null;
+
+  t.after(() => {
+    codePod.service.applyCodePodPersistenceResult = originalApplyPersistenceResult;
+    database.getCodePodKeywordInteraction = originalGetKeywordInteraction;
+    database.insertCodePodKeywordInteraction = originalInsertKeywordInteraction;
+  });
+  codePod.service.applyCodePodPersistenceResult = (runtimeChain, persistenceResult) => {
+    capturedPersistenceResult = persistenceResult;
+    return originalApplyPersistenceResult(runtimeChain, persistenceResult);
+  };
+  database.getCodePodKeywordInteraction = async () => {
+    throw new Error('keyword persistence unavailable');
+  };
+  database.insertCodePodKeywordInteraction = async () => {
+    throw new Error('keyword persistence unavailable');
+  };
+
+  await withTestServer(async (baseUrl) => {
+    const eventCode = `CP-POD-KEYWORD-DEGRADED-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code: eventCode,
+        name: 'codePod keyword degraded persistence test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationKeyword: 'LISTEN',
+        digitalSouvenir: {
+          general: { enabled: true, quantity: 0 },
+        },
+      }),
+    });
+    assert.equal(createResponse.ok, true);
+
+    const response = await fetch(`${baseUrl}/codepod/keyword-entry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventCode,
+        keyword: 'LISTEN',
+        messageId: 'message-keyword-degraded',
+      }),
+    });
+    const body = await response.json();
+
+    assert.equal(response.ok, true);
+    assert.equal(body.ok, true);
+    assert.equal(body.digitalSouvenir.tier, 'general');
+    assert.equal(capturedPersistenceResult.status, 'degraded');
+    assert.equal(capturedPersistenceResult.action, 'none');
+    assert.equal(capturedPersistenceResult.persisted, false);
+    assert.equal(Object.hasOwn(body, 'persistenceSnapshot'), false);
+  });
+});
+
 test('POST /codepod/keyword-entry rejects no-match and non-codePod events without runtime snapshots', async (t) => {
   const codePod = require('./verticals/codepod');
+  const database = require('./db');
   const originalBuildRuntimeChain = codePod.service.buildCodePodRuntimeChain;
   const originalAssignDigitalSouvenir = codePod.service.assignCodePodDigitalSouvenirTier;
+  const originalGetKeywordInteraction = database.getCodePodKeywordInteraction;
+  const originalInsertKeywordInteraction = database.insertCodePodKeywordInteraction;
   let runtimeChainCalls = 0;
   let assignmentCalls = 0;
+  let persistenceReadCalls = 0;
+  let persistenceWriteCalls = 0;
 
   t.after(() => {
     codePod.service.buildCodePodRuntimeChain = originalBuildRuntimeChain;
     codePod.service.assignCodePodDigitalSouvenirTier = originalAssignDigitalSouvenir;
+    database.getCodePodKeywordInteraction = originalGetKeywordInteraction;
+    database.insertCodePodKeywordInteraction = originalInsertKeywordInteraction;
   });
   codePod.service.buildCodePodRuntimeChain = (input) => {
     runtimeChainCalls += 1;
@@ -822,6 +1117,14 @@ test('POST /codepod/keyword-entry rejects no-match and non-codePod events withou
   codePod.service.assignCodePodDigitalSouvenirTier = (...args) => {
     assignmentCalls += 1;
     return originalAssignDigitalSouvenir(...args);
+  };
+  database.getCodePodKeywordInteraction = async () => {
+    persistenceReadCalls += 1;
+    return null;
+  };
+  database.insertCodePodKeywordInteraction = async () => {
+    persistenceWriteCalls += 1;
+    return null;
   };
 
   await withTestServer(async (baseUrl) => {
@@ -915,10 +1218,24 @@ test('POST /codepod/keyword-entry rejects no-match and non-codePod events withou
 
     assert.equal(runtimeChainCalls, 0);
     assert.equal(assignmentCalls, 0);
+    assert.equal(persistenceReadCalls, 0);
+    assert.equal(persistenceWriteCalls, 0);
   });
 });
 
-test('POST /codepod/keyword-entry rejects missing entry code or keyword safely', async () => {
+test('POST /codepod/keyword-entry rejects missing entry code or keyword safely', async (t) => {
+  const database = require('./db');
+  const originalInsertKeywordInteraction = database.insertCodePodKeywordInteraction;
+  let persistenceWriteCalls = 0;
+
+  t.after(() => {
+    database.insertCodePodKeywordInteraction = originalInsertKeywordInteraction;
+  });
+  database.insertCodePodKeywordInteraction = async () => {
+    persistenceWriteCalls += 1;
+    return null;
+  };
+
   await withTestServer(async (baseUrl) => {
     const missingEntryCodeResponse = await fetch(`${baseUrl}/codepod/keyword-entry`, {
       method: 'POST',
@@ -972,6 +1289,7 @@ test('POST /codepod/keyword-entry rejects missing entry code or keyword safely',
       missingMessageId.errors.map((error) => error.code),
       ['MESSAGE_ID_REQUIRED']
     );
+    assert.equal(persistenceWriteCalls, 0);
   });
 });
 

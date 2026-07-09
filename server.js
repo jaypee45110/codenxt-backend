@@ -15,6 +15,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const database = require("./db");
 const {
   testDbConnection,
   saveCampaign,
@@ -48,7 +49,7 @@ const {
   redeemCodeClipXtraRedemption,
   getCodePodGoldXtraRedemptionByToken,
   redeemCodePodGoldXtraRedemption
-} = require("./db");
+} = database;
 const { sendEmail } = require("./mailer");
 const QRCode = require("qrcode");
 const app = express();
@@ -59,6 +60,10 @@ testDbConnection().catch((error) => {
 
 ensureCodePodGoldXtraRedemptionsTable().catch((error) => {
   console.error("CODEPOD GOLDXTRA TABLE INIT FAILED:", error.message);
+});
+
+database.ensureCodePodKeywordInteractionsTable().catch((error) => {
+  console.error("CODEPOD KEYWORD INTERACTIONS TABLE INIT FAILED:", error.message);
 });
 
 function parsePositiveInteger(value, fallback) {
@@ -3161,24 +3166,132 @@ app.post("/codepod/keyword-entry", async (req, res) => {
       });
     }
 
-    const digitalSouvenirAssignment = await assignCodePodDigitalSouvenirTier(
-      normalized.audienceEntry.eventCode,
-      normalized.audienceEntry.messageId,
-      resolvedEvent.event.digitalSouvenir,
-      resolvedEvent.event
+    let existingKeywordInteraction = null;
+    try {
+      existingKeywordInteraction = await database.getCodePodKeywordInteraction(
+        normalized.audienceEntry.eventCode,
+        normalized.audienceEntry.messageId
+      );
+    } catch (dbError) {
+      console.warn("codePod keyword interaction read failed", {
+        eventCode: normalized.audienceEntry.eventCode,
+        reason: dbError.message,
+      });
+    }
+
+    let digitalSouvenirAssignment = existingKeywordInteraction?.rewardAssignment || null;
+    if (existingKeywordInteraction && !digitalSouvenirAssignment) {
+      console.warn("codePod stored keyword interaction is missing reward assignment", {
+        eventCode: normalized.audienceEntry.eventCode,
+      });
+    } else if (!existingKeywordInteraction) {
+      digitalSouvenirAssignment = await assignCodePodDigitalSouvenirTier(
+        normalized.audienceEntry.eventCode,
+        normalized.audienceEntry.messageId,
+        resolvedEvent.event.digitalSouvenir,
+        resolvedEvent.event
+      );
+    }
+
+    const buildKeywordRuntimeChain = () => {
+      const input = {
+        audienceEntry: normalized.audienceEntry,
+        audienceIntent: normalized.audienceIntent,
+      };
+
+      if (digitalSouvenirAssignment) {
+        input.rewardAssignmentResult = {
+          tier: digitalSouvenirAssignment.tier,
+          digitalSouvenir: digitalSouvenirAssignment,
+          goldXtra: null,
+        };
+      }
+
+      return codePodVertical.service.buildCodePodRuntimeChain(input);
+    };
+
+    let codePodRuntimeChain = buildKeywordRuntimeChain();
+    let persistenceResult = existingKeywordInteraction && digitalSouvenirAssignment
+      ? {
+          attempted: true,
+          persisted: true,
+          status: "reused",
+          action: "reuse_keyword_interaction",
+          mode: "operational",
+        }
+      : {
+          attempted: true,
+          persisted: false,
+          status: "degraded",
+          action: "none",
+          mode: "operational",
+        };
+
+    if (!existingKeywordInteraction) {
+      try {
+        const insertedKeywordInteraction = await database.insertCodePodKeywordInteraction({
+          eventCode: normalized.audienceEntry.eventCode,
+          eventId: resolvedEvent.eventId,
+          messageId: normalized.audienceEntry.messageId,
+          keyword: normalized.audienceEntry.keyword,
+          routingOutcome: codePodRuntimeChain.routingOutcome.routingOutcome,
+          tier: digitalSouvenirAssignment.tier,
+          assignmentStatus: codePodRuntimeChain.rewardAssignmentSnapshot.assignmentStatus,
+          interaction: {
+            ...codePodRuntimeChain.interaction,
+            eventId: resolvedEvent.eventId,
+          },
+          rewardAssignment: digitalSouvenirAssignment,
+          occurredAt: codePodRuntimeChain.interaction.timestamp,
+        });
+
+        if (insertedKeywordInteraction) {
+          persistenceResult = {
+            attempted: true,
+            persisted: true,
+            status: "persisted",
+            action: "upsert_keyword_interaction",
+            mode: "operational",
+          };
+        } else {
+          const conflictingKeywordInteraction = await database.getCodePodKeywordInteraction(
+            normalized.audienceEntry.eventCode,
+            normalized.audienceEntry.messageId
+          );
+
+          if (conflictingKeywordInteraction) {
+            existingKeywordInteraction = conflictingKeywordInteraction;
+            digitalSouvenirAssignment = conflictingKeywordInteraction.rewardAssignment || null;
+            codePodRuntimeChain = buildKeywordRuntimeChain();
+            if (digitalSouvenirAssignment) {
+              persistenceResult = {
+                attempted: true,
+                persisted: true,
+                status: "reused",
+                action: "reuse_keyword_interaction",
+                mode: "operational",
+              };
+            } else {
+              console.warn("codePod conflicting keyword interaction is missing reward assignment", {
+                eventCode: normalized.audienceEntry.eventCode,
+              });
+            }
+          }
+        }
+      } catch (dbError) {
+        console.warn("codePod keyword interaction persistence failed", {
+          eventCode: normalized.audienceEntry.eventCode,
+          reason: dbError.message,
+        });
+      }
+    }
+
+    codePodRuntimeChain = codePodVertical.service.applyCodePodPersistenceResult(
+      codePodRuntimeChain,
+      persistenceResult
     );
 
-    const codePodRuntimeChain = codePodVertical.service.buildCodePodRuntimeChain({
-      audienceEntry: normalized.audienceEntry,
-      audienceIntent: normalized.audienceIntent,
-      rewardAssignmentResult: {
-        tier: digitalSouvenirAssignment.tier,
-        digitalSouvenir: digitalSouvenirAssignment,
-        goldXtra: null,
-      },
-    });
-
-    return res.json({
+    const responsePayload = {
       ok: true,
       vertical: "codepod",
       source: "keyword",
@@ -3189,11 +3302,16 @@ app.post("/codepod/keyword-entry", async (req, res) => {
       audienceIntent: normalized.audienceIntent,
       interaction: codePodRuntimeChain.interaction,
       routingOutcome: codePodRuntimeChain.routingOutcome,
-      tier: digitalSouvenirAssignment.tier,
-      digitalSouvenir: digitalSouvenirAssignment,
-      exhausted: Boolean(digitalSouvenirAssignment.exhausted),
-      noReward: Boolean(digitalSouvenirAssignment.noReward),
-    });
+    };
+
+    if (digitalSouvenirAssignment) {
+      responsePayload.tier = digitalSouvenirAssignment.tier;
+      responsePayload.digitalSouvenir = digitalSouvenirAssignment;
+      responsePayload.exhausted = Boolean(digitalSouvenirAssignment.exhausted);
+      responsePayload.noReward = Boolean(digitalSouvenirAssignment.noReward);
+    }
+
+    return res.json(responsePayload);
   } catch (err) {
     console.error("codePod keyword entry failed:", err.message);
     return res.status(500).json({ ok: false, error: "Failed to process keyword entry" });
