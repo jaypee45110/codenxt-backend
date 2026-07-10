@@ -288,6 +288,42 @@ async function resolveEventReference(eventCode, { requestedVertical = "", explic
   return { eventId: null, event: null };
 }
 
+function isCodeToneEvent(event = {}) {
+  return normalizeVerticalName(event.vertical) === "codetone";
+}
+
+async function resolveScreenVideoEvent(eventCode) {
+  const resolved = await resolveEventReference(eventCode);
+
+  if (!resolved.event) {
+    return {
+      ok: false,
+      status: 404,
+      body: {
+        ok: false,
+        error: "Event not found",
+      },
+    };
+  }
+
+  if (!isCodeToneEvent(resolved.event)) {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        ok: false,
+        error: "Screen Video is only available for codeTone events",
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    eventId: resolved.eventId,
+    event: resolved.event,
+  };
+}
+
 async function resolveCodePodKeywordEvent(eventCode) {
   const resolved = await resolveEventReference(eventCode, {
     requestedVertical: "codepod",
@@ -486,7 +522,13 @@ app.post("/upload-reward-file", upload.single("file"), async (req, res) => {
   }
 });
 app.get("/screen-video/:eventCode", async (req, res) => {
-    const safeEventCode = String(req.params.eventCode).replace(/[^A-Za-z0-9_-]/g, "");
+  const safeEventCode = String(req.params.eventCode).replace(/[^A-Za-z0-9_-]/g, "");
+  const screenVideoEvent = await resolveScreenVideoEvent(safeEventCode);
+
+  if (!screenVideoEvent.ok) {
+    return res.status(screenVideoEvent.status).json(screenVideoEvent.body);
+  }
+
   const filePath = path.join(VIDEO_DIR, `${safeEventCode}_screen.mp4`);
 
 if (!fs.existsSync(filePath)) {
@@ -5038,35 +5080,14 @@ app.post("/generate-screen-video", async (req, res) => {
       });
     }
 
-    let event = null;
-    let eventId = null;
+    const screenVideoEvent = await resolveScreenVideoEvent(eventCode);
 
-    event = Object.values(events).find((item) => item.code === eventCode);
-
-    if (event) {
-      eventId = event.id;
+    if (!screenVideoEvent.ok) {
+      return res.status(screenVideoEvent.status).json(screenVideoEvent.body);
     }
 
-if (!event && process.env.REDIS_URL) {
-        const resolvedId = await redis.get(`eventcode:${eventCode}`);
-      if (resolvedId) {
-        eventId = resolvedId;
-
-        const meta = await redis.hgetall(`event:${eventId}:meta`);
-        if (meta && meta.id) {
-          event = {
-            id: meta.id,
-            code: meta.code,
-            name: meta.name,
-            startAt: meta.startAt,
-            unlockAt: meta.unlockAt,
-            endAt: meta.endAt,
-            maxClaims: Number(meta.maxClaims || 0),
-            status: meta.status,
-          };
-        }
-      }
-    }
+    const event = screenVideoEvent.event;
+    const eventId = screenVideoEvent.eventId;
 const lockKey = `event:${eventId}:video:lock`;
 
 const isLocked = process.env.REDIS_URL
