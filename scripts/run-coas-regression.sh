@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_REPO="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PLATFORM_ROOT="$(cd "${BACKEND_REPO}/.." && pwd)"
 CODEPOD_REPO="/Users/jan/codepod-clean-filesafe"
+CODEDEMO_REPO="${PLATFORM_ROOT}/codedemo-deploy"
 
 CONTINUE_ON_FAILURE=0
 LIVE_REQUESTED=0
@@ -102,11 +103,11 @@ check_playwright_ports() {
   echo
   echo "--- Playwright port pre-check"
   if ! command -v lsof >/dev/null 2>&1; then
-    echo "WARN: lsof is unavailable; ports 4173 and 5177-5180 were not checked."
+    echo "WARN: lsof is unavailable; ports 4173 and 5176-5180 were not checked."
     return 0
   fi
 
-  for port in 4173 5177 5178 5179 5180; do
+  for port in 4173 5176 5177 5178 5179 5180; do
     if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
       echo "WARN: Port ${port} is already in use. Existing processes are left untouched."
       lsof -nP -iTCP:"${port}" -sTCP:LISTEN
@@ -147,6 +148,7 @@ CODECLIP_REPO="${PLATFORM_ROOT}/codeclip-deploy"
 BACKEND_TESTS=("${BACKEND_REPO}"/*.test.js)
 
 require_repo "Backend" "${BACKEND_REPO}" "server.js"
+require_repo "codeDemo" "${CODEDEMO_REPO}" "playwright.coas.config.js"
 require_repo "codeTone" "${CODETONE_REPO}" "playwright.config.js"
 require_repo "codePerks" "${CODEPERKS_REPO}" "playwright.config.js"
 require_repo "codePage" "${CODEPAGE_REPO}" "playwright.config.js"
@@ -154,6 +156,9 @@ require_repo "codeStack" "${CODESTACK_REPO}" "playwright.config.js"
 require_repo "codePod" "${CODEPOD_REPO}" "playwright.config.ts"
 require_repo "codeClip" "${CODECLIP_REPO}" "playwright.config.ts"
 
+require_file "${CODEDEMO_REPO}/package.json"
+require_file "${CODEDEMO_REPO}/playwright.coas.config.js"
+require_file "${CODEDEMO_REPO}/tests/codedemo-coas-regression.spec.js"
 require_file "${CODETONE_REPO}/tests/codetone-exclusive-runtime.spec.js"
 require_file "${CODETONE_REPO}/tests/codetone-product-journey.spec.js"
 require_file "${CODEPERKS_REPO}/tests/codeperks-product-journey.spec.js"
@@ -167,9 +172,9 @@ echo "COAS regression suite"
 echo "Backend: ${BACKEND_REPO}"
 echo "Mode: standard mock/local regression"
 echo "Execution: sequential"
-echo "NOTE: codeDemo is excluded because its focused test still loads the production frontend."
 
 report_repo_state "Backend" "${BACKEND_REPO}"
+report_repo_state "codeDemo" "${CODEDEMO_REPO}"
 report_repo_state "codeTone" "${CODETONE_REPO}"
 report_repo_state "codePerks" "${CODEPERKS_REPO}"
 report_repo_state "codePage" "${CODEPAGE_REPO}"
@@ -180,6 +185,10 @@ check_playwright_ports
 
 run_step "Backend test suite" "${BACKEND_REPO}" node --test "${BACKEND_TESTS[@]}"
 run_step "Backend syntax check" "${BACKEND_REPO}" node --check server.js
+
+run_step "codeDemo build" "${CODEDEMO_REPO}" npm run build
+run_step "codeDemo mock regression" "${CODEDEMO_REPO}" \
+  npm run test:coas -- --project=chromium
 
 run_step "codeTone build" "${CODETONE_REPO}" npm run build
 run_step "codeTone mock regression" "${CODETONE_REPO}" \
@@ -224,4 +233,4 @@ if [[ "${#FAILURES[@]}" -gt 0 ]]; then
   exit 1
 fi
 
-echo "COAS regression completed successfully."
+echo "COAS regression completed successfully. Standard package ran every active COAS vertical."

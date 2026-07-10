@@ -23,6 +23,8 @@ The standard suite contains:
 
 - All backend Node tests and a `server.js` syntax check.
 - Frontend builds for every included frontend repository.
+- codeDemo local COAS regression through `playwright.coas.config.js`, using a
+  local Vite server and Railway catch-all mocks with no production frontend.
 - codeTone mock regressions for its product journey and exclusive
   PrintPoster/Screen Video runtime.
 - codePerks mock regressions for campaign creation, dashboard, join, scan, and
@@ -36,6 +38,17 @@ required test files before execution. It reports the current branch and short
 Git status for every repository. Non-Git directories are reported but do not
 make the suite fail. The runner does not install dependencies.
 
+One command runs the whole standard package:
+
+```bash
+cd /Users/jan/event-platform/codenxt-backend
+bash scripts/run-coas-regression.sh
+```
+
+Here, the whole standard package means the full backend test package,
+hermetic/mock-based frontend regressions where they exist, and the
+containment/isolation guardrails for codePod and codeClip.
+
 Use `--continue` to run every standard step and report all failures:
 
 ```bash
@@ -47,6 +60,7 @@ bash scripts/run-coas-regression.sh --continue
 | Vertical | Repository | Local port |
 | --- | --- | ---: |
 | Backend | `/Users/jan/event-platform/codenxt-backend` | Dynamic in route tests |
+| codeDemo | `/Users/jan/event-platform/codedemo-deploy` | 5176 |
 | codeTone | `/Users/jan/event-platform/codenxt-final-deploy` | 5177 |
 | codePerks | `/Users/jan/event-platform/codeperks-deploy` | 5178 |
 | codePage | `/Users/jan/event-platform/codepage-deploy` | 5179 |
@@ -57,17 +71,6 @@ bash scripts/run-coas-regression.sh --continue
 Before running tests, the runner checks these Playwright ports and warns when a
 listener already exists. It does not stop or kill any process. Execution
 remains sequential because codePod and codeClip share port 4173.
-
-## codeDemo Exclusion
-
-codeDemo is explicitly excluded from the standard suite. Its focused COAS test
-mocks backend requests, but its Playwright configuration loads the production
-frontend at `https://codedemo.codenxt.global`. It is therefore not a fully
-local, hermetic standard regression. Add codeDemo after its focused test uses a
-local Playwright web server and no production dependency.
-
-The runner prints this exclusion at startup so absence from the standard suite
-cannot be mistaken for an omission.
 
 ## Live and Staging Tests
 
