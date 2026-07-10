@@ -191,11 +191,8 @@ run_step "codeDemo mock regression" "${CODEDEMO_REPO}" \
   npm run test:coas -- --project=chromium
 
 run_step "codeTone build" "${CODETONE_REPO}" npm run build
-run_step "codeTone mock regression" "${CODETONE_REPO}" \
-  npm run test:e2e -- \
-  tests/codetone-exclusive-runtime.spec.js \
-  tests/codetone-product-journey.spec.js \
-  --project=chromium
+run_step "codeTone COAS regression" "${CODETONE_REPO}" \
+  npm run test:coas -- --project=chromium
 
 run_step "codePerks build" "${CODEPERKS_REPO}" npm run build
 run_step "codePerks mock regression" "${CODEPERKS_REPO}" \
