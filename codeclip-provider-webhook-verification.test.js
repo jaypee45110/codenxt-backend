@@ -176,6 +176,58 @@ test("codeClip provider webhook verification rejects invalid Meta hmac signature
   );
 });
 
+test("codeClip provider webhook verification requires Meta sha256 signature format", () => {
+  const rawBody = "{\"message\":\"CLIP\"}";
+  const secret = "meta-secret";
+  const signature = hmac(rawBody, secret);
+
+  assert.deepEqual(
+    verifyCodeClipProviderWebhook({
+      provider: "meta",
+      mode: "hmac-sha256",
+      rawBody,
+      secret,
+      headers: {
+        "x-hub-signature-256": signature,
+      },
+    }),
+    { ok: false, reason: "SIGNATURE_MISMATCH" }
+  );
+
+  assert.deepEqual(
+    verifyCodeClipProviderWebhook({
+      provider: "meta",
+      mode: "hmac-sha256",
+      rawBody,
+      secret,
+      headers: {
+        "x-hub-signature-256": `sha1=${signature}`,
+      },
+    }),
+    { ok: false, reason: "SIGNATURE_MISMATCH" }
+  );
+});
+
+test("codeClip provider webhook verification rejects Meta signature over different body bytes", () => {
+  const rawBody = "{\"message\":\"CLIP\"}";
+  const differentBodyBytes = "{ \"message\": \"CLIP\" }";
+  const secret = "meta-secret";
+  const signature = hmac(differentBodyBytes, secret);
+
+  assert.deepEqual(
+    verifyCodeClipProviderWebhook({
+      provider: "meta",
+      mode: "hmac-sha256",
+      rawBody,
+      secret,
+      headers: {
+        "x-hub-signature-256": `sha256=${signature}`,
+      },
+    }),
+    { ok: false, reason: "SIGNATURE_MISMATCH" }
+  );
+});
+
 test("codeClip provider webhook verification validates SMS hmac signature", () => {
   const rawBody = "Body=CLIP";
   const secret = "sms-secret";

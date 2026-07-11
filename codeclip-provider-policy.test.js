@@ -14,6 +14,15 @@ function assertDefaultIdempotency(policy) {
   });
 }
 
+function assertLiveIdempotency(policy) {
+  assert.deepEqual(policy.idempotency, {
+    enabled: true,
+    claimTtlSeconds: 300,
+    responseTtlSeconds: 86400,
+    requireStoreForLiveProvider: true,
+  });
+}
+
 function assertDefaultCapabilities(policy, {
   runtimeVerification,
   hmacVerification = false,
@@ -96,11 +105,16 @@ test("codeClip provider policy returns meta provider policy", () => {
   assert.equal(result.policy.routeEnabled, true);
   assert.equal(result.policy.adapter, "meta");
   assert.equal(result.policy.envelopeType, "meta");
-  assert.equal(result.policy.verificationMode, "disabled");
+  assert.equal(result.policy.verificationMode, "hmac-sha256");
   assert.equal(result.policy.secretEnvName, "CODECLIP_META_WEBHOOK_SECRET");
-  assertDefaultCapabilities(result.policy, { runtimeVerification: false });
+  assertDefaultCapabilities(result.policy, {
+    runtimeVerification: true,
+    hmacVerification: true,
+    rawBodyRequired: true,
+    liveProvider: true,
+  });
   assertRuntimeVerificationInvariant(result.policy);
-  assertDefaultIdempotency(result.policy);
+  assertLiveIdempotency(result.policy);
 });
 
 test("codeClip provider policy normalizes provider names", () => {
@@ -153,9 +167,9 @@ test("codeClip provider policy builds verifier request for test provider", () =>
   );
 });
 
-test("codeClip provider policy builds disabled verifier request for meta", () => {
-  const headers = { "x-provider-signature": "unused" };
-  const rawBody = "";
+test("codeClip provider policy builds hmac verifier request for meta with configured secret", () => {
+  const headers = { "x-hub-signature-256": "sha256=unused" };
+  const rawBody = "{\"text\":\"CLIP\"}";
 
   const { policy } = resolveCodeClipProviderPolicy("meta");
   const request = buildCodeClipProviderVerificationRequest({
@@ -163,21 +177,51 @@ test("codeClip provider policy builds disabled verifier request for meta", () =>
     provider: "meta",
     headers,
     rawBody,
+    env: {
+      CODECLIP_META_WEBHOOK_SECRET: " meta-secret ",
+    },
+  });
+
+  assert.deepEqual(request, {
+    provider: "meta",
+    headers,
+    rawBody,
+    mode: "hmac-sha256",
+    secret: "meta-secret",
+  });
+});
+
+test("codeClip provider policy builds missing-secret signal for meta without configured secret", () => {
+  const headers = { "x-hub-signature-256": "sha256=unused" };
+  const rawBody = "{\"text\":\"CLIP\"}";
+
+  const { policy } = resolveCodeClipProviderPolicy("meta");
+  const request = buildCodeClipProviderVerificationRequest({
+    policy,
+    provider: "meta",
+    headers,
+    rawBody,
+    env: {},
   });
 
   assert.equal(request.provider, "meta");
   assert.equal(request.headers, headers);
   assert.equal(request.rawBody, rawBody);
-  assert.equal(request.mode, "disabled");
+  assert.equal(request.mode, "hmac-sha256");
   assert.equal(Object.hasOwn(request, "secret"), false);
-  assert.equal(Object.hasOwn(request, "secretResolution"), false);
+  assert.equal(Object.hasOwn(request, "secretResolution"), true);
+  assert.deepEqual(request.secretResolution, {
+    ok: false,
+    reason: "SECRET_NOT_CONFIGURED",
+    required: true,
+  });
   assert.equal(Object.hasOwn(request, "signatureHeader"), false);
   assert.equal(Object.hasOwn(request, "signatureHeaders"), false);
   assert.equal(Object.hasOwn(request, "verificationMethod"), false);
   assert.equal(Object.hasOwn(request, "rawBodyRequired"), false);
-  assert.equal(policy.capabilities.hmacVerification, false);
-  assert.equal(policy.capabilities.rawBodyRequired, false);
-  assert.equal(policy.capabilities.liveProvider, false);
+  assert.equal(policy.capabilities.hmacVerification, true);
+  assert.equal(policy.capabilities.rawBodyRequired, true);
+  assert.equal(policy.capabilities.liveProvider, true);
 });
 
 test("codeClip provider policy builds hmac verifier request for sms with configured secret", () => {

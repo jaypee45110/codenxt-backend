@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const { createRedisStub } = require('./test-helpers/redis-stub');
+
 const generatorStub = createScreenVideoGeneratorStub();
 const previousPythonBin = process.env.PYTHON_BIN;
 process.env.PYTHON_BIN = generatorStub.generatorPath;
@@ -50,17 +52,6 @@ function createScreenVideoGeneratorStub() {
     tempDir,
     markerPath,
     generatorPath,
-  };
-}
-
-function createRedisStub() {
-  return {
-    get: async () => null,
-    hgetall: async () => ({}),
-    hset: async () => 1,
-    set: async () => 'OK',
-    del: async () => 1,
-    on: () => {},
   };
 }
 

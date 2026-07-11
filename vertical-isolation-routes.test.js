@@ -9,7 +9,10 @@ const CODECLIP_SMS_TEST_SECRET = 'codeclip-sms-test-secret';
 const CODECLIP_META_TEST_VERIFY_TOKEN = 'codeclip-meta-test-verify-token';
 
 async function withTestServer(run) {
-  const server = app.listen(0);
+  const server = await new Promise((resolve, reject) => {
+    const listeningServer = app.listen(0, () => resolve(listeningServer));
+    listeningServer.on('error', reject);
+  });
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
   try {
@@ -2079,7 +2082,7 @@ test('POST /codeclip/provider/sms/keyword rejects invalid HMAC signature without
   });
 });
 
-test('POST /codeclip/provider/:provider/keyword accepts Meta Messenger envelope payload', async () => {
+test('POST /codeclip/provider/:provider/keyword rejects unsigned Meta Messenger payload without internals', async () => {
   await withTestServer(async (baseUrl) => {
     const code = `CC-PROVIDER-ENVELOPE-META-${Date.now()}`;
     const messageId = `meta-envelope-${Date.now()}`;
@@ -2130,10 +2133,9 @@ test('POST /codeclip/provider/:provider/keyword accepts Meta Messenger envelope 
     });
     const keywordEntry = await keywordResponse.json();
 
-    assert.equal(keywordResponse.ok, true);
-    assert.equal(keywordEntry.success, true);
-    assert.equal(keywordEntry.eventCode, code);
-    assert.equal(keywordEntry.messageId, messageId);
+    assert.equal(keywordResponse.status, 400);
+    assert.equal(keywordEntry.ok, false);
+    assert.equal(keywordEntry.error, 'Invalid provider keyword payload');
     assertNoCodeClipProviderInternals(keywordEntry);
   });
 });

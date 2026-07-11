@@ -38,14 +38,20 @@ const PROVIDER_POLICIES = {
     routeEnabled: true,
     adapter: "meta",
     envelopeType: "meta",
-    verificationMode: "disabled",
+    verificationMode: "hmac-sha256",
     secretEnvName: "CODECLIP_META_WEBHOOK_SECRET",
     verifyTokenEnvName: "CODECLIP_META_VERIFY_TOKEN",
-    capabilities: buildCapabilities({ verificationMode: "disabled" }),
+    capabilities: buildCapabilities({
+      verificationMode: "hmac-sha256",
+      hmacVerification: true,
+      rawBodyRequired: true,
+      liveProvider: true,
+    }),
     idempotency: {
       enabled: true,
       claimTtlSeconds: 300,
       responseTtlSeconds: 86400,
+      requireStoreForLiveProvider: true,
     },
   },
   sms: {

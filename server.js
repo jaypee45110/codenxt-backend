@@ -3542,10 +3542,31 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       readProviderKeywordResponse,
       recordProviderKeywordResponse,
     } = require("./verticals/codeclip/provider-idempotency");
+    const {
+      enforceCodeClipProviderRateLimit,
+      getCodeClipProviderPeerIdentity,
+    } = require("./verticals/codeclip/provider-rate-limit");
     const normalizedProvider = String(req.params.provider || "").trim().toLowerCase();
     const providerPolicy = resolveCodeClipProviderPolicy(normalizedProvider);
     if (!providerPolicy.ok) {
       return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
+    }
+
+    const liveProvider = Boolean(providerPolicy.policy.capabilities?.liveProvider);
+    const preVerificationRateLimit = await enforceCodeClipProviderRateLimit({
+      redis,
+      redisEnabled: Boolean(process.env.REDIS_URL),
+      provider: normalizedProvider,
+      phase: "pre-verification",
+      identity: getCodeClipProviderPeerIdentity(req),
+      liveProvider,
+      requireStore: false,
+    });
+    if (!preVerificationRateLimit.ok) {
+      return res.status(preVerificationRateLimit.status).json({
+        ok: false,
+        error: preVerificationRateLimit.error,
+      });
     }
 
     const webhookVerification = verifyCodeClipProviderWebhook(buildCodeClipProviderVerificationRequest({
@@ -3574,6 +3595,31 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
 
     if (!providerEnvelope.ok) {
       return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
+    }
+
+    const providerAccountId = String(providerEnvelope.envelope.providerAccountId || "").trim();
+    if (liveProvider && !providerAccountId) {
+      return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
+    }
+
+    const postVerificationIdentity =
+      providerAccountId ||
+      providerEnvelope.envelope.senderId ||
+      "non-live-provider";
+    const postVerificationRateLimit = await enforceCodeClipProviderRateLimit({
+      redis,
+      redisEnabled: Boolean(process.env.REDIS_URL),
+      provider: normalizedProvider,
+      phase: "post-verification",
+      identity: postVerificationIdentity,
+      liveProvider,
+      requireStore: liveProvider,
+    });
+    if (!postVerificationRateLimit.ok) {
+      return res.status(postVerificationRateLimit.status).json({
+        ok: false,
+        error: postVerificationRateLimit.error,
+      });
     }
 
     const providerAdapterInput = {
@@ -3660,13 +3706,48 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       ...activationRequest.idempotency,
       eventCode,
     });
-    const idempotencyClaim = process.env.REDIS_URL
-      ? await claimProviderKeywordIdempotency({
+    const requiresIdempotencyStore = Boolean(
+      providerPolicy.policy.capabilities?.liveProvider &&
+      providerPolicy.policy.idempotency?.requireStoreForLiveProvider
+    );
+
+    if (requiresIdempotencyStore && !idempotencyKey) {
+      return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
+    }
+
+    if (requiresIdempotencyStore && !process.env.REDIS_URL) {
+      return res.status(503).json({
+        ok: false,
+        error: "Provider keyword processing unavailable",
+      });
+    }
+
+    let idempotencyClaim = { enabled: false, claimed: true };
+    if (process.env.REDIS_URL) {
+      try {
+        idempotencyClaim = await claimProviderKeywordIdempotency({
           redis,
           key: idempotencyKey,
-          ttlSeconds: 300,
-        })
-      : { enabled: false, claimed: true };
+          ttlSeconds: providerPolicy.policy.idempotency?.claimTtlSeconds || 300,
+        });
+      } catch (idempotencyError) {
+        console.warn("codeClip provider idempotency rejected", {
+          provider: normalizedProvider,
+          route: "/codeclip/provider/:provider/keyword",
+          reason: "IDEMPOTENCY_STORE_UNAVAILABLE",
+          status: requiresIdempotencyStore ? 503 : 500,
+        });
+
+        if (requiresIdempotencyStore) {
+          return res.status(503).json({
+            ok: false,
+            error: "Provider keyword processing unavailable",
+          });
+        }
+
+        throw idempotencyError;
+      }
+    }
 
     if (idempotencyClaim.enabled && !idempotencyClaim.claimed) {
       const storedResponse = await readProviderKeywordResponse({
@@ -3706,7 +3787,7 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         redis,
         key: idempotencyKey,
         payload: result.payload,
-        ttlSeconds: 86400,
+        ttlSeconds: providerPolicy.policy.idempotency?.responseTtlSeconds || 86400,
       });
     }
 

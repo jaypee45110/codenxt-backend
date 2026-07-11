@@ -98,11 +98,13 @@ test("registered codeClip providers have onboarding support", () => {
     assert.equal(typeof policy.verificationMode, "string");
     assert.notEqual(policy.verificationMode.trim(), "");
     assertProviderCapabilitiesShape(policy.capabilities);
-    assert.deepEqual(policy.idempotency, {
-      enabled: true,
-      claimTtlSeconds: 300,
-      responseTtlSeconds: 86400,
-    });
+    assert.equal(policy.idempotency.enabled, true);
+    assert.equal(policy.idempotency.claimTtlSeconds, 300);
+    assert.equal(policy.idempotency.responseTtlSeconds, 86400);
+    assert.equal(
+      Boolean(policy.idempotency.requireStoreForLiveProvider),
+      Boolean(policy.capabilities.liveProvider)
+    );
 
     assert.equal(adapters.includes(provider), true, `missing keyword adapter for ${provider}`);
     const adapterResult = normalizeProviderKeywordIngress(

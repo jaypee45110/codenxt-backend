@@ -41,8 +41,16 @@ function signatureForProvider(provider, headers) {
   return "";
 }
 
-function normalizeSignature(value) {
+function normalizeSignature(provider, value) {
   const signature = String(value || "").trim();
+  const normalizedProvider = normalizeCodeClipProviderName(provider);
+
+  if (normalizedProvider === "meta") {
+    return signature.toLowerCase().startsWith("sha256=")
+      ? signature.slice("sha256=".length)
+      : "";
+  }
+
   return signature.toLowerCase().startsWith("sha256=")
     ? signature.slice("sha256=".length)
     : signature;
@@ -74,9 +82,9 @@ function verifyHmacSha256({ provider, headers, rawBody, secret, mode }) {
     .createHmac("sha256", secret)
     .update(bodyBuffer)
     .digest("hex");
-  const actual = normalizeSignature(signature);
+  const actual = normalizeSignature(provider, signature);
 
-  if (!/^[a-f0-9]+$/i.test(actual) || !timingSafeEqualHex(expected, actual)) {
+  if (!/^[a-f0-9]{64}$/i.test(actual) || !timingSafeEqualHex(expected, actual)) {
     return { ok: false, reason: "SIGNATURE_MISMATCH" };
   }
 
