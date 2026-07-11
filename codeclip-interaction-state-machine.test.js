@@ -18,6 +18,7 @@ const {
   buildEventRegistrationSummaryQuery,
   buildEventRegistrationsQuery,
   buildCodePodReportRowsQuery,
+  withCodeClipCorePersistenceTransaction,
 } = require('./db');
 
 function assertAudienceIntentContract(intent, expectedType) {
@@ -63,6 +64,7 @@ async function runScanPersistenceCase({
   saveCodeClipInteraction = async (interaction) => ({ id: 'interaction-row', state: interaction.state }),
   saveCodeClipRewardAssignments = async (snapshot) => snapshot.assignments,
   saveCodeClipXtraRedemption = async (record) => ({ id: 'clipxtra-row', token: record.token }),
+  runCodeClipCorePersistenceTransaction,
 } = {}) {
   const eventCode = `CC-PERSIST-SCAN-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const eventId = `event-${eventCode}`;
@@ -93,6 +95,7 @@ async function runScanPersistenceCase({
     saveCodeClipInteraction,
     saveCodeClipRewardAssignments,
     saveCodeClipXtraRedemption,
+    runCodeClipCorePersistenceTransaction,
     async saveCodeClipOutboxEvent(event) {
       outboxEvents.push(event);
       return { id: outboxEvents.length, ...event };
@@ -107,6 +110,7 @@ async function runKeywordPersistenceCase({
   saveCodeClipInteraction = async (interaction) => ({ id: 'interaction-row', state: interaction.state }),
   saveCodeClipRewardAssignments = async (snapshot) => snapshot.assignments,
   saveCodeClipXtraRedemption = async (record) => ({ id: 'clipxtra-row', token: record.token }),
+  runCodeClipCorePersistenceTransaction,
 } = {}) {
   const eventCode = `CC-PERSIST-KEYWORD-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const eventId = `event-${eventCode}`;
@@ -122,12 +126,13 @@ async function runKeywordPersistenceCase({
     requestedVertical: 'codeclip',
     redis: null,
     codeClipVertical: createPersistenceTestVertical(rewardAssignments),
-    saveCodeClipInteraction: async (interaction) => {
+    saveCodeClipInteraction: async (interaction, queryClient) => {
       runtimeInteraction = interaction;
-      return saveCodeClipInteraction(interaction);
+      return saveCodeClipInteraction(interaction, queryClient);
     },
     saveCodeClipRewardAssignments,
     saveCodeClipXtraRedemption,
+    runCodeClipCorePersistenceTransaction,
     async saveCodeClipOutboxEvent(event) {
       outboxEvents.push(event);
       return { id: outboxEvents.length, ...event };
@@ -136,6 +141,219 @@ async function runKeywordPersistenceCase({
 
   return { result, runtimeInteraction, outboxEvents };
 }
+
+function createFakeTransactionPool({
+  connectError = null,
+  beginError = null,
+  commitError = null,
+  rollbackError = null,
+  releaseError = null,
+} = {}) {
+  const calls = [];
+  const client = {
+    async query(sql) {
+      calls.push(sql);
+      if (sql === 'BEGIN' && beginError) throw beginError;
+      if (sql === 'COMMIT' && commitError) throw commitError;
+      if (sql === 'ROLLBACK' && rollbackError) throw rollbackError;
+      return { rows: [] };
+    },
+    release() {
+      calls.push('release');
+      if (releaseError) throw releaseError;
+    },
+  };
+  const pool = {
+    async connect() {
+      calls.push('connect');
+      if (connectError) throw connectError;
+      return client;
+    },
+  };
+
+  return { pool, client, calls };
+}
+
+function createRecordingTransactionRunner({ failPhase = null } = {}) {
+  const calls = [];
+  const queryClient = { transaction: 'codeclip-test-client' };
+
+  return {
+    calls,
+    queryClient,
+    async run(work) {
+      calls.push('BEGIN');
+      let result;
+      try {
+        result = await work({ queryClient });
+      } catch (error) {
+        error.transactionPhase = 'work';
+        error.rollbackAttempted = true;
+        error.rollbackSucceeded = true;
+        calls.push('ROLLBACK');
+        throw error;
+      }
+
+      if (failPhase === 'commit') {
+        const error = new Error('commit failed');
+        error.transactionPhase = 'commit';
+        error.rollbackAttempted = true;
+        error.rollbackSucceeded = true;
+        calls.push('ROLLBACK');
+        throw error;
+      }
+
+      calls.push('COMMIT');
+      return result;
+    },
+  };
+}
+
+test('withCodeClipCorePersistenceTransaction commits successful work and releases client', async () => {
+  const { pool, client, calls } = createFakeTransactionPool();
+  let workClient = null;
+
+  const result = await withCodeClipCorePersistenceTransaction(async ({ queryClient }) => {
+    workClient = queryClient;
+    calls.push('work');
+    return { ok: true };
+  }, pool);
+
+  assert.deepEqual(result, { ok: true });
+  assert.equal(workClient, client);
+  assert.deepEqual(calls, ['connect', 'BEGIN', 'work', 'COMMIT', 'release']);
+});
+
+test('withCodeClipCorePersistenceTransaction marks connect failures without rollback', async () => {
+  const connectError = new Error('connect failed');
+  const { pool, calls } = createFakeTransactionPool({ connectError });
+
+  await assert.rejects(
+    () => withCodeClipCorePersistenceTransaction(async () => {}, pool),
+    (error) => {
+      assert.equal(error, connectError);
+      assert.equal(error.transactionPhase, 'connect');
+      assert.equal(error.rollbackAttempted, false);
+      assert.equal(error.rollbackSucceeded, false);
+      return true;
+    }
+  );
+  assert.deepEqual(calls, ['connect']);
+});
+
+test('withCodeClipCorePersistenceTransaction rolls back BEGIN, work, and COMMIT failures', async () => {
+  const beginError = new Error('begin failed');
+  const beginPool = createFakeTransactionPool({ beginError });
+  await assert.rejects(
+    () => withCodeClipCorePersistenceTransaction(async () => {}, beginPool.pool),
+    (error) => {
+      assert.equal(error, beginError);
+      assert.equal(error.transactionPhase, 'begin');
+      assert.equal(error.rollbackAttempted, true);
+      assert.equal(error.rollbackSucceeded, true);
+      return true;
+    }
+  );
+  assert.deepEqual(beginPool.calls, ['connect', 'BEGIN', 'ROLLBACK', 'release']);
+
+  const workError = new Error('work failed');
+  const workPool = createFakeTransactionPool();
+  await assert.rejects(
+    () => withCodeClipCorePersistenceTransaction(async () => {
+      throw workError;
+    }, workPool.pool),
+    (error) => {
+      assert.equal(error, workError);
+      assert.equal(error.transactionPhase, 'work');
+      assert.equal(error.rollbackAttempted, true);
+      assert.equal(error.rollbackSucceeded, true);
+      return true;
+    }
+  );
+  assert.deepEqual(workPool.calls, ['connect', 'BEGIN', 'ROLLBACK', 'release']);
+
+  const commitError = new Error('commit failed');
+  const commitPool = createFakeTransactionPool({ commitError });
+  await assert.rejects(
+    () => withCodeClipCorePersistenceTransaction(async () => ({ ok: true }), commitPool.pool),
+    (error) => {
+      assert.equal(error, commitError);
+      assert.equal(error.transactionPhase, 'commit');
+      assert.equal(error.rollbackAttempted, true);
+      assert.equal(error.rollbackSucceeded, true);
+      return true;
+    }
+  );
+  assert.deepEqual(commitPool.calls, ['connect', 'BEGIN', 'COMMIT', 'ROLLBACK', 'release']);
+});
+
+test('withCodeClipCorePersistenceTransaction preserves original failure when rollback or release also fails', async () => {
+  const rollbackWorkError = new Error('rollback work failed');
+  const rollbackError = new Error('rollback failed');
+  const rollbackPool = createFakeTransactionPool({ rollbackError });
+
+  await assert.rejects(
+    () => withCodeClipCorePersistenceTransaction(async () => {
+      throw rollbackWorkError;
+    }, rollbackPool.pool),
+    (error) => {
+      assert.equal(error, rollbackWorkError);
+      assert.equal(error.transactionPhase, 'work');
+      assert.equal(error.rollbackAttempted, true);
+      assert.equal(error.rollbackSucceeded, false);
+      assert.equal(error.rollbackError, rollbackError);
+      assert.equal(error.rollbackError.transactionPhase, 'rollback');
+      assert.equal(error.releaseError, undefined);
+      return true;
+    }
+  );
+  assert.deepEqual(rollbackPool.calls, ['connect', 'BEGIN', 'ROLLBACK', 'release']);
+
+  const releaseWorkError = new Error('release work failed');
+  const releaseError = new Error('release failed');
+  const releasePool = createFakeTransactionPool({ releaseError });
+
+  await assert.rejects(
+    () => withCodeClipCorePersistenceTransaction(async () => {
+      throw releaseWorkError;
+    }, releasePool.pool),
+    (error) => {
+      assert.equal(error, releaseWorkError);
+      assert.equal(error.transactionPhase, 'work');
+      assert.equal(error.rollbackAttempted, true);
+      assert.equal(error.rollbackSucceeded, true);
+      assert.equal(error.rollbackError, undefined);
+      assert.equal(error.releaseError, releaseError);
+      assert.equal(error.releaseError.transactionPhase, 'release');
+      return true;
+    }
+  );
+  assert.deepEqual(releasePool.calls, ['connect', 'BEGIN', 'ROLLBACK', 'release']);
+});
+
+test('withCodeClipCorePersistenceTransaction treats release failure after COMMIT as committed success', async () => {
+  const releaseError = new Error('release failed');
+  const { pool, calls } = createFakeTransactionPool({ releaseError });
+  const originalError = console.error;
+  const logs = [];
+  console.error = (...args) => logs.push(args);
+
+  try {
+    const result = await withCodeClipCorePersistenceTransaction(async () => ({ ok: true }), pool);
+    assert.deepEqual(result, { ok: true });
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.deepEqual(calls, ['connect', 'BEGIN', 'COMMIT', 'release']);
+  assert.equal(calls.includes('ROLLBACK'), false);
+  assert.equal(logs.length, 1);
+  assert.equal(
+    logs[0][0],
+    'codeClip PostgreSQL client release failed after committed transaction:'
+  );
+  assert.equal(logs[0][1], 'release failed');
+});
 
 
 test('buildPersistenceDecision classifies COAS persistence status', () => {
@@ -644,23 +862,18 @@ test('codeClip scan records internal persistence status when COAS persistence fa
   assert.equal(result.payload.persistenceDecision, undefined);
   assert.equal(result.payload.persistenceGuaranteePolicy, undefined);
   assert.equal(result.payload.persistenceAction, undefined);
-  assert.equal(rewardAssignmentPersistenceAttempted, true);
+  assert.equal(rewardAssignmentPersistenceAttempted, false);
   assert.ok(eventScanPayload?.interaction?.persistenceStatus);
-  assert.deepEqual(eventScanPayload.interaction.persistenceStatus.interaction, {
-    attempted: true,
-    ok: false,
-    error: 'interaction persistence failed',
-  });
-  assert.deepEqual(eventScanPayload.interaction.persistenceStatus.rewardAssignments, {
-    attempted: true,
-    ok: false,
-    error: 'reward assignment persistence failed',
-  });
+  assert.equal(eventScanPayload.interaction.persistenceStatus.interaction.attempted, true);
+  assert.equal(eventScanPayload.interaction.persistenceStatus.interaction.ok, false);
+  assert.equal(eventScanPayload.interaction.persistenceStatus.interaction.error, 'interaction persistence failed');
+  assert.equal(eventScanPayload.interaction.persistenceStatus.interaction.committed, false);
+  assert.equal(eventScanPayload.interaction.persistenceStatus.rewardAssignments.attempted, false);
   assert.deepEqual(eventScanPayload.interaction.persistenceDecision, {
     ok: false,
     severity: 'critical',
-    failedSteps: ['interaction', 'rewardAssignments'],
-    criticalFailures: ['interaction', 'rewardAssignments'],
+    failedSteps: ['interaction'],
+    criticalFailures: ['interaction'],
   });
   assert.deepEqual(eventScanPayload.interaction.persistenceGuaranteePolicy, {
     severity: 'critical',
@@ -813,16 +1026,18 @@ test('codeClip scan includes ClipXtra redemption recovery payload when redemptio
   assert.equal(result.payload.persistenceAction, undefined);
 
   assert.ok(eventScanPayload?.interaction);
-  assert.deepEqual(eventScanPayload.interaction.persistenceStatus.clipXtraRedemption, {
-    attempted: true,
-    ok: false,
-    error: 'ClipXtra redemption persistence failed',
-  });
+  assert.equal(eventScanPayload.interaction.persistenceStatus.clipXtraRedemption.attempted, true);
+  assert.equal(eventScanPayload.interaction.persistenceStatus.clipXtraRedemption.ok, false);
+  assert.equal(
+    eventScanPayload.interaction.persistenceStatus.clipXtraRedemption.error,
+    'ClipXtra redemption persistence failed'
+  );
+  assert.equal(eventScanPayload.interaction.persistenceStatus.clipXtraRedemption.committed, false);
   assert.deepEqual(eventScanPayload.interaction.persistenceDecision, {
     ok: false,
     severity: 'critical',
-    failedSteps: ['clipXtraRedemption'],
-    criticalFailures: ['clipXtraRedemption'],
+    failedSteps: ['interaction', 'rewardAssignments', 'clipXtraRedemption'],
+    criticalFailures: ['interaction', 'rewardAssignments', 'clipXtraRedemption'],
   });
 
   assert.equal(outboxEvents.length, 1);
@@ -1169,11 +1384,13 @@ test('codeClip persistence requires confirmed interaction writes', async () => {
   assert.equal(nullResult.result.payload.success, true);
   assert.equal(nullResult.result.payload.internal, undefined);
   assert.equal(nullResult.result.internal.persistenceDecision.severity, 'critical');
-  assert.deepEqual(nullResult.runtimeInteraction.persistenceStatus.interaction, {
-    attempted: true,
-    ok: false,
-    error: 'interaction persistence did not confirm write',
-  });
+  assert.equal(nullResult.runtimeInteraction.persistenceStatus.interaction.attempted, true);
+  assert.equal(nullResult.runtimeInteraction.persistenceStatus.interaction.ok, false);
+  assert.equal(
+    nullResult.runtimeInteraction.persistenceStatus.interaction.error,
+    'interaction persistence did not confirm write'
+  );
+  assert.equal(nullResult.runtimeInteraction.persistenceStatus.interaction.committed, false);
 
   const exceptionResult = await runKeywordPersistenceCase({
     rewardAssignments,
@@ -1183,11 +1400,171 @@ test('codeClip persistence requires confirmed interaction writes', async () => {
   });
 
   assert.equal(exceptionResult.result.internal.persistenceDecision.severity, 'critical');
-  assert.deepEqual(exceptionResult.runtimeInteraction.persistenceStatus.interaction, {
-    attempted: true,
-    ok: false,
-    error: 'interaction database unavailable',
+  assert.equal(exceptionResult.runtimeInteraction.persistenceStatus.interaction.attempted, true);
+  assert.equal(exceptionResult.runtimeInteraction.persistenceStatus.interaction.ok, false);
+  assert.equal(
+    exceptionResult.runtimeInteraction.persistenceStatus.interaction.error,
+    'interaction database unavailable'
+  );
+  assert.equal(exceptionResult.runtimeInteraction.persistenceStatus.interaction.committed, false);
+});
+
+test('codeClip core transaction records write success only after transaction runner returns', async () => {
+  const rewardAssignments = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipXtra: { assigned: false },
+  };
+  let runtimeInteraction = null;
+  const runner = {
+    async run(work) {
+      const result = await work({ queryClient: { transaction: 'pending-success' } });
+      assert.deepEqual(runtimeInteraction.persistenceStatus.interaction, {
+        attempted: false,
+        ok: null,
+        error: null,
+      });
+      assert.deepEqual(runtimeInteraction.persistenceStatus.rewardAssignments, {
+        attempted: false,
+        ok: null,
+        error: null,
+      });
+      assert.deepEqual(runtimeInteraction.persistenceStatus.clipXtraRedemption, {
+        attempted: false,
+        ok: null,
+        error: null,
+      });
+      return result;
+    },
+  };
+
+  const { result } = await runScanPersistenceCase({
+    rewardAssignments,
+    runCodeClipCorePersistenceTransaction: runner.run,
+    saveCodeClipInteraction: async (interaction) => {
+      runtimeInteraction = interaction;
+      return { id: 'interaction-row' };
+    },
+    saveCodeClipRewardAssignments: async (snapshot) =>
+      snapshot.assignments.filter((assignment) => assignment?.tier),
   });
+
+  assert.equal(result.internal.persistenceDecision.severity, 'ok');
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.committed, true);
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.committed, true);
+});
+
+test('codeClip core transaction rolls back pending interaction when reward persistence fails', async () => {
+  const rewardAssignments = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipXtra: { assigned: false },
+  };
+  const transaction = createRecordingTransactionRunner();
+  let interactionQueryClient = null;
+  let rewardQueryClient = null;
+
+  const { result, runtimeInteraction } = await runScanPersistenceCase({
+    rewardAssignments,
+    runCodeClipCorePersistenceTransaction: transaction.run,
+    saveCodeClipInteraction: async (interaction, queryClient) => {
+      interactionQueryClient = queryClient;
+      return { id: 'interaction-row', state: interaction.state };
+    },
+    saveCodeClipRewardAssignments: async (snapshot, queryClient) => {
+      rewardQueryClient = queryClient;
+      return [];
+    },
+  });
+
+  assert.equal(interactionQueryClient, transaction.queryClient);
+  assert.equal(rewardQueryClient, transaction.queryClient);
+  assert.deepEqual(transaction.calls, ['BEGIN', 'ROLLBACK']);
+  assert.equal(result.internal.persistenceDecision.severity, 'critical');
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.ok, false);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.error, null);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.committed, false);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.rolledBack, true);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.rollbackAttempted, true);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.rollbackSucceeded, true);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.causeStep, 'rewardAssignments');
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.transactionPhase, 'work');
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.ok, false);
+  assert.ok(runtimeInteraction.persistenceStatus.rewardAssignments.error);
+  assert.match(runtimeInteraction.persistenceStatus.rewardAssignments.error, /reward assignment/i);
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.committed, false);
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.rolledBack, true);
+});
+
+test('codeClip core transaction rolls back interaction and rewards when ClipXtra persistence fails', async () => {
+  const rewardAssignments = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipXtra: {
+      assigned: true,
+      tier: 'clipXtra',
+      rewardType: 'clip_xtra',
+      redemptionToken: 'CX-TX-ROLLBACK',
+      partnerName: 'Transaction Partner',
+      title: 'Transaction ClipXtra',
+      assignedAt: '2026-07-01T00:01:00.000Z',
+    },
+  };
+  const transaction = createRecordingTransactionRunner();
+
+  const { result, runtimeInteraction } = await runKeywordPersistenceCase({
+    rewardAssignments,
+    runCodeClipCorePersistenceTransaction: transaction.run,
+    saveCodeClipInteraction: async () => ({ id: 'interaction-row' }),
+    saveCodeClipRewardAssignments: async (snapshot) =>
+      snapshot.assignments.filter((assignment) => assignment?.tier),
+    saveCodeClipXtraRedemption: async () => null,
+  });
+
+  assert.deepEqual(transaction.calls, ['BEGIN', 'ROLLBACK']);
+  assert.equal(result.internal.persistenceDecision.severity, 'critical');
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.ok, false);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.committed, false);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.rolledBack, true);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.causeStep, 'clipXtraRedemption');
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.ok, false);
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.error, null);
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.committed, false);
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.rolledBack, true);
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.causeStep, 'clipXtraRedemption');
+  assert.equal(runtimeInteraction.persistenceStatus.clipXtraRedemption.ok, false);
+  assert.ok(runtimeInteraction.persistenceStatus.clipXtraRedemption.error);
+  assert.match(runtimeInteraction.persistenceStatus.clipXtraRedemption.error, /clipxtra|redemption/i);
+});
+
+test('codeClip core transaction treats BEGIN and COMMIT failures as critical with transaction metadata', async () => {
+  const rewardAssignments = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipXtra: { assigned: false },
+  };
+
+  const beginResult = await runScanPersistenceCase({
+    rewardAssignments,
+    runCodeClipCorePersistenceTransaction: async () => {
+      const error = new Error('begin failed');
+      error.transactionPhase = 'begin';
+      error.rollbackAttempted = true;
+      error.rollbackSucceeded = true;
+      throw error;
+    },
+  });
+  assert.equal(beginResult.result.internal.persistenceDecision.severity, 'critical');
+  assert.equal(beginResult.runtimeInteraction.persistenceStatus.interaction.ok, false);
+  assert.equal(beginResult.runtimeInteraction.persistenceStatus.interaction.transactionPhase, 'begin');
+  assert.equal(beginResult.runtimeInteraction.persistenceStatus.interaction.rolledBack, true);
+
+  const commitResult = await runScanPersistenceCase({
+    rewardAssignments,
+    runCodeClipCorePersistenceTransaction: createRecordingTransactionRunner({ failPhase: 'commit' }).run,
+  });
+  assert.equal(commitResult.result.internal.persistenceDecision.severity, 'critical');
+  assert.equal(commitResult.runtimeInteraction.persistenceStatus.interaction.ok, false);
+  assert.equal(commitResult.runtimeInteraction.persistenceStatus.interaction.committed, false);
+  assert.equal(commitResult.runtimeInteraction.persistenceStatus.interaction.transactionPhase, 'commit');
+  assert.equal(commitResult.runtimeInteraction.persistenceStatus.interaction.rolledBack, true);
+  assert.equal(commitResult.runtimeInteraction.persistenceStatus.rewardAssignments.ok, false);
 });
 
 test('codeClip persistence confirms exact reward assignment writes or records failure', async () => {
@@ -1211,12 +1588,11 @@ test('codeClip persistence confirms exact reward assignment writes or records fa
     ['openClip', 'clip', 'clipXtra']
   );
   assert.equal(missingRows.result.internal.persistenceDecision.severity, 'critical');
-  assert.deepEqual(missingRows.result.internal.persistenceDecision.criticalFailures, ['rewardAssignments']);
+  assert.deepEqual(missingRows.result.internal.persistenceDecision.criticalFailures, ['interaction', 'rewardAssignments']);
   assert.equal(missingRows.runtimeInteraction.persistenceStatus.rewardAssignments.ok, false);
-  assert.equal(
-    missingRows.runtimeInteraction.persistenceStatus.rewardAssignments.error,
-    `reward assignment persistence confirmed 0 of ${expectedAssignments.length} writes`
-  );
+  assert.ok(missingRows.runtimeInteraction.persistenceStatus.rewardAssignments.error);
+  assert.match(missingRows.runtimeInteraction.persistenceStatus.rewardAssignments.error, /reward assignment/i);
+  assert.equal(missingRows.runtimeInteraction.persistenceStatus.interaction.committed, false);
 
   const fewerRows = await runScanPersistenceCase({
     rewardAssignments,
@@ -1226,11 +1602,9 @@ test('codeClip persistence confirms exact reward assignment writes or records fa
         .slice(0, Math.max(0, expectedAssignments.length - 1)),
   });
   assert.equal(fewerRows.result.internal.persistenceDecision.severity, 'critical');
-  assert.deepEqual(fewerRows.result.internal.persistenceDecision.criticalFailures, ['rewardAssignments']);
-  assert.equal(
-    fewerRows.runtimeInteraction.persistenceStatus.rewardAssignments.error,
-    `reward assignment persistence confirmed ${expectedAssignments.length - 1} of ${expectedAssignments.length} writes`
-  );
+  assert.deepEqual(fewerRows.result.internal.persistenceDecision.criticalFailures, ['interaction', 'rewardAssignments']);
+  assert.ok(fewerRows.runtimeInteraction.persistenceStatus.rewardAssignments.error);
+  assert.match(fewerRows.runtimeInteraction.persistenceStatus.rewardAssignments.error, /reward assignment/i);
 
   const exactRows = await runScanPersistenceCase({
     rewardAssignments,
@@ -1238,11 +1612,10 @@ test('codeClip persistence confirms exact reward assignment writes or records fa
       snapshot.assignments.filter((assignment) => assignment?.tier),
   });
   assert.equal(exactRows.result.internal.persistenceDecision.severity, 'ok');
-  assert.deepEqual(exactRows.runtimeInteraction.persistenceStatus.rewardAssignments, {
-    attempted: true,
-    ok: true,
-    error: null,
-  });
+  assert.equal(exactRows.runtimeInteraction.persistenceStatus.rewardAssignments.attempted, true);
+  assert.equal(exactRows.runtimeInteraction.persistenceStatus.rewardAssignments.ok, true);
+  assert.equal(exactRows.runtimeInteraction.persistenceStatus.rewardAssignments.error, null);
+  assert.equal(exactRows.runtimeInteraction.persistenceStatus.rewardAssignments.committed, true);
 });
 
 test('codeClip persistence skips reward assignments when no writes are required', async () => {
@@ -1315,11 +1688,10 @@ test('codeClip ClipXtra redemption confirmation applies to scan and keyword', as
       saveCodeClipXtraRedemption: async (record) => ({ id: 'clipxtra-row', token: record.token }),
     });
     assert.equal(confirmedRedemption.result.internal.persistenceDecision.severity, 'ok');
-    assert.deepEqual(confirmedRedemption.runtimeInteraction.persistenceStatus.clipXtraRedemption, {
-      attempted: true,
-      ok: true,
-      error: null,
-    });
+    assert.equal(confirmedRedemption.runtimeInteraction.persistenceStatus.clipXtraRedemption.attempted, true);
+    assert.equal(confirmedRedemption.runtimeInteraction.persistenceStatus.clipXtraRedemption.ok, true);
+    assert.equal(confirmedRedemption.runtimeInteraction.persistenceStatus.clipXtraRedemption.error, null);
+    assert.equal(confirmedRedemption.runtimeInteraction.persistenceStatus.clipXtraRedemption.committed, true);
 
     const skippedRedemption = await runner({
       rewardAssignments: notAssignedRewards,

@@ -37,6 +37,7 @@ const {
   saveCodeClipXtraRedemption,
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
+  withCodeClipCorePersistenceTransaction,
   saveCodeClipOutboxEvent,
   claimCodeClipOutboxEvents,
   markCodeClipOutboxEventSucceeded,
@@ -3437,6 +3438,7 @@ app.post("/codeclip/keyword-entry", async (req, res) => {
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
       saveCodeClipXtraRedemption,
+      runCodeClipCorePersistenceTransaction: withCodeClipCorePersistenceTransaction,
       saveCodeClipOutboxEvent,
     });
 
@@ -3505,6 +3507,7 @@ app.post("/codeclip/test-provider/keyword", async (req, res) => {
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
       saveCodeClipXtraRedemption,
+      runCodeClipCorePersistenceTransaction: withCodeClipCorePersistenceTransaction,
       saveCodeClipOutboxEvent,
     });
 
@@ -3782,6 +3785,7 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
       saveCodeClipXtraRedemption,
+      runCodeClipCorePersistenceTransaction: withCodeClipCorePersistenceTransaction,
       saveCodeClipOutboxEvent,
     });
 
@@ -4976,6 +4980,7 @@ if (vertical === "codeclip") {
     persistFinalScan,
     saveCodeClipInteraction,
     saveCodeClipRewardAssignments,
+    runCodeClipCorePersistenceTransaction: withCodeClipCorePersistenceTransaction,
     saveCodeClipOutboxEvent,
     saveCodeClipXtraRedemption,
   });

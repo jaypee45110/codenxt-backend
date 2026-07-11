@@ -16,6 +16,92 @@ async function testDbConnection() {
   console.log('POSTGRES OK:', result.rows[0].now);
 }
 
+async function withCodeClipCorePersistenceTransaction(work, queryPool = pool) {
+  if (!queryPool || typeof queryPool.connect !== 'function') {
+    const error = new Error('codeClip core persistence transaction requires PostgreSQL pool');
+    error.transactionPhase = 'connect';
+    error.rollbackAttempted = false;
+    error.rollbackSucceeded = false;
+    throw error;
+  }
+  if (typeof work !== 'function') {
+    const error = new Error('codeClip core persistence transaction requires work function');
+    error.transactionPhase = 'work';
+    error.rollbackAttempted = false;
+    error.rollbackSucceeded = false;
+    throw error;
+  }
+
+  let client = null;
+  let transactionError = null;
+  let committed = false;
+
+  try {
+    client = await queryPool.connect();
+  } catch (error) {
+    error.transactionPhase = 'connect';
+    error.rollbackAttempted = false;
+    error.rollbackSucceeded = false;
+    throw error;
+  }
+
+  try {
+    try {
+      await client.query('BEGIN');
+    } catch (error) {
+      error.transactionPhase = 'begin';
+      throw error;
+    }
+
+    let result;
+    try {
+      result = await work({ queryClient: client });
+    } catch (error) {
+      error.transactionPhase = 'work';
+      throw error;
+    }
+
+    try {
+      await client.query('COMMIT');
+      committed = true;
+    } catch (error) {
+      error.transactionPhase = 'commit';
+      throw error;
+    }
+
+    return result;
+  } catch (error) {
+    transactionError = error;
+    transactionError.rollbackAttempted = true;
+    try {
+      await client.query('ROLLBACK');
+      transactionError.rollbackSucceeded = true;
+    } catch (rollbackError) {
+      rollbackError.transactionPhase = 'rollback';
+      transactionError.rollbackSucceeded = false;
+      transactionError.rollbackError = rollbackError;
+    }
+    throw transactionError;
+  } finally {
+    try {
+      client.release();
+    } catch (releaseError) {
+      releaseError.transactionPhase = 'release';
+
+      if (transactionError) {
+        transactionError.releaseError = releaseError;
+      } else if (committed) {
+        console.error(
+          'codeClip PostgreSQL client release failed after committed transaction:',
+          releaseError.message
+        );
+      } else {
+        throw releaseError;
+      }
+    }
+  }
+}
+
 async function ensureCampaignsTable() {
   if (!pool) return;
 
@@ -1022,12 +1108,14 @@ async function ensureCodeClipXtraRedemptionsTable() {
   `);
 }
 
-async function saveCodeClipXtraRedemption(record = {}) {
-  if (!pool || !record.eventCode || !record.scanId || !record.token) return null;
+async function saveCodeClipXtraRedemption(record = {}, queryClient = pool) {
+  if (!queryClient || !record.eventCode || !record.scanId || !record.token) return null;
 
-  await ensureCodeClipXtraRedemptionsTable();
+  if (queryClient === pool) {
+    await ensureCodeClipXtraRedemptionsTable();
+  }
 
-  const result = await pool.query(
+  const result = await queryClient.query(
     `
       INSERT INTO codeclip_clipxtra_redemptions (
         token,
@@ -1134,10 +1222,12 @@ async function ensureCodeClipInteractionsTable() {
   `);
 }
 
-async function saveCodeClipInteraction(interaction = {}) {
-  if (!pool || !interaction.eventCode || !interaction.scanId) return null;
+async function saveCodeClipInteraction(interaction = {}, queryClient = pool) {
+  if (!queryClient || !interaction.eventCode || !interaction.scanId) return null;
 
-  await ensureCodeClipInteractionsTable();
+  if (queryClient === pool) {
+    await ensureCodeClipInteractionsTable();
+  }
 
   const routingOutcome =
     typeof interaction.routingOutcome === 'string'
@@ -1146,7 +1236,7 @@ async function saveCodeClipInteraction(interaction = {}) {
   const rewardAssignmentsPayload = interaction.rewardAssignments || {};
   const rawInteractionPayload = interaction;
 
-  const result = await pool.query(
+  const result = await queryClient.query(
     `
       INSERT INTO codeclip_interactions (
         event_code,
@@ -2099,6 +2189,7 @@ module.exports = {
   saveCodeDemoException,
   updateCodeDemoExceptionStatus,
   ensureCodeDemoExceptionsTable,
+  withCodeClipCorePersistenceTransaction,
   ensureCodePodGoldXtraRedemptionsTable,
   saveCodePodGoldXtraRedemption,
   ensureCodePodKeywordInteractionsTable,
