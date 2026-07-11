@@ -1345,6 +1345,7 @@ async function handleCodeClipKeywordEntry({
     rewards: interaction.rewardAssignments,
     clipXtra: interaction.rewardAssignments.clipXtra || null,
   }, {
+    persistenceStatus: interaction.persistenceStatus,
     persistenceDecision: interaction.persistenceDecision,
     persistenceAction: interaction.persistenceAction,
     persistenceGuaranteePolicy: interaction.persistenceGuaranteePolicy,

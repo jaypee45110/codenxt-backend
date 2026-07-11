@@ -1060,6 +1060,405 @@ async function saveCodePodGoldXtraRedemption(record = {}) {
   return result.rows[0] || null;
 }
 
+function normalizeCodeClipProviderDeliveryIdentity(input = {}) {
+  return {
+    provider: String(input.provider || "").trim().toLowerCase(),
+    providerAccountId: String(input.providerAccountId || input.provider_account_id || "").trim(),
+    eventCode: String(input.eventCode || input.event_code || "").trim(),
+    externalMessageId: String(input.externalMessageId || input.external_message_id || "").trim(),
+  };
+}
+
+function hasCodeClipProviderDeliveryIdentity(input = {}) {
+  const identity = normalizeCodeClipProviderDeliveryIdentity(input);
+  return Boolean(
+    identity.provider &&
+    identity.providerAccountId &&
+    identity.eventCode &&
+    identity.externalMessageId
+  );
+}
+
+function mapCodeClipProviderDeliveryRow(row = null) {
+  if (!row) return null;
+
+  return {
+    ...row,
+    providerAccountId: row.provider_account_id,
+    eventCode: row.event_code,
+    eventId: row.event_id,
+    externalMessageId: row.external_message_id,
+    idempotencyKey: row.idempotency_key,
+    payloadFingerprint: row.payload_fingerprint,
+    verificationState: row.verification_state,
+    processingState: row.processing_state,
+    attemptCount: row.attempt_count,
+    corePersistenceState: row.core_persistence_state,
+    completionState: row.completion_state,
+    responseStatus: row.response_status,
+    publicResponseJson: row.public_response_json,
+    errorClass: row.error_class,
+    retryEligible: row.retry_eligible,
+    terminalState: row.terminal_state,
+    receivedAt: row.received_at,
+    lastAttemptAt: row.last_attempt_at,
+    completedAt: row.completed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_provider_deliveries (
+      id BIGSERIAL PRIMARY KEY,
+      provider TEXT NOT NULL,
+      provider_account_id TEXT NOT NULL,
+      event_code TEXT NOT NULL,
+      event_id TEXT,
+      external_message_id TEXT NOT NULL,
+      idempotency_key TEXT,
+      payload_fingerprint TEXT,
+      verification_state TEXT NOT NULL DEFAULT 'verified',
+      processing_state TEXT NOT NULL DEFAULT 'received',
+      attempt_count INTEGER NOT NULL DEFAULT 1,
+      core_persistence_state TEXT NOT NULL DEFAULT 'not_started',
+      completion_state TEXT NOT NULL DEFAULT 'not_completed',
+      response_status INTEGER,
+      public_response_json JSONB,
+      error_class TEXT,
+      retry_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+      terminal_state BOOLEAN NOT NULL DEFAULT FALSE,
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (provider, provider_account_id, event_code, external_message_id),
+      CHECK (attempt_count >= 1)
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_deliveries_event_code_idx
+    ON codeclip_provider_deliveries (event_code)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_deliveries_completion_state_idx
+    ON codeclip_provider_deliveries (completion_state)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_deliveries_processing_state_idx
+    ON codeclip_provider_deliveries (processing_state)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_deliveries_received_at_idx
+    ON codeclip_provider_deliveries (received_at DESC)
+  `);
+}
+
+async function getCodeClipProviderDeliveryByIdentity(identity = {}, queryClient = pool) {
+  if (!queryClient) return null;
+  if (!hasCodeClipProviderDeliveryIdentity(identity)) return null;
+
+  const normalized = normalizeCodeClipProviderDeliveryIdentity(identity);
+
+  if (queryClient === pool) {
+    await ensureCodeClipProviderDeliveriesTable(queryClient);
+  }
+
+  const result = await queryClient.query(
+    `
+      SELECT *
+      FROM codeclip_provider_deliveries
+      WHERE provider = $1
+        AND provider_account_id = $2
+        AND event_code = $3
+        AND external_message_id = $4
+      LIMIT 1
+    `,
+    [
+      normalized.provider,
+      normalized.providerAccountId,
+      normalized.eventCode,
+      normalized.externalMessageId,
+    ]
+  );
+
+  return mapCodeClipProviderDeliveryRow(result.rows?.[0] || null);
+}
+
+function optionalCodeClipProviderDeliveryString(value) {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool) {
+  if (!queryClient) {
+    return {
+      status: 'failed',
+      created: false,
+      existing: false,
+      row: null,
+      error: new Error('codeClip provider delivery ledger requires PostgreSQL pool'),
+    };
+  }
+  if (!hasCodeClipProviderDeliveryIdentity(delivery)) {
+    return {
+      status: 'failed',
+      created: false,
+      existing: false,
+      row: null,
+      error: new Error('codeClip provider delivery identity is incomplete'),
+    };
+  }
+
+  const normalized = normalizeCodeClipProviderDeliveryIdentity(delivery);
+
+  try {
+    if (queryClient === pool) {
+      await ensureCodeClipProviderDeliveriesTable(queryClient);
+    }
+
+    const result = await queryClient.query(
+      `
+        INSERT INTO codeclip_provider_deliveries (
+          provider,
+          provider_account_id,
+          event_code,
+          event_id,
+          external_message_id,
+          idempotency_key,
+          payload_fingerprint,
+          verification_state,
+          processing_state,
+          attempt_count,
+          core_persistence_state,
+          completion_state,
+          retry_eligible,
+          terminal_state,
+          received_at,
+          last_attempt_at,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$11,$12,$13,COALESCE($14::timestamptz,NOW()),NOW(),NOW())
+        ON CONFLICT (provider, provider_account_id, event_code, external_message_id)
+        DO NOTHING
+        RETURNING *
+      `,
+      [
+        normalized.provider,
+        normalized.providerAccountId,
+        normalized.eventCode,
+        optionalCodeClipProviderDeliveryString(delivery.eventId || delivery.event_id),
+        normalized.externalMessageId,
+        optionalCodeClipProviderDeliveryString(delivery.idempotencyKey || delivery.idempotency_key),
+        optionalCodeClipProviderDeliveryString(delivery.payloadFingerprint || delivery.payload_fingerprint),
+        delivery.verificationState || delivery.verification_state || 'verified',
+        delivery.processingState || delivery.processing_state || 'processing',
+        delivery.corePersistenceState || delivery.core_persistence_state || 'not_started',
+        delivery.completionState || delivery.completion_state || 'not_completed',
+        delivery.retryEligible ?? delivery.retry_eligible ?? false,
+        delivery.terminalState ?? delivery.terminal_state ?? false,
+        delivery.receivedAt || delivery.received_at || null,
+      ]
+    );
+
+    if (result.rows?.[0]) {
+      return {
+        status: 'created',
+        created: true,
+        existing: false,
+        row: mapCodeClipProviderDeliveryRow(result.rows[0]),
+      };
+    }
+
+    const existing = await getCodeClipProviderDeliveryByIdentity(normalized, queryClient);
+    if (existing) {
+      return {
+        status: 'existing',
+        created: false,
+        existing: true,
+        row: existing,
+      };
+    }
+
+    return {
+      status: 'failed',
+      created: false,
+      existing: false,
+      row: null,
+      error: new Error('codeClip provider delivery conflict row could not be loaded'),
+    };
+  } catch (error) {
+    return {
+      status: 'failed',
+      created: false,
+      existing: false,
+      row: null,
+      error,
+    };
+  }
+}
+
+const CODECLIP_PROVIDER_DELIVERY_UPDATE_COLUMNS = {
+  processingState: 'processing_state',
+  processing_state: 'processing_state',
+  attemptCount: 'attempt_count',
+  attempt_count: 'attempt_count',
+  corePersistenceState: 'core_persistence_state',
+  core_persistence_state: 'core_persistence_state',
+  completionState: 'completion_state',
+  completion_state: 'completion_state',
+  responseStatus: 'response_status',
+  response_status: 'response_status',
+  publicResponseJson: 'public_response_json',
+  public_response_json: 'public_response_json',
+  errorClass: 'error_class',
+  error_class: 'error_class',
+  retryEligible: 'retry_eligible',
+  retry_eligible: 'retry_eligible',
+  terminalState: 'terminal_state',
+  terminal_state: 'terminal_state',
+  lastAttemptAt: 'last_attempt_at',
+  last_attempt_at: 'last_attempt_at',
+  completedAt: 'completed_at',
+  completed_at: 'completed_at',
+};
+
+function normalizeCodeClipProviderDeliveryUpdateValue(column, value) {
+  if (column === 'public_response_json') {
+    return {
+      ok: true,
+      value: value === null ? null : JSON.stringify(value),
+    };
+  }
+  if (column === 'attempt_count') {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      return {
+        ok: false,
+        error: new Error(
+          'codeClip provider delivery attempt_count must be an integer greater than or equal to 1'
+        ),
+      };
+    }
+    return { ok: true, value: parsed };
+  }
+  return { ok: true, value };
+}
+
+function buildCodeClipProviderDeliveryStateUpdates(updates = {}) {
+  const normalized = new Map();
+  let sawInput = false;
+
+  for (const [key, value] of Object.entries(updates || {})) {
+    sawInput = true;
+    const column = CODECLIP_PROVIDER_DELIVERY_UPDATE_COLUMNS[key];
+    if (!column) continue;
+
+    const normalizedValue = normalizeCodeClipProviderDeliveryUpdateValue(column, value);
+    if (!normalizedValue.ok) return normalizedValue;
+    normalized.set(column, normalizedValue.value);
+  }
+
+  return { ok: true, sawInput, values: normalized };
+}
+
+async function updateCodeClipProviderDeliveryState(identity = {}, updates = {}, queryClient = pool) {
+  if (!queryClient) {
+    return {
+      status: 'failed',
+      row: null,
+      error: new Error('codeClip provider delivery ledger requires PostgreSQL pool'),
+    };
+  }
+  if (!hasCodeClipProviderDeliveryIdentity(identity)) {
+    return {
+      status: 'failed',
+      row: null,
+      error: new Error('codeClip provider delivery identity is incomplete'),
+    };
+  }
+
+  const normalized = normalizeCodeClipProviderDeliveryIdentity(identity);
+  const stateUpdates = buildCodeClipProviderDeliveryStateUpdates(updates);
+  if (!stateUpdates.ok) {
+    return {
+      status: 'failed',
+      row: null,
+      error: stateUpdates.error,
+    };
+  }
+
+  try {
+    if (!stateUpdates.values.size) {
+      if (stateUpdates.sawInput) {
+        return {
+          status: 'failed',
+          row: null,
+          error: new Error('codeClip provider delivery update contains no allowed fields'),
+        };
+      }
+
+      return {
+        status: 'unchanged',
+        row: await getCodeClipProviderDeliveryByIdentity(normalized, queryClient),
+      };
+    }
+
+    if (queryClient === pool) {
+      await ensureCodeClipProviderDeliveriesTable(queryClient);
+    }
+
+    const assignments = [];
+    const values = [];
+    for (const [column, value] of stateUpdates.values.entries()) {
+      values.push(value);
+      const cast = column === 'public_response_json' ? '::jsonb' : '';
+      assignments.push(`${column} = $${values.length}${cast}`);
+    }
+
+    assignments.push('updated_at = NOW()');
+    values.push(
+      normalized.provider,
+      normalized.providerAccountId,
+      normalized.eventCode,
+      normalized.externalMessageId
+    );
+    const whereStart = values.length - 3;
+
+    const result = await queryClient.query(
+      `
+        UPDATE codeclip_provider_deliveries
+        SET ${assignments.join(', ')}
+        WHERE provider = $${whereStart}
+          AND provider_account_id = $${whereStart + 1}
+          AND event_code = $${whereStart + 2}
+          AND external_message_id = $${whereStart + 3}
+        RETURNING *
+      `,
+      values
+    );
+
+    return {
+      status: result.rows?.[0] ? 'updated' : 'not_found',
+      row: mapCodeClipProviderDeliveryRow(result.rows?.[0] || null),
+    };
+  } catch (error) {
+    return {
+      status: 'failed',
+      row: null,
+      error,
+    };
+  }
+}
+
 async function ensureCodeClipXtraRedemptionsTable() {
   if (!pool) return;
 
@@ -2196,6 +2595,10 @@ module.exports = {
   insertCodePodKeywordInteraction,
   getCodePodKeywordInteraction,
   getCodePodKeywordInteractionSummary,
+  ensureCodeClipProviderDeliveriesTable,
+  createCodeClipProviderDelivery,
+  getCodeClipProviderDeliveryByIdentity,
+  updateCodeClipProviderDeliveryState,
   ensureCodeClipXtraRedemptionsTable,
   saveCodeClipXtraRedemption,
   ensureCodeClipInteractionsTable,

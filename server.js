@@ -39,6 +39,8 @@ const {
   saveCodeClipRewardAssignments,
   withCodeClipCorePersistenceTransaction,
   saveCodeClipOutboxEvent,
+  createCodeClipProviderDelivery,
+  updateCodeClipProviderDeliveryState,
   claimCodeClipOutboxEvents,
   markCodeClipOutboxEventSucceeded,
   markCodeClipOutboxEventFailed,
@@ -3518,6 +3520,47 @@ app.post("/codeclip/test-provider/keyword", async (req, res) => {
   }
 });
 
+function buildCodeClipProviderPayloadFingerprint(rawBody) {
+  if (Buffer.isBuffer(rawBody)) {
+    return crypto.createHash("sha256").update(rawBody).digest("hex");
+  }
+  if (typeof rawBody === "string") {
+    return crypto.createHash("sha256").update(rawBody).digest("hex");
+  }
+  return null;
+}
+
+function sendCodeClipProviderLedgerFailure(res) {
+  return res.status(503).json({
+    ok: false,
+    error: "Provider keyword processing unavailable",
+  });
+}
+
+function isCodeClipProviderDeliveryUpdateConfirmed(result) {
+  return result?.status === "updated" && Boolean(result.row);
+}
+
+function getCodeClipCorePersistenceState(result = {}) {
+  const status = result.internal?.persistenceStatus;
+  if (!status) return "unknown";
+
+  const steps = [
+    status.interaction,
+    status.rewardAssignments,
+    status.clipXtraRedemption,
+  ].filter(Boolean);
+  const failed = steps.some((step) => step.attempted && step.ok === false);
+  if (failed) return "failed";
+
+  const attempted = steps.filter((step) => step.attempted);
+  if (!attempted.length) return "unknown";
+
+  return attempted.every((step) => step.ok === true && step.committed === true)
+    ? "committed"
+    : "unknown";
+}
+
 async function handleCodeClipProviderKeywordRoute(req, res) {
   try {
     const expectedToken = process.env.CODECLIP_PROVIDER_WEBHOOK_TOKEN || "";
@@ -3720,6 +3763,38 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
     }
 
+    const providerDeliveryIdentity = liveProvider
+      ? {
+          provider: normalizedProvider,
+          providerAccountId,
+          eventCode,
+          externalMessageId: messageId,
+        }
+      : null;
+    let providerDeliveryRecord = null;
+    if (liveProvider) {
+      const deliveryRecord = await createCodeClipProviderDelivery({
+        ...providerDeliveryIdentity,
+        eventId: eventId || null,
+        idempotencyKey,
+        payloadFingerprint: buildCodeClipProviderPayloadFingerprint(req.codeClipRawBody),
+        verificationState: "verified",
+        processingState: "processing",
+        corePersistenceState: "not_started",
+        completionState: "not_completed",
+      });
+
+      if (deliveryRecord.status === "failed") {
+        console.warn("codeClip provider delivery ledger rejected", {
+          provider: normalizedProvider,
+          route: "/codeclip/provider/:provider/keyword",
+          reason: "DELIVERY_LEDGER_UNAVAILABLE",
+        });
+        return sendCodeClipProviderLedgerFailure(res);
+      }
+      providerDeliveryRecord = deliveryRecord.row;
+    }
+
     if (requiresIdempotencyStore && !process.env.REDIS_URL) {
       return res.status(503).json({
         ok: false,
@@ -3761,7 +3836,45 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       });
 
       if (storedResponse) {
+        if (liveProvider) {
+          if (providerDeliveryRecord?.corePersistenceState !== "committed") {
+            console.warn("codeClip provider delivery replay rejected", {
+              provider: normalizedProvider,
+              route: "/codeclip/provider/:provider/keyword",
+              reason: "DELIVERY_REPLAY_WITHOUT_DURABLE_COMMIT",
+            });
+            return sendCodeClipProviderLedgerFailure(res);
+          }
+
+          const replayUpdate = await updateCodeClipProviderDeliveryState(
+            providerDeliveryIdentity,
+            {
+              processingState: "completed",
+              completionState: "completed",
+              responseStatus: 200,
+              publicResponseJson: storedResponse,
+              completedAt: new Date().toISOString(),
+              retryEligible: false,
+              terminalState: true,
+            }
+          );
+          if (!isCodeClipProviderDeliveryUpdateConfirmed(replayUpdate)) {
+            return sendCodeClipProviderLedgerFailure(res);
+          }
+        }
         return res.status(200).json(storedResponse);
+      }
+
+      if (
+        liveProvider &&
+        providerDeliveryRecord?.corePersistenceState === "committed"
+      ) {
+        console.warn("codeClip provider delivery processing rejected", {
+          provider: normalizedProvider,
+          route: "/codeclip/provider/:provider/keyword",
+          reason: "DELIVERY_DURABLE_COMMIT_WITHOUT_REPLAY",
+        });
+        return sendCodeClipProviderLedgerFailure(res);
       }
 
       return res.status(202).json({
@@ -3771,6 +3884,31 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         eventCode,
         messageId,
       });
+    }
+
+    if (
+      liveProvider &&
+      providerDeliveryRecord?.corePersistenceState === "committed"
+    ) {
+      console.warn("codeClip provider delivery processing rejected", {
+        provider: normalizedProvider,
+        route: "/codeclip/provider/:provider/keyword",
+        reason: "DELIVERY_DURABLE_COMMIT_WITHOUT_REPLAY",
+      });
+      return sendCodeClipProviderLedgerFailure(res);
+    }
+
+    if (liveProvider) {
+      const processingUpdate = await updateCodeClipProviderDeliveryState(
+        providerDeliveryIdentity,
+        {
+          corePersistenceState: "processing",
+          lastAttemptAt: new Date().toISOString(),
+        }
+      );
+      if (!isCodeClipProviderDeliveryUpdateConfirmed(processingUpdate)) {
+        return sendCodeClipProviderLedgerFailure(res);
+      }
     }
 
     const result = await codeClipVertical.service.handleCodeClipKeywordEntry({
@@ -3792,11 +3930,56 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
     const persistenceSeverity = String(result.internal?.persistenceDecision?.severity || "")
       .trim()
       .toLowerCase();
+    const corePersistenceState = getCodeClipCorePersistenceState(result);
     if (liveProvider && persistenceSeverity === "critical") {
-      return res.status(503).json({
-        ok: false,
-        error: "Provider keyword processing unavailable",
-      });
+      const failureUpdate = await updateCodeClipProviderDeliveryState(
+        providerDeliveryIdentity,
+        {
+          processingState: "failed",
+          corePersistenceState: "failed",
+          completionState: "not_completed",
+          errorClass: "critical_persistence_failure",
+          retryEligible: true,
+          terminalState: false,
+          lastAttemptAt: new Date().toISOString(),
+        }
+      );
+      if (!isCodeClipProviderDeliveryUpdateConfirmed(failureUpdate)) {
+        return sendCodeClipProviderLedgerFailure(res);
+      }
+      return sendCodeClipProviderLedgerFailure(res);
+    }
+
+    if (liveProvider && corePersistenceState !== "committed") {
+      const unconfirmedUpdate = await updateCodeClipProviderDeliveryState(
+        providerDeliveryIdentity,
+        {
+          processingState: "failed",
+          corePersistenceState: "unknown",
+          completionState: "not_completed",
+          errorClass: "unconfirmed_core_persistence",
+          retryEligible: true,
+          terminalState: false,
+          lastAttemptAt: new Date().toISOString(),
+        }
+      );
+      if (!isCodeClipProviderDeliveryUpdateConfirmed(unconfirmedUpdate)) {
+        return sendCodeClipProviderLedgerFailure(res);
+      }
+      return sendCodeClipProviderLedgerFailure(res);
+    }
+
+    if (liveProvider) {
+      const committedUpdate = await updateCodeClipProviderDeliveryState(
+        providerDeliveryIdentity,
+        {
+          corePersistenceState: "committed",
+          lastAttemptAt: new Date().toISOString(),
+        }
+      );
+      if (!isCodeClipProviderDeliveryUpdateConfirmed(committedUpdate)) {
+        return sendCodeClipProviderLedgerFailure(res);
+      }
     }
 
     if (idempotencyClaim.enabled) {
@@ -3806,6 +3989,24 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         payload: result.payload,
         ttlSeconds: providerPolicy.policy.idempotency?.responseTtlSeconds || 86400,
       });
+    }
+
+    if (liveProvider) {
+      const completionUpdate = await updateCodeClipProviderDeliveryState(
+        providerDeliveryIdentity,
+        {
+          processingState: "completed",
+          completionState: "completed",
+          responseStatus: result.httpStatus,
+          publicResponseJson: result.payload,
+          completedAt: new Date().toISOString(),
+          retryEligible: false,
+          terminalState: true,
+        }
+      );
+      if (!isCodeClipProviderDeliveryUpdateConfirmed(completionUpdate)) {
+        return sendCodeClipProviderLedgerFailure(res);
+      }
     }
 
     return res.status(result.httpStatus).json(result.payload);

@@ -23,6 +23,100 @@ require.cache[redisModulePath] = {
   exports: redis,
 };
 
+const dbModulePath = require.resolve("./db");
+const originalDb = require(dbModulePath);
+const providerDeliveries = new Map();
+const providerDeliveryCalls = [];
+
+function providerDeliveryKey(identity = {}) {
+  return [
+    String(identity.provider || "").trim().toLowerCase(),
+    String(identity.providerAccountId || identity.provider_account_id || "").trim(),
+    String(identity.eventCode || identity.event_code || "").trim(),
+    String(identity.externalMessageId || identity.external_message_id || "").trim(),
+  ].join("|");
+}
+
+function resetProviderDeliveryLedger() {
+  providerDeliveries.clear();
+  providerDeliveryCalls.length = 0;
+  createCodeClipProviderDeliveryStub.fail = false;
+  updateCodeClipProviderDeliveryStateStub.fail = false;
+}
+
+function createProviderDeliveryRow(delivery = {}) {
+  return {
+    provider: String(delivery.provider || "").trim().toLowerCase(),
+    providerAccountId: String(delivery.providerAccountId || "").trim(),
+    eventCode: String(delivery.eventCode || "").trim(),
+    eventId: delivery.eventId || null,
+    externalMessageId: String(delivery.externalMessageId || "").trim(),
+    idempotencyKey: delivery.idempotencyKey || null,
+    payloadFingerprint: delivery.payloadFingerprint || null,
+    verificationState: delivery.verificationState || "verified",
+    processingState: delivery.processingState || "processing",
+    attemptCount: 1,
+    corePersistenceState: delivery.corePersistenceState || "not_started",
+    completionState: delivery.completionState || "not_completed",
+    responseStatus: null,
+    publicResponseJson: null,
+    errorClass: null,
+    retryEligible: false,
+    terminalState: false,
+  };
+}
+
+async function createCodeClipProviderDeliveryStub(delivery = {}) {
+  providerDeliveryCalls.push({ method: "create", delivery });
+  if (createCodeClipProviderDeliveryStub.fail) {
+    return {
+      status: "failed",
+      created: false,
+      existing: false,
+      row: null,
+      error: new Error("forced provider delivery create failure"),
+    };
+  }
+
+  const key = providerDeliveryKey(delivery);
+  const existing = providerDeliveries.get(key);
+  if (existing) {
+    return { status: "existing", created: false, existing: true, row: existing };
+  }
+
+  const row = createProviderDeliveryRow(delivery);
+  providerDeliveries.set(key, row);
+  return { status: "created", created: true, existing: false, row };
+}
+
+async function updateCodeClipProviderDeliveryStateStub(identity = {}, updates = {}) {
+  providerDeliveryCalls.push({ method: "update", identity, updates });
+  if (updateCodeClipProviderDeliveryStateStub.fail) {
+    return {
+      status: "failed",
+      row: null,
+      error: new Error("forced provider delivery update failure"),
+    };
+  }
+
+  const row = providerDeliveries.get(providerDeliveryKey(identity));
+  if (!row) return { status: "not_found", row: null };
+
+  Object.assign(row, updates);
+  return { status: "updated", row };
+}
+
+require.cache[dbModulePath] = {
+  id: dbModulePath,
+  filename: dbModulePath,
+  loaded: true,
+  exports: {
+    ...originalDb,
+    createCodeClipProviderDelivery: createCodeClipProviderDeliveryStub,
+    updateCodeClipProviderDeliveryState: updateCodeClipProviderDeliveryStateStub,
+  },
+};
+
 const { after } = require("node:test");
 const { app } = require("./server");
 const codeClipVertical = require("./verticals/codeclip");
@@ -47,6 +141,7 @@ function restoreEnv(name, value) {
 }
 
 async function withTestServer(run) {
+  resetProviderDeliveryLedger();
   const server = await new Promise((resolve, reject) => {
     const listeningServer = app.listen(0, () => resolve(listeningServer));
     listeningServer.on("error", reject);
@@ -60,6 +155,41 @@ async function withTestServer(run) {
       server.close((err) => (err ? reject(err) : resolve()));
     });
   }
+}
+
+function committedPersistenceInternal() {
+  return {
+    persistenceStatus: {
+      interaction: { attempted: true, ok: true, error: null, committed: true },
+      rewardAssignments: { attempted: false, ok: null, error: null, skipped: true },
+      clipXtraRedemption: { attempted: false, ok: null, error: null, skipped: true },
+    },
+    persistenceDecision: { ok: true, severity: "ok", failedSteps: [], criticalFailures: [] },
+  };
+}
+
+function criticalPersistenceInternal() {
+  return {
+    persistenceStatus: {
+      interaction: { attempted: true, ok: false, error: "forced failure", committed: false },
+      rewardAssignments: { attempted: false, ok: null, error: null, skipped: true },
+      clipXtraRedemption: { attempted: false, ok: null, error: null, skipped: true },
+    },
+    persistenceDecision: {
+      ok: false,
+      severity: "critical",
+      failedSteps: ["interaction"],
+      criticalFailures: ["interaction"],
+    },
+    persistenceAction: {
+      action: "continue_with_internal_error_marker",
+      reason: "persistence_critical",
+    },
+    persistenceGuaranteePolicy: {
+      severity: "critical",
+      reason: "persistence_critical",
+    },
+  };
 }
 
 function signMetaBody(rawBody, secret = process.env.CODECLIP_META_WEBHOOK_SECRET) {
@@ -179,9 +309,7 @@ test("signed Meta request reaches existing codeClip provider runtime", async () 
           eventCode: input.eventCode,
           messageId: input.messageId,
         },
-        internal: {
-          persistenceDecision: { severity: "ok" },
-        },
+        internal: committedPersistenceInternal(),
       };
     }, async () => {
       const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
@@ -201,7 +329,56 @@ test("signed Meta request reaches existing codeClip provider runtime", async () 
       assert.equal(runtimeInput.keyword, keyword);
       assert.match(runtimeInput.messageId, /^meta-valid-/);
       assertNoProviderInternals(payload);
+
+      const delivery = Array.from(providerDeliveries.values()).find(
+        (row) => row.externalMessageId === runtimeInput.messageId
+      );
+      assert.ok(delivery);
+      assert.equal(delivery.provider, "meta");
+      assert.equal(delivery.providerAccountId, accountId);
+      assert.equal(delivery.eventCode, code);
+      assert.equal(delivery.processingState, "completed");
+      assert.equal(delivery.corePersistenceState, "committed");
+      assert.equal(delivery.completionState, "completed");
+      assert.equal(delivery.responseStatus, 200);
+      assert.deepEqual(delivery.publicResponseJson, payload);
+      assert.equal(
+        delivery.payloadFingerprint,
+        crypto.createHash("sha256").update(rawBody).digest("hex")
+      );
     });
+  });
+});
+
+test("invalid Meta signature does not create a durable provider delivery", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-invalid-signature-${Date.now()}`;
+    const keyword = `BADSIG-${Date.now()}`;
+    await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const rawBody = metaBody({
+      messageId: `meta-invalid-signature-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-hub-signature-256": "sha256=invalid",
+      },
+      body: rawBody,
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(payload, {
+      ok: false,
+      error: "Invalid provider keyword payload",
+    });
+    assert.equal(providerDeliveryCalls.length, 0);
+    assert.equal(providerDeliveries.size, 0);
+    assertNoProviderInternals(payload);
   });
 });
 
@@ -223,9 +400,7 @@ test("completed duplicate Meta delivery reuses stored public response", async ()
         eventCode: input.eventCode,
         messageId: input.messageId,
       },
-      internal: {
-        persistenceDecision: { severity: "ok" },
-      },
+      internal: committedPersistenceInternal(),
     }), async () => {
       const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
         method: "POST",
@@ -243,6 +418,124 @@ test("completed duplicate Meta delivery reuses stored public response", async ()
       assert.equal(first.status, 200);
       assert.equal(second.status, 200);
       assert.deepEqual(secondPayload, firstPayload);
+      assertNoProviderInternals(secondPayload);
+      assert.equal(
+        providerDeliveryCalls.filter((call) => call.method === "create").length,
+        2
+      );
+      assert.ok(
+        providerDeliveryCalls.some(
+          (call) =>
+            call.method === "update" &&
+            call.updates.completionState === "completed" &&
+            call.updates.publicResponseJson
+        )
+      );
+    });
+  });
+});
+
+test("Redis replay without durable committed core state fails closed", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-replay-no-commit-${Date.now()}`;
+    const keyword = `REPLAYNOCOMMIT-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const messageId = `meta-replay-no-commit-${Date.now()}`;
+    const rawBody = metaBody({ messageId, accountId, text: keyword });
+
+    await withPatchedKeywordRuntime(async (input) => ({
+      httpStatus: 200,
+      payload: {
+        success: true,
+        eventCode: input.eventCode,
+        messageId: input.messageId,
+      },
+      internal: committedPersistenceInternal(),
+    }), async () => {
+      const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      assert.equal(first.status, 200);
+
+      const delivery = providerDeliveries.get(providerDeliveryKey({
+        provider: "meta",
+        providerAccountId: accountId,
+        eventCode: code,
+        externalMessageId: messageId,
+      }));
+      assert.ok(delivery);
+      delivery.corePersistenceState = "processing";
+      delivery.completionState = "not_completed";
+
+      const second = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const secondPayload = await second.json();
+
+      assert.equal(second.status, 503);
+      assert.deepEqual(secondPayload, {
+        ok: false,
+        error: "Provider keyword processing unavailable",
+      });
+      assertNoProviderInternals(secondPayload);
+      assert.notDeepEqual(secondPayload, await first.json().catch(() => null));
+    });
+  });
+});
+
+test("durable committed delivery without Redis replay blocks duplicate runtime", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-commit-no-replay-${Date.now()}`;
+    const keyword = `COMMITNOREPLAY-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const messageId = `meta-commit-no-replay-${Date.now()}`;
+    const rawBody = metaBody({ messageId, accountId, text: keyword });
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider: "meta",
+      eventCode: code,
+      messageId,
+    });
+    let runtimeCalls = 0;
+
+    await withPatchedKeywordRuntime(async (input) => {
+      runtimeCalls += 1;
+      return {
+        httpStatus: 200,
+        payload: {
+          success: true,
+          eventCode: input.eventCode,
+          messageId: input.messageId,
+        },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      assert.equal(first.status, 200);
+      assert.equal(runtimeCalls, 1);
+
+      await redis.del(getProviderKeywordResponseKey(idempotencyKey));
+
+      const second = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const secondPayload = await second.json();
+
+      assert.equal(second.status, 503);
+      assert.deepEqual(secondPayload, {
+        ok: false,
+        error: "Provider keyword processing unavailable",
+      });
+      assert.equal(runtimeCalls, 1);
       assertNoProviderInternals(secondPayload);
     });
   });
@@ -264,9 +557,7 @@ test("Meta post-verification rate limit is provider-account scoped", async () =>
         eventCode: input.eventCode,
         messageId: input.messageId,
       },
-      internal: {
-        persistenceDecision: { severity: "ok" },
-      },
+      internal: committedPersistenceInternal(),
     }), async () => {
       for (const senderId of ["sender-a", "sender-b"]) {
         const rawBody = metaBody({
@@ -338,7 +629,79 @@ test("verified Meta payload without provider account is rejected before runtime"
       ok: false,
       error: "Invalid provider keyword payload",
     });
+    assert.equal(providerDeliveryCalls.length, 0);
+    assert.equal(providerDeliveries.size, 0);
     assertNoProviderInternals(payload);
+  });
+});
+
+test("Meta payload without matching activation does not create a durable provider delivery", async () => {
+  await withTestServer(async (baseUrl) => {
+    const boundAccountId = `page-bound-${Date.now()}`;
+    const unboundAccountId = `page-unbound-${Date.now()}`;
+    const keyword = `UNBOUND-${Date.now()}`;
+    await createCodeClipMetaEvent(baseUrl, { accountId: boundAccountId, keyword });
+    const rawBody = metaBody({
+      messageId: `meta-unbound-${Date.now()}`,
+      accountId: unboundAccountId,
+      text: `NO-MATCH-${Date.now()}`,
+    });
+
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(payload, {
+      ok: false,
+      error: "Event not found",
+      reason: "NO_MATCH",
+    });
+    assert.equal(providerDeliveryCalls.length, 0);
+    assert.equal(providerDeliveries.size, 0);
+    assertNoProviderInternals(payload);
+  });
+});
+
+test("durable provider delivery create failure stops live Meta before runtime", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-ledger-create-fail-${Date.now()}`;
+    const keyword = `LEDGERFAIL-${Date.now()}`;
+    await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const rawBody = metaBody({
+      messageId: `meta-ledger-create-fail-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+    let runtimeCalled = false;
+    createCodeClipProviderDeliveryStub.fail = true;
+
+    await withPatchedKeywordRuntime(async () => {
+      runtimeCalled = true;
+      return {
+        httpStatus: 200,
+        payload: { success: true },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const payload = await response.json();
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(payload, {
+        ok: false,
+        error: "Provider keyword processing unavailable",
+      });
+      assert.equal(runtimeCalled, false);
+      assertNoProviderInternals(payload);
+    });
   });
 });
 
@@ -369,22 +732,7 @@ test("live Meta critical persistence failure returns public-safe 503 without com
         persistenceDecision: { severity: "critical" },
         internal: { leaked: true },
       },
-      internal: {
-        persistenceDecision: {
-          ok: false,
-          severity: "critical",
-          failedSteps: ["interaction"],
-          criticalFailures: ["interaction"],
-        },
-        persistenceAction: {
-          action: "continue_with_internal_error_marker",
-          reason: "persistence_critical",
-        },
-        persistenceGuaranteePolicy: {
-          severity: "critical",
-          reason: "persistence_critical",
-        },
-      },
+      internal: criticalPersistenceInternal(),
     });
 
     try {
