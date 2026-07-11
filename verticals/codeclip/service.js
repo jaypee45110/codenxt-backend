@@ -386,10 +386,11 @@ function normalizeAudienceEntry(entryType, input = {}) {
   return adapter(input);
 }
 
-function buildInteractionResult(httpStatus, payload) {
+function buildInteractionResult(httpStatus, payload, internal = {}) {
   return {
     httpStatus,
     payload,
+    internal,
   };
 }
 
@@ -745,12 +746,56 @@ function recordPersistenceStep(status, step, ok, error = null) {
   };
 }
 
+function recordPersistenceSkipped(status, step, reason = "not_required") {
+  if (!status || !status[step]) return;
+
+  status[step] = {
+    attempted: false,
+    ok: null,
+    error: null,
+    skipped: true,
+    reason,
+  };
+}
+
+function getPersistableRewardAssignments(snapshot = {}) {
+  const assignments = Array.isArray(snapshot.assignments) ? snapshot.assignments : [];
+  return assignments.filter((assignment) => assignment?.tier);
+}
+
+function requireConfirmedPersistenceRow(row, step) {
+  if (!row) {
+    throw new Error(`${step} persistence did not confirm write`);
+  }
+}
+
+function requireConfirmedRewardAssignmentWrites(snapshot = {}, rows = []) {
+  const expectedAssignments = getPersistableRewardAssignments(snapshot);
+
+  if (!expectedAssignments.length) {
+    return { required: false, expected: 0 };
+  }
+
+  if (!Array.isArray(rows) || rows.length !== expectedAssignments.length) {
+    throw new Error(
+      `reward assignment persistence confirmed ${Array.isArray(rows) ? rows.length : 0} of ${expectedAssignments.length} writes`
+    );
+  }
+
+  return { required: true, expected: expectedAssignments.length };
+}
+
 function buildPersistenceDecision(status = {}) {
   const failedSteps = Object.entries(status)
     .filter(([, stepStatus]) => stepStatus?.attempted && stepStatus.ok === false)
     .map(([step]) => step);
+  const criticalSteps = new Set([
+    "interaction",
+    "rewardAssignments",
+    "clipXtraRedemption",
+  ]);
   const criticalFailures = failedSteps.filter((step) =>
-    step === "interaction" || step === "clipXtraRedemption"
+    criticalSteps.has(step)
   );
   const severity = criticalFailures.length
     ? "critical"
@@ -1020,34 +1065,50 @@ async function handleCodeClipScan({
     interaction: createScanPayloadInteraction(interaction),
   }, interaction);
 
-  if (saveCodeClipInteraction) {
-    try {
-      await saveCodeClipInteraction(interaction);
-      recordPersistenceStep(interaction.persistenceStatus, "interaction", true);
-    } catch (dbError) {
-      recordPersistenceStep(interaction.persistenceStatus, "interaction", false, dbError);
-      console.warn("codeClip Interaction Postgres save failed:", dbError.message);
-    }
+  try {
+    const persistedInteraction = saveCodeClipInteraction
+      ? await saveCodeClipInteraction(interaction)
+      : null;
+    requireConfirmedPersistenceRow(persistedInteraction, "interaction");
+    recordPersistenceStep(interaction.persistenceStatus, "interaction", true);
+  } catch (dbError) {
+    recordPersistenceStep(interaction.persistenceStatus, "interaction", false, dbError);
+    console.warn("codeClip Interaction Postgres save failed:", dbError.message);
   }
 
-  if (saveCodeClipRewardAssignments) {
-    try {
-      await saveCodeClipRewardAssignments(interaction.rewardAssignmentSnapshot);
+  try {
+    const expectedAssignments = getPersistableRewardAssignments(interaction.rewardAssignmentSnapshot);
+
+    if (!expectedAssignments.length) {
+      recordPersistenceSkipped(interaction.persistenceStatus, "rewardAssignments", "no_persistable_assignments");
+    } else {
+      const persistedRewardAssignments = saveCodeClipRewardAssignments
+        ? await saveCodeClipRewardAssignments(interaction.rewardAssignmentSnapshot)
+        : null;
+      requireConfirmedRewardAssignmentWrites(
+        interaction.rewardAssignmentSnapshot,
+        persistedRewardAssignments
+      );
       recordPersistenceStep(interaction.persistenceStatus, "rewardAssignments", true);
-    } catch (dbError) {
-      recordPersistenceStep(interaction.persistenceStatus, "rewardAssignments", false, dbError);
-      console.warn("codeClip RewardAssignment Postgres save failed:", dbError.message);
     }
+  } catch (dbError) {
+    recordPersistenceStep(interaction.persistenceStatus, "rewardAssignments", false, dbError);
+    console.warn("codeClip RewardAssignment Postgres save failed:", dbError.message);
   }
 
   if (interactionRewardAssignments.clipXtra?.assigned) {
     try {
-      await saveCodeClipXtraRedemption(createClipXtraRedemptionRecord(interaction));
+      const persistedClipXtraRedemption = saveCodeClipXtraRedemption
+        ? await saveCodeClipXtraRedemption(createClipXtraRedemptionRecord(interaction))
+        : null;
+      requireConfirmedPersistenceRow(persistedClipXtraRedemption, "clipXtra redemption");
       recordPersistenceStep(interaction.persistenceStatus, "clipXtraRedemption", true);
     } catch (dbError) {
       recordPersistenceStep(interaction.persistenceStatus, "clipXtraRedemption", false, dbError);
       console.warn("codeClip ClipXtra Postgres save failed:", dbError.message);
     }
+  } else {
+    recordPersistenceSkipped(interaction.persistenceStatus, "clipXtraRedemption", "clipxtra_not_assigned");
   }
 
   interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
@@ -1066,6 +1127,10 @@ async function handleCodeClipScan({
     tier: interaction.tier,
     rewards: interactionRewardAssignments,
     clipXtra: interactionRewardAssignments.clipXtra || null,
+  }, {
+    persistenceDecision: interaction.persistenceDecision,
+    persistenceAction: interaction.persistenceAction,
+    persistenceGuaranteePolicy: interaction.persistenceGuaranteePolicy,
   });
 }
 
@@ -1081,6 +1146,7 @@ async function handleCodeClipKeywordEntry({
   codeClipVertical,
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
+  saveCodeClipXtraRedemption,
   saveCodeClipOutboxEvent,
   recordPersistenceAction: recordPersistenceActionHandler = recordPersistenceAction,
 }) {
@@ -1144,25 +1210,52 @@ async function handleCodeClipKeywordEntry({
   interaction.rewardAssignmentSnapshot = createRewardAssignmentSnapshot(interaction);
   interaction.persistenceStatus = createPersistenceStatus();
   interaction.rewardAssignmentSnapshot.persistenceStatus = interaction.persistenceStatus;
+  const interactionRewardAssignments = interaction.rewardAssignments;
 
-  if (saveCodeClipInteraction) {
-    try {
-      await saveCodeClipInteraction(interaction);
-      recordPersistenceStep(interaction.persistenceStatus, "interaction", true);
-    } catch (dbError) {
-      recordPersistenceStep(interaction.persistenceStatus, "interaction", false, dbError);
-      console.warn("codeClip keyword Interaction Postgres save failed:", dbError.message);
-    }
+  try {
+    const persistedInteraction = saveCodeClipInteraction
+      ? await saveCodeClipInteraction(interaction)
+      : null;
+    requireConfirmedPersistenceRow(persistedInteraction, "interaction");
+    recordPersistenceStep(interaction.persistenceStatus, "interaction", true);
+  } catch (dbError) {
+    recordPersistenceStep(interaction.persistenceStatus, "interaction", false, dbError);
+    console.warn("codeClip keyword Interaction Postgres save failed:", dbError.message);
   }
 
-  if (saveCodeClipRewardAssignments) {
-    try {
-      await saveCodeClipRewardAssignments(interaction.rewardAssignmentSnapshot);
+  try {
+    const expectedAssignments = getPersistableRewardAssignments(interaction.rewardAssignmentSnapshot);
+
+    if (!expectedAssignments.length) {
+      recordPersistenceSkipped(interaction.persistenceStatus, "rewardAssignments", "no_persistable_assignments");
+    } else {
+      const persistedRewardAssignments = saveCodeClipRewardAssignments
+        ? await saveCodeClipRewardAssignments(interaction.rewardAssignmentSnapshot)
+        : null;
+      requireConfirmedRewardAssignmentWrites(
+        interaction.rewardAssignmentSnapshot,
+        persistedRewardAssignments
+      );
       recordPersistenceStep(interaction.persistenceStatus, "rewardAssignments", true);
-    } catch (dbError) {
-      recordPersistenceStep(interaction.persistenceStatus, "rewardAssignments", false, dbError);
-      console.warn("codeClip keyword RewardAssignment Postgres save failed:", dbError.message);
     }
+  } catch (dbError) {
+    recordPersistenceStep(interaction.persistenceStatus, "rewardAssignments", false, dbError);
+    console.warn("codeClip keyword RewardAssignment Postgres save failed:", dbError.message);
+  }
+
+  if (interactionRewardAssignments.clipXtra?.assigned) {
+    try {
+      const persistedClipXtraRedemption = saveCodeClipXtraRedemption
+        ? await saveCodeClipXtraRedemption(createClipXtraRedemptionRecord(interaction))
+        : null;
+      requireConfirmedPersistenceRow(persistedClipXtraRedemption, "clipXtra redemption");
+      recordPersistenceStep(interaction.persistenceStatus, "clipXtraRedemption", true);
+    } catch (dbError) {
+      recordPersistenceStep(interaction.persistenceStatus, "clipXtraRedemption", false, dbError);
+      console.warn("codeClip keyword ClipXtra Postgres save failed:", dbError.message);
+    }
+  } else {
+    recordPersistenceSkipped(interaction.persistenceStatus, "clipXtraRedemption", "clipxtra_not_assigned");
   }
 
   interaction.persistenceDecision = buildPersistenceDecision(interaction.persistenceStatus);
@@ -1179,6 +1272,10 @@ async function handleCodeClipKeywordEntry({
     tier: interaction.tier,
     rewards: interaction.rewardAssignments,
     clipXtra: interaction.rewardAssignments.clipXtra || null,
+  }, {
+    persistenceDecision: interaction.persistenceDecision,
+    persistenceAction: interaction.persistenceAction,
+    persistenceGuaranteePolicy: interaction.persistenceGuaranteePolicy,
   });
 }
 

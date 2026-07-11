@@ -3436,6 +3436,7 @@ app.post("/codeclip/keyword-entry", async (req, res) => {
       codeClipVertical,
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
+      saveCodeClipXtraRedemption,
       saveCodeClipOutboxEvent,
     });
 
@@ -3503,6 +3504,7 @@ app.post("/codeclip/test-provider/keyword", async (req, res) => {
       codeClipVertical,
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
+      saveCodeClipXtraRedemption,
       saveCodeClipOutboxEvent,
     });
 
@@ -3779,8 +3781,19 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       codeClipVertical,
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
+      saveCodeClipXtraRedemption,
       saveCodeClipOutboxEvent,
     });
+
+    const persistenceSeverity = String(result.internal?.persistenceDecision?.severity || "")
+      .trim()
+      .toLowerCase();
+    if (liveProvider && persistenceSeverity === "critical") {
+      return res.status(503).json({
+        ok: false,
+        error: "Provider keyword processing unavailable",
+      });
+    }
 
     if (idempotencyClaim.enabled) {
       await recordProviderKeywordResponse({

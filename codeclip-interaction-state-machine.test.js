@@ -29,6 +29,114 @@ function assertAudienceIntentContract(intent, expectedType) {
   assert.equal(intent.metadata, undefined);
 }
 
+function createPersistenceTestEvent({ eventCode, eventId, rewards = {} } = {}) {
+  return {
+    id: eventId,
+    code: eventCode,
+    vertical: 'codeclip',
+    startAt: '2099-12-31T18:00:00.000Z',
+    endAt: '2099-12-31T23:59:59.000Z',
+    activationMethod: 'keyword',
+    activationKeyword: 'GOLD',
+    activationChannels: ['Instagram'],
+    rewards,
+  };
+}
+
+function createPersistenceTestVertical(rewardAssignments) {
+  return {
+    routes: {
+      parseCodeClipRewardsMeta(event) {
+        return event;
+      },
+    },
+    assignment: {
+      async assignCodeClipRewards() {
+        return rewardAssignments;
+      },
+    },
+  };
+}
+
+async function runScanPersistenceCase({
+  rewardAssignments,
+  saveCodeClipInteraction = async (interaction) => ({ id: 'interaction-row', state: interaction.state }),
+  saveCodeClipRewardAssignments = async (snapshot) => snapshot.assignments,
+  saveCodeClipXtraRedemption = async (record) => ({ id: 'clipxtra-row', token: record.token }),
+} = {}) {
+  const eventCode = `CC-PERSIST-SCAN-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const eventId = `event-${eventCode}`;
+  const scanId = `scan-${eventCode}`;
+  let runtimeInteraction = null;
+  const outboxEvents = [];
+  const result = await codeClipService.handleCodeClipScan({
+    event: createPersistenceTestEvent({ eventCode, eventId, rewards: {} }),
+    eventCode,
+    eventId,
+    scanId,
+    rawScans: 1,
+    uniqueScans: 1,
+    scanRank: 1,
+    audienceEntry: {
+      entryCode: eventCode,
+      scanId,
+      requestedVertical: 'codeclip',
+      source: 'scan',
+      transport: 'http',
+      receivedAt: '2026-07-01T00:00:00.000Z',
+    },
+    redis: null,
+    codeClipVertical: createPersistenceTestVertical(rewardAssignments),
+    async persistFinalScan(finalTier, extraPayload, interaction) {
+      runtimeInteraction = interaction;
+    },
+    saveCodeClipInteraction,
+    saveCodeClipRewardAssignments,
+    saveCodeClipXtraRedemption,
+    async saveCodeClipOutboxEvent(event) {
+      outboxEvents.push(event);
+      return { id: outboxEvents.length, ...event };
+    },
+  });
+
+  return { result, runtimeInteraction, outboxEvents };
+}
+
+async function runKeywordPersistenceCase({
+  rewardAssignments,
+  saveCodeClipInteraction = async (interaction) => ({ id: 'interaction-row', state: interaction.state }),
+  saveCodeClipRewardAssignments = async (snapshot) => snapshot.assignments,
+  saveCodeClipXtraRedemption = async (record) => ({ id: 'clipxtra-row', token: record.token }),
+} = {}) {
+  const eventCode = `CC-PERSIST-KEYWORD-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const eventId = `event-${eventCode}`;
+  const messageId = `message-${eventCode}`;
+  let runtimeInteraction = null;
+  const outboxEvents = [];
+  const result = await codeClipService.handleCodeClipKeywordEntry({
+    event: createPersistenceTestEvent({ eventCode, eventId, rewards: {} }),
+    eventCode,
+    eventId,
+    keyword: 'GOLD',
+    messageId,
+    requestedVertical: 'codeclip',
+    redis: null,
+    codeClipVertical: createPersistenceTestVertical(rewardAssignments),
+    saveCodeClipInteraction: async (interaction) => {
+      runtimeInteraction = interaction;
+      return saveCodeClipInteraction(interaction);
+    },
+    saveCodeClipRewardAssignments,
+    saveCodeClipXtraRedemption,
+    async saveCodeClipOutboxEvent(event) {
+      outboxEvents.push(event);
+      return { id: outboxEvents.length, ...event };
+    },
+  });
+
+  return { result, runtimeInteraction, outboxEvents };
+}
+
 
 test('buildPersistenceDecision classifies COAS persistence status', () => {
   assert.deepEqual(codeClipService.buildPersistenceDecision({
@@ -48,9 +156,9 @@ test('buildPersistenceDecision classifies COAS persistence status', () => {
     clipXtraRedemption: { attempted: false, ok: null, error: null },
   }), {
     ok: false,
-    severity: 'degraded',
+    severity: 'critical',
     failedSteps: ['rewardAssignments'],
-    criticalFailures: [],
+    criticalFailures: ['rewardAssignments'],
   });
 
   assert.deepEqual(codeClipService.buildPersistenceDecision({
@@ -83,7 +191,44 @@ test('buildPersistenceDecision classifies COAS persistence status', () => {
     ok: false,
     severity: 'critical',
     failedSteps: ['interaction', 'rewardAssignments'],
-    criticalFailures: ['interaction'],
+    criticalFailures: ['interaction', 'rewardAssignments'],
+  });
+
+  assert.deepEqual(codeClipService.buildPersistenceDecision({
+    interaction: { attempted: true, ok: true, error: null },
+    rewardAssignments: { attempted: true, ok: true, error: null },
+    clipXtraRedemption: { attempted: false, ok: null, error: null },
+    futureStep: { attempted: true, ok: false, error: 'future failed' },
+  }), {
+    ok: false,
+    severity: 'degraded',
+    failedSteps: ['futureStep'],
+    criticalFailures: [],
+  });
+});
+
+test('buildPersistenceDecision treats skipped persistence steps as non-critical', () => {
+  assert.deepEqual(codeClipService.buildPersistenceDecision({
+    interaction: { attempted: true, ok: true, error: null },
+    rewardAssignments: {
+      attempted: false,
+      ok: null,
+      error: null,
+      skipped: true,
+      reason: 'no_persistable_assignments',
+    },
+    clipXtraRedemption: {
+      attempted: false,
+      ok: null,
+      error: null,
+      skipped: true,
+      reason: 'clipxtra_not_assigned',
+    },
+  }), {
+    ok: true,
+    severity: 'ok',
+    failedSteps: [],
+    criticalFailures: [],
   });
 });
 
@@ -515,7 +660,7 @@ test('codeClip scan records internal persistence status when COAS persistence fa
     ok: false,
     severity: 'critical',
     failedSteps: ['interaction', 'rewardAssignments'],
-    criticalFailures: ['interaction'],
+    criticalFailures: ['interaction', 'rewardAssignments'],
   });
   assert.deepEqual(eventScanPayload.interaction.persistenceGuaranteePolicy, {
     severity: 'critical',
@@ -1007,6 +1152,190 @@ test('codeClip keyword entry rejects missing keyword without persistence', async
   assert.equal(eventScanWriteAttempted, false);
   assert.equal(interactionPersisted, false);
   assert.equal(rewardAssignmentsPersisted, false);
+});
+
+test('codeClip persistence requires confirmed interaction writes', async () => {
+  const rewardAssignments = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipXtra: { assigned: false },
+  };
+
+  const nullResult = await runScanPersistenceCase({
+    rewardAssignments,
+    saveCodeClipInteraction: async () => null,
+  });
+
+  assert.equal(nullResult.result.httpStatus, 200);
+  assert.equal(nullResult.result.payload.success, true);
+  assert.equal(nullResult.result.payload.internal, undefined);
+  assert.equal(nullResult.result.internal.persistenceDecision.severity, 'critical');
+  assert.deepEqual(nullResult.runtimeInteraction.persistenceStatus.interaction, {
+    attempted: true,
+    ok: false,
+    error: 'interaction persistence did not confirm write',
+  });
+
+  const exceptionResult = await runKeywordPersistenceCase({
+    rewardAssignments,
+    saveCodeClipInteraction: async () => {
+      throw new Error('interaction database unavailable');
+    },
+  });
+
+  assert.equal(exceptionResult.result.internal.persistenceDecision.severity, 'critical');
+  assert.deepEqual(exceptionResult.runtimeInteraction.persistenceStatus.interaction, {
+    attempted: true,
+    ok: false,
+    error: 'interaction database unavailable',
+  });
+});
+
+test('codeClip persistence confirms exact reward assignment writes or records failure', async () => {
+  const rewardAssignments = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clip: { assigned: true, tier: 'clip' },
+    clipXtra: { assigned: false },
+  };
+
+  const missingRows = await runScanPersistenceCase({
+    rewardAssignments,
+    saveCodeClipRewardAssignments: async () => null,
+  });
+  const expectedAssignments =
+    missingRows.runtimeInteraction.rewardAssignmentSnapshot.assignments.filter(
+      (assignment) => assignment?.tier
+    );
+
+  assert.deepEqual(
+    missingRows.runtimeInteraction.rewardAssignmentSnapshot.assignments.map((assignment) => assignment.tier),
+    ['openClip', 'clip', 'clipXtra']
+  );
+  assert.equal(missingRows.result.internal.persistenceDecision.severity, 'critical');
+  assert.deepEqual(missingRows.result.internal.persistenceDecision.criticalFailures, ['rewardAssignments']);
+  assert.equal(missingRows.runtimeInteraction.persistenceStatus.rewardAssignments.ok, false);
+  assert.equal(
+    missingRows.runtimeInteraction.persistenceStatus.rewardAssignments.error,
+    `reward assignment persistence confirmed 0 of ${expectedAssignments.length} writes`
+  );
+
+  const fewerRows = await runScanPersistenceCase({
+    rewardAssignments,
+    saveCodeClipRewardAssignments: async (snapshot) =>
+      snapshot.assignments
+        .filter((assignment) => assignment?.tier)
+        .slice(0, Math.max(0, expectedAssignments.length - 1)),
+  });
+  assert.equal(fewerRows.result.internal.persistenceDecision.severity, 'critical');
+  assert.deepEqual(fewerRows.result.internal.persistenceDecision.criticalFailures, ['rewardAssignments']);
+  assert.equal(
+    fewerRows.runtimeInteraction.persistenceStatus.rewardAssignments.error,
+    `reward assignment persistence confirmed ${expectedAssignments.length - 1} of ${expectedAssignments.length} writes`
+  );
+
+  const exactRows = await runScanPersistenceCase({
+    rewardAssignments,
+    saveCodeClipRewardAssignments: async (snapshot) =>
+      snapshot.assignments.filter((assignment) => assignment?.tier),
+  });
+  assert.equal(exactRows.result.internal.persistenceDecision.severity, 'ok');
+  assert.deepEqual(exactRows.runtimeInteraction.persistenceStatus.rewardAssignments, {
+    attempted: true,
+    ok: true,
+    error: null,
+  });
+});
+
+test('codeClip persistence skips reward assignments when no writes are required', async () => {
+  const rewardAssignments = {};
+
+  const { result, runtimeInteraction, outboxEvents } = await runScanPersistenceCase({
+    rewardAssignments,
+    saveCodeClipRewardAssignments: async () => {
+      throw new Error('reward persistence should not be called');
+    },
+  });
+
+  assert.equal(result.internal.persistenceDecision.severity, 'ok');
+  assert.deepEqual(runtimeInteraction.persistenceStatus.rewardAssignments, {
+    attempted: false,
+    ok: null,
+    error: null,
+    skipped: true,
+    reason: 'no_persistable_assignments',
+  });
+  assert.deepEqual(runtimeInteraction.persistenceStatus.clipXtraRedemption, {
+    attempted: false,
+    ok: null,
+    error: null,
+    skipped: true,
+    reason: 'clipxtra_not_assigned',
+  });
+  assert.deepEqual(outboxEvents, []);
+});
+
+test('codeClip ClipXtra redemption confirmation applies to scan and keyword', async () => {
+  const clipXtraAssignment = {
+    assigned: true,
+    tier: 'clipXtra',
+    rewardType: 'clip_xtra',
+    redemptionToken: 'CX-PERSISTENCE-CONFIRM',
+    partnerName: 'Persistence Partner',
+    title: 'Persistence ClipXtra',
+    redemptionLocation: 'Desk',
+    redemptionDeadline: '2099-12-31',
+    redemptionInstructions: 'Show token',
+    assignedAt: '2026-07-01T00:01:00.000Z',
+  };
+  const assignedRewards = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipXtra: clipXtraAssignment,
+  };
+  const notAssignedRewards = {
+    openClip: { assigned: true, tier: 'openClip' },
+    clipXtra: { assigned: false },
+  };
+
+  for (const [flow, runner] of [
+    ['scan', runScanPersistenceCase],
+    ['keyword', runKeywordPersistenceCase],
+  ]) {
+    const missingRedemption = await runner({
+      rewardAssignments: assignedRewards,
+      saveCodeClipXtraRedemption: async () => null,
+    });
+    assert.equal(
+      missingRedemption.result.internal.persistenceDecision.severity,
+      'critical',
+      `${flow} should be critical without confirmed ClipXtra redemption`
+    );
+    assert.equal(missingRedemption.runtimeInteraction.persistenceStatus.clipXtraRedemption.ok, false);
+
+    const confirmedRedemption = await runner({
+      rewardAssignments: assignedRewards,
+      saveCodeClipXtraRedemption: async (record) => ({ id: 'clipxtra-row', token: record.token }),
+    });
+    assert.equal(confirmedRedemption.result.internal.persistenceDecision.severity, 'ok');
+    assert.deepEqual(confirmedRedemption.runtimeInteraction.persistenceStatus.clipXtraRedemption, {
+      attempted: true,
+      ok: true,
+      error: null,
+    });
+
+    const skippedRedemption = await runner({
+      rewardAssignments: notAssignedRewards,
+      saveCodeClipXtraRedemption: async () => {
+        throw new Error('ClipXtra redemption should not be called');
+      },
+    });
+    assert.equal(skippedRedemption.result.internal.persistenceDecision.severity, 'ok');
+    assert.deepEqual(skippedRedemption.runtimeInteraction.persistenceStatus.clipXtraRedemption, {
+      attempted: false,
+      ok: null,
+      error: null,
+      skipped: true,
+      reason: 'clipxtra_not_assigned',
+    });
+  }
 });
 
 test('codeClip no-match interaction uses unmatched state machine data', () => {
