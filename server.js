@@ -1219,7 +1219,7 @@ if (!meta || !meta.id) {
     eventId = meta.id || campaign.id || eventId;
   }
 }
-	
+
 let rawScans = 0;
 let uniqueScans = 0;
 let innerCircleJoinCount = 0;
@@ -5290,7 +5290,7 @@ if (vertical === "codeperks" && process.env.REDIS_URL && scanId) {
   }
 
   await persistFinalScan(tier, { benefitAssignment });
-	
+
   return res.json({
     success: true,
     eventCode,
@@ -5441,7 +5441,7 @@ if (codePodSouvenirAssignment) {
   responsePayload.exhausted = Boolean(codePodSouvenirAssignment.exhausted);
   responsePayload.noReward = Boolean(codePodSouvenirAssignment.noReward);
 }
-	
+
 if (isCodePodScan && goldXtraAssignment?.assigned) {
     try {
       await saveCodePodGoldXtraRedemption({
@@ -5496,7 +5496,7 @@ await persistFinalScan(
   { digitalSouvenir: codePodSouvenirAssignment },
   codePodRuntimeChain?.interaction || null
 );
-	
+
 return res.json(responsePayload);
   } catch (err) {
     console.error("Scan register failed:", err.message);
