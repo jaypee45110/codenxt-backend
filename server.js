@@ -41,6 +41,7 @@ const {
   saveCodeClipOutboxEvent,
   createCodeClipProviderDelivery,
   updateCodeClipProviderDeliveryState,
+  hasCodeClipProviderDeliveryReplayInvariants,
   claimCodeClipOutboxEvents,
   markCodeClipOutboxEventSucceeded,
   markCodeClipOutboxEventFailed,
@@ -3562,27 +3563,25 @@ function getCodeClipCorePersistenceState(result = {}) {
 }
 
 function getCodeClipDurableProviderReplay(delivery = null) {
-  if (!delivery) return null;
-  if (delivery.corePersistenceState !== "committed") return null;
-  if (delivery.completionState !== "completed") return null;
-  if (delivery.processingState !== "completed") return null;
-  if (delivery.terminalState !== true) return null;
-  if (delivery.retryEligible !== false) return null;
-  if (!delivery.publicResponseJson || typeof delivery.publicResponseJson !== "object") return null;
-
-  const httpStatus = delivery.responseStatus;
-  if (
-    !Number.isInteger(httpStatus) ||
-    httpStatus < 200 ||
-    httpStatus > 299
-  ) {
-    return null;
-  }
+  if (!hasCodeClipProviderDeliveryReplayInvariants(delivery)) return null;
 
   return {
-    httpStatus,
+    httpStatus: delivery.responseStatus,
     payload: delivery.publicResponseJson,
   };
+}
+
+function emitCodeClipProviderDeliverySignal(level, signal = {}) {
+  const log = level === "warn" ? console.warn : console.log;
+  log("codeClip provider delivery signal", {
+    vertical: "codeclip",
+    route: "/codeclip/provider/:provider/keyword",
+    provider: signal.provider,
+    operationalEvent: signal.operationalEvent,
+    eventCode: signal.eventCode,
+    deliveryId: signal.deliveryId || null,
+    reason: signal.reason,
+  });
 }
 
 async function handleCodeClipProviderKeywordRoute(req, res) {
@@ -3809,6 +3808,12 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       });
 
       if (deliveryRecord.status === "failed") {
+        emitCodeClipProviderDeliverySignal("warn", {
+          provider: normalizedProvider,
+          operationalEvent: "delivery_ledger_write_failed",
+          eventCode,
+          reason: "DELIVERY_LEDGER_UNAVAILABLE",
+        });
         console.warn("codeClip provider delivery ledger rejected", {
           provider: normalizedProvider,
           route: "/codeclip/provider/:provider/keyword",
@@ -3817,6 +3822,14 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         return sendCodeClipProviderLedgerFailure(res);
       }
       providerDeliveryRecord = deliveryRecord.row;
+      if (deliveryRecord.status === "created") {
+        emitCodeClipProviderDeliverySignal("info", {
+          provider: normalizedProvider,
+          operationalEvent: "delivery_created",
+          eventCode,
+          deliveryId: providerDeliveryRecord?.id,
+        });
+      }
     }
 
     if (requiresIdempotencyStore && !process.env.REDIS_URL) {
@@ -3883,8 +3896,21 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
             }
           );
           if (!isCodeClipProviderDeliveryUpdateConfirmed(replayUpdate)) {
+            emitCodeClipProviderDeliverySignal("warn", {
+              provider: normalizedProvider,
+              operationalEvent: "delivery_ledger_write_failed",
+              eventCode,
+              deliveryId: providerDeliveryRecord?.id,
+              reason: "REDIS_REPLAY_RECONCILIATION_FAILED",
+            });
             return sendCodeClipProviderLedgerFailure(res);
           }
+          emitCodeClipProviderDeliverySignal("info", {
+            provider: normalizedProvider,
+            operationalEvent: "redis_replay",
+            eventCode,
+            deliveryId: providerDeliveryRecord?.id,
+          });
         }
         return res.status(200).json(storedResponse);
       }
@@ -3903,6 +3929,13 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
               ttlSeconds: providerPolicy.policy.idempotency?.responseTtlSeconds || 86400,
             });
           } catch (cacheRepairError) {
+            emitCodeClipProviderDeliverySignal("warn", {
+              provider: normalizedProvider,
+              operationalEvent: "durable_replay_cache_repair_failed",
+              eventCode,
+              deliveryId: providerDeliveryRecord?.id,
+              reason: "DELIVERY_DURABLE_REPLAY_CACHE_REPAIR_UNAVAILABLE",
+            });
             console.warn("codeClip provider delivery replay cache repair rejected", {
               provider: normalizedProvider,
               route: "/codeclip/provider/:provider/keyword",
@@ -3911,9 +3944,22 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
             return sendCodeClipProviderLedgerFailure(res);
           }
 
+          emitCodeClipProviderDeliverySignal("info", {
+            provider: normalizedProvider,
+            operationalEvent: "postgres_durable_replay",
+            eventCode,
+            deliveryId: providerDeliveryRecord?.id,
+          });
           return res.status(durableReplay.httpStatus).json(durableReplay.payload);
         }
 
+        emitCodeClipProviderDeliverySignal("warn", {
+          provider: normalizedProvider,
+          operationalEvent: "durable_committed_incomplete_rejected",
+          eventCode,
+          deliveryId: providerDeliveryRecord?.id,
+          reason: "DELIVERY_DURABLE_COMMIT_WITHOUT_REPLAY",
+        });
         console.warn("codeClip provider delivery processing rejected", {
           provider: normalizedProvider,
           route: "/codeclip/provider/:provider/keyword",
@@ -3935,6 +3981,13 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       liveProvider &&
       providerDeliveryRecord?.corePersistenceState === "committed"
     ) {
+      emitCodeClipProviderDeliverySignal("warn", {
+        provider: normalizedProvider,
+        operationalEvent: "durable_committed_incomplete_rejected",
+        eventCode,
+        deliveryId: providerDeliveryRecord?.id,
+        reason: "DELIVERY_DURABLE_COMMIT_WITHOUT_REPLAY",
+      });
       console.warn("codeClip provider delivery processing rejected", {
         provider: normalizedProvider,
         route: "/codeclip/provider/:provider/keyword",
@@ -3952,6 +4005,13 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         }
       );
       if (!isCodeClipProviderDeliveryUpdateConfirmed(processingUpdate)) {
+        emitCodeClipProviderDeliverySignal("warn", {
+          provider: normalizedProvider,
+          operationalEvent: "delivery_ledger_write_failed",
+          eventCode,
+          deliveryId: providerDeliveryRecord?.id,
+          reason: "PROCESSING_UPDATE_FAILED",
+        });
         return sendCodeClipProviderLedgerFailure(res);
       }
     }
@@ -3990,6 +4050,13 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         }
       );
       if (!isCodeClipProviderDeliveryUpdateConfirmed(failureUpdate)) {
+        emitCodeClipProviderDeliverySignal("warn", {
+          provider: normalizedProvider,
+          operationalEvent: "delivery_ledger_write_failed",
+          eventCode,
+          deliveryId: providerDeliveryRecord?.id,
+          reason: "CRITICAL_FAILURE_UPDATE_FAILED",
+        });
         return sendCodeClipProviderLedgerFailure(res);
       }
       return sendCodeClipProviderLedgerFailure(res);
@@ -4009,6 +4076,13 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         }
       );
       if (!isCodeClipProviderDeliveryUpdateConfirmed(unconfirmedUpdate)) {
+        emitCodeClipProviderDeliverySignal("warn", {
+          provider: normalizedProvider,
+          operationalEvent: "delivery_ledger_write_failed",
+          eventCode,
+          deliveryId: providerDeliveryRecord?.id,
+          reason: "UNCONFIRMED_PERSISTENCE_UPDATE_FAILED",
+        });
         return sendCodeClipProviderLedgerFailure(res);
       }
       return sendCodeClipProviderLedgerFailure(res);
@@ -4023,6 +4097,13 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         }
       );
       if (!isCodeClipProviderDeliveryUpdateConfirmed(committedUpdate)) {
+        emitCodeClipProviderDeliverySignal("warn", {
+          provider: normalizedProvider,
+          operationalEvent: "delivery_ledger_write_failed",
+          eventCode,
+          deliveryId: providerDeliveryRecord?.id,
+          reason: "COMMITTED_UPDATE_FAILED",
+        });
         return sendCodeClipProviderLedgerFailure(res);
       }
     }
@@ -4050,8 +4131,21 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         }
       );
       if (!isCodeClipProviderDeliveryUpdateConfirmed(completionUpdate)) {
+        emitCodeClipProviderDeliverySignal("warn", {
+          provider: normalizedProvider,
+          operationalEvent: "delivery_ledger_write_failed",
+          eventCode,
+          deliveryId: providerDeliveryRecord?.id,
+          reason: "COMPLETION_UPDATE_FAILED",
+        });
         return sendCodeClipProviderLedgerFailure(res);
       }
+      emitCodeClipProviderDeliverySignal("info", {
+        provider: normalizedProvider,
+        operationalEvent: "delivery_completed",
+        eventCode,
+        deliveryId: providerDeliveryRecord?.id,
+      });
     }
 
     return res.status(result.httpStatus).json(result.payload);

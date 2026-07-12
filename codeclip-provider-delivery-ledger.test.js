@@ -6,6 +6,9 @@ const {
   createCodeClipProviderDelivery,
   getCodeClipProviderDeliveryByIdentity,
   updateCodeClipProviderDeliveryState,
+  hasCodeClipProviderDeliveryReplayInvariants,
+  classifyCodeClipProviderDeliveryOperationalState,
+  getCodeClipProviderDeliveryOperationalSummary,
 } = require('./db');
 
 function createDeliveryRow(overrides = {}) {
@@ -19,10 +22,16 @@ function createDeliveryRow(overrides = {}) {
     idempotency_key: overrides.idempotency_key ?? 'redis-key-1',
     payload_fingerprint: overrides.payload_fingerprint ?? 'fingerprint-1',
     verification_state: overrides.verification_state || 'verified',
-    processing_state: overrides.processing_state || 'processing',
+    processing_state: Object.hasOwn(overrides, 'processing_state')
+      ? overrides.processing_state
+      : 'processing',
     attempt_count: overrides.attempt_count || 1,
-    core_persistence_state: overrides.core_persistence_state || 'not_started',
-    completion_state: overrides.completion_state || 'not_completed',
+    core_persistence_state: Object.hasOwn(overrides, 'core_persistence_state')
+      ? overrides.core_persistence_state
+      : 'not_started',
+    completion_state: Object.hasOwn(overrides, 'completion_state')
+      ? overrides.completion_state
+      : 'not_completed',
     response_status: overrides.response_status ?? null,
     public_response_json: overrides.public_response_json ?? null,
     error_class: overrides.error_class ?? null,
@@ -49,6 +58,22 @@ function createStatefulDeliveryClient({ throwOn = null } = {}) {
     const [provider, providerAccountId, eventCode, externalMessageId] = params;
     const key = [provider, providerAccountId, eventCode, externalMessageId].join('|');
     return rows.find((row) => deliveryKey(row) === key) || null;
+  }
+
+  function earlierTimestamp(current, candidate) {
+    if (!candidate) return current || null;
+    if (!current) return candidate;
+    return new Date(candidate).getTime() < new Date(current).getTime()
+      ? candidate
+      : current;
+  }
+
+  function laterTimestamp(current, candidate) {
+    if (!candidate) return current || null;
+    if (!current) return candidate;
+    return new Date(candidate).getTime() > new Date(current).getTime()
+      ? candidate
+      : current;
   }
 
   return {
@@ -100,6 +125,49 @@ function createStatefulDeliveryClient({ throwOn = null } = {}) {
         });
         row.updated_at = 'updated-by-helper';
         return { rows: [row] };
+      }
+
+      if (/COUNT\(\*\) AS total/.test(sql)) {
+        const summary = {
+          total: rows.length,
+          completed: 0,
+          committed_incomplete: 0,
+          processing: 0,
+          failed_precommit: 0,
+          unknown: 0,
+          oldest_committed_incomplete_at: null,
+          oldest_processing_at: null,
+          latest_completed_at: null,
+        };
+
+        for (const row of rows) {
+          const state = classifyCodeClipProviderDeliveryOperationalState(row);
+          if (state === 'completed') {
+            summary.completed += 1;
+            summary.latest_completed_at = laterTimestamp(
+              summary.latest_completed_at,
+              row.completed_at || row.updated_at || row.created_at
+            );
+          } else if (state === 'committed_incomplete') {
+            summary.committed_incomplete += 1;
+            summary.oldest_committed_incomplete_at = earlierTimestamp(
+              summary.oldest_committed_incomplete_at,
+              row.updated_at || row.last_attempt_at || row.created_at
+            );
+          } else if (state === 'processing') {
+            summary.processing += 1;
+            summary.oldest_processing_at = earlierTimestamp(
+              summary.oldest_processing_at,
+              row.last_attempt_at || row.received_at || row.created_at
+            );
+          } else if (state === 'failed_precommit') {
+            summary.failed_precommit += 1;
+          } else {
+            summary.unknown += 1;
+          }
+        }
+
+        return { rows: [summary] };
       }
 
       return { rows: [] };
@@ -309,4 +377,211 @@ test('codeClip provider delivery state update supports unchanged lookup and data
   assert.equal(unchanged.row.providerAccountId, 'page-unchanged');
   assert.equal(failing.status, 'failed');
   assert.match(failing.error.message, /forced UPDATE/);
+});
+
+test('codeClip provider delivery replay invariant rejects array public response payloads', () => {
+  const completed = createDeliveryRow({
+    core_persistence_state: 'committed',
+    completion_state: 'completed',
+    processing_state: 'completed',
+    terminal_state: true,
+    retry_eligible: false,
+    response_status: 200,
+    public_response_json: { ok: true },
+  });
+  const arrayPayload = createDeliveryRow({
+    core_persistence_state: 'committed',
+    completion_state: 'completed',
+    processing_state: 'completed',
+    terminal_state: true,
+    retry_eligible: false,
+    response_status: 200,
+    public_response_json: [],
+  });
+
+  assert.equal(hasCodeClipProviderDeliveryReplayInvariants(completed), true);
+  assert.equal(classifyCodeClipProviderDeliveryOperationalState(completed), 'completed');
+  assert.equal(hasCodeClipProviderDeliveryReplayInvariants(arrayPayload), false);
+  assert.equal(
+    classifyCodeClipProviderDeliveryOperationalState(arrayPayload),
+    'committed_incomplete'
+  );
+});
+
+test('codeClip provider delivery operational summary aggregates ledger states read-only', async () => {
+  const client = createStatefulDeliveryClient();
+  client.rows.push(
+    createDeliveryRow({
+      id: 1,
+      external_message_id: 'completed-old',
+      core_persistence_state: 'committed',
+      completion_state: 'completed',
+      processing_state: 'completed',
+      terminal_state: true,
+      retry_eligible: false,
+      response_status: 200,
+      public_response_json: { ok: true, old: true },
+      completed_at: '2026-07-11T05:00:00.000Z',
+      updated_at: '2026-07-11T05:00:00.000Z',
+    }),
+    createDeliveryRow({
+      id: 2,
+      external_message_id: 'committed-late',
+      core_persistence_state: 'committed',
+      completion_state: 'not_completed',
+      processing_state: 'completed',
+      terminal_state: false,
+      retry_eligible: true,
+      public_response_json: { ok: true },
+      updated_at: '2026-07-11T04:00:00.000Z',
+    }),
+    createDeliveryRow({
+      id: 3,
+      external_message_id: 'processing-late',
+      core_persistence_state: 'processing',
+      processing_state: 'processing',
+      last_attempt_at: '2026-07-11T03:00:00.000Z',
+    }),
+    createDeliveryRow({
+      id: 4,
+      external_message_id: 'failed',
+      core_persistence_state: 'failed',
+      processing_state: 'failed',
+      completion_state: 'not_completed',
+    }),
+    createDeliveryRow({
+      id: 5,
+      external_message_id: 'unknown-null',
+      core_persistence_state: null,
+      processing_state: null,
+      completion_state: null,
+    }),
+    createDeliveryRow({
+      id: 6,
+      external_message_id: 'completed-new',
+      core_persistence_state: 'committed',
+      completion_state: 'completed',
+      processing_state: 'completed',
+      terminal_state: true,
+      retry_eligible: false,
+      response_status: 202,
+      public_response_json: { accepted: true },
+      completed_at: '2026-07-11T09:00:00.000Z',
+      updated_at: '2026-07-11T09:00:00.000Z',
+    }),
+    createDeliveryRow({
+      id: 7,
+      external_message_id: 'committed-earlier',
+      core_persistence_state: 'committed',
+      completion_state: 'completed',
+      processing_state: 'completed',
+      terminal_state: true,
+      retry_eligible: false,
+      response_status: 200,
+      public_response_json: [],
+      updated_at: '2026-07-11T01:00:00.000Z',
+    }),
+    createDeliveryRow({
+      id: 8,
+      external_message_id: 'processing-earlier',
+      core_persistence_state: 'not_started',
+      processing_state: 'processing',
+      last_attempt_at: '2026-07-11T00:30:00.000Z',
+    })
+  );
+
+  const beforeRows = JSON.stringify(client.rows);
+  const summary = await getCodeClipProviderDeliveryOperationalSummary(client);
+  const aggregateCall = client.calls.find((call) => /COUNT\(\*\) AS total/.test(call.sql));
+
+  assert.equal(summary.total, 8);
+  assert.equal(summary.completed, 2);
+  assert.equal(summary.committedIncomplete, 2);
+  assert.equal(summary.processing, 2);
+  assert.equal(summary.failedPrecommit, 1);
+  assert.equal(summary.unknown, 1);
+  assert.equal(
+    summary.total,
+    summary.completed +
+      summary.committedIncomplete +
+      summary.processing +
+      summary.failedPrecommit +
+      summary.unknown
+  );
+  assert.equal(summary.oldestCommittedIncompleteAt, '2026-07-11T01:00:00.000Z');
+  assert.equal(summary.oldestProcessingAt, '2026-07-11T00:30:00.000Z');
+  assert.equal(summary.latestCompletedAt, '2026-07-11T09:00:00.000Z');
+  assert.equal(summary.attentionRequired, true);
+  assert.deepEqual(summary.attentionReasons, ['committed_incomplete']);
+  assert.equal(JSON.stringify(client.rows), beforeRows);
+
+  assert.ok(aggregateCall);
+  assert.match(aggregateCall.sql, /COUNT\(\*\) FILTER/);
+  assert.match(aggregateCall.sql, /IS DISTINCT FROM/);
+  assert.match(aggregateCall.sql, /jsonb_typeof\(public_response_json\) = 'object'/);
+  assert.match(aggregateCall.sql, /MIN\(/);
+  assert.match(aggregateCall.sql, /MAX\(/);
+  assert.doesNotMatch(aggregateCall.sql, /SELECT\s+\*/i);
+});
+
+test('codeClip provider delivery operational summary normalizes aggregate count strings', async () => {
+  const client = {
+    calls: [],
+    async query(sql) {
+      this.calls.push({ sql });
+      return {
+        rows: [
+          {
+            total: '5',
+            completed: '1',
+            committed_incomplete: '1',
+            processing: '1',
+            failed_precommit: '1',
+            unknown: '1',
+            oldest_committed_incomplete_at: null,
+            oldest_processing_at: null,
+            latest_completed_at: null,
+          },
+        ],
+      };
+    },
+  };
+
+  const summary = await getCodeClipProviderDeliveryOperationalSummary(client);
+
+  for (const key of [
+    'total',
+    'completed',
+    'committedIncomplete',
+    'processing',
+    'failedPrecommit',
+    'unknown',
+  ]) {
+    assert.equal(typeof summary[key], 'number');
+  }
+  assert.equal(summary.total, 5);
+  assert.equal(summary.completed, 1);
+  assert.equal(summary.committedIncomplete, 1);
+  assert.equal(summary.processing, 1);
+  assert.equal(summary.failedPrecommit, 1);
+  assert.equal(summary.unknown, 1);
+});
+
+test('codeClip provider delivery operational summary returns zero counts for empty ledger', async () => {
+  const client = createStatefulDeliveryClient();
+  const summary = await getCodeClipProviderDeliveryOperationalSummary(client);
+
+  assert.deepEqual(summary, {
+    total: 0,
+    completed: 0,
+    committedIncomplete: 0,
+    processing: 0,
+    failedPrecommit: 0,
+    unknown: 0,
+    oldestCommittedIncompleteAt: null,
+    oldestProcessingAt: null,
+    latestCompletedAt: null,
+    attentionRequired: false,
+    attentionReasons: [],
+  });
 });

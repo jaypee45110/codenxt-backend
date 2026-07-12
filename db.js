@@ -1108,6 +1108,138 @@ function mapCodeClipProviderDeliveryRow(row = null) {
   };
 }
 
+function hasCodeClipProviderDeliveryReplayInvariants(delivery = null) {
+  if (!delivery) return false;
+
+  const publicResponseJson =
+    delivery.publicResponseJson !== undefined
+      ? delivery.publicResponseJson
+      : delivery.public_response_json;
+  const responseStatus =
+    delivery.responseStatus !== undefined
+      ? delivery.responseStatus
+      : delivery.response_status;
+
+  if ((delivery.corePersistenceState || delivery.core_persistence_state) !== 'committed') return false;
+  if ((delivery.completionState || delivery.completion_state) !== 'completed') return false;
+  if ((delivery.processingState || delivery.processing_state) !== 'completed') return false;
+  if ((delivery.terminalState ?? delivery.terminal_state) !== true) return false;
+  if ((delivery.retryEligible ?? delivery.retry_eligible) !== false) return false;
+  if (
+    !publicResponseJson ||
+    typeof publicResponseJson !== 'object' ||
+    Array.isArray(publicResponseJson)
+  ) {
+    return false;
+  }
+  if (!Number.isInteger(responseStatus)) return false;
+  return responseStatus >= 200 && responseStatus <= 299;
+}
+
+function classifyCodeClipProviderDeliveryOperationalState(delivery = null) {
+  if (!delivery) return 'unknown';
+  if (hasCodeClipProviderDeliveryReplayInvariants(delivery)) return 'completed';
+
+  const corePersistenceState = delivery.corePersistenceState || delivery.core_persistence_state;
+  const processingState = delivery.processingState || delivery.processing_state;
+  const completionState = delivery.completionState || delivery.completion_state;
+
+  if (corePersistenceState === 'committed') return 'committed_incomplete';
+  if (processingState === 'processing' && corePersistenceState !== 'committed') return 'processing';
+  if (
+    processingState === 'failed' &&
+    corePersistenceState !== 'committed' &&
+    completionState !== 'completed'
+  ) {
+    return 'failed_precommit';
+  }
+  return 'unknown';
+}
+
+function normalizeCodeClipProviderDeliveryOperationalCount(value) {
+  const normalized = typeof value === 'number' ? value : Number(value);
+  return Number.isInteger(normalized) && normalized >= 0 ? normalized : 0;
+}
+
+function normalizeCodeClipProviderDeliveryOperationalSummaryRow(row = {}) {
+  const summary = {
+    total: normalizeCodeClipProviderDeliveryOperationalCount(row.total),
+    completed: normalizeCodeClipProviderDeliveryOperationalCount(row.completed),
+    committedIncomplete: normalizeCodeClipProviderDeliveryOperationalCount(row.committed_incomplete),
+    processing: normalizeCodeClipProviderDeliveryOperationalCount(row.processing),
+    failedPrecommit: normalizeCodeClipProviderDeliveryOperationalCount(row.failed_precommit),
+    unknown: normalizeCodeClipProviderDeliveryOperationalCount(row.unknown),
+    oldestCommittedIncompleteAt: row.oldest_committed_incomplete_at || null,
+    oldestProcessingAt: row.oldest_processing_at || null,
+    latestCompletedAt: row.latest_completed_at || null,
+    attentionRequired: false,
+    attentionReasons: [],
+  };
+
+  if (summary.committedIncomplete > 0) {
+    summary.attentionRequired = true;
+    summary.attentionReasons.push('committed_incomplete');
+  }
+
+  return summary;
+}
+
+async function getCodeClipProviderDeliveryOperationalSummary(queryClient = pool) {
+  if (!queryClient) return normalizeCodeClipProviderDeliveryOperationalSummaryRow();
+
+  if (queryClient === pool) {
+    await ensureCodeClipProviderDeliveriesTable(queryClient);
+  }
+
+  const completedPredicate = `
+    core_persistence_state = 'committed'
+    AND completion_state = 'completed'
+    AND processing_state = 'completed'
+    AND terminal_state IS TRUE
+    AND retry_eligible IS FALSE
+    AND public_response_json IS NOT NULL
+    AND jsonb_typeof(public_response_json) = 'object'
+    AND response_status BETWEEN 200 AND 299
+  `;
+  const committedIncompletePredicate = `
+    core_persistence_state = 'committed'
+    AND NOT COALESCE((${completedPredicate}), FALSE)
+  `;
+  const processingPredicate = `
+    processing_state = 'processing'
+    AND core_persistence_state IS DISTINCT FROM 'committed'
+  `;
+  const failedPrecommitPredicate = `
+    processing_state = 'failed'
+    AND core_persistence_state IS DISTINCT FROM 'committed'
+    AND completion_state IS DISTINCT FROM 'completed'
+  `;
+
+  const result = await queryClient.query(`
+    SELECT
+      COUNT(*) AS total,
+      COUNT(*) FILTER (WHERE ${completedPredicate}) AS completed,
+      COUNT(*) FILTER (WHERE ${committedIncompletePredicate}) AS committed_incomplete,
+      COUNT(*) FILTER (WHERE ${processingPredicate}) AS processing,
+      COUNT(*) FILTER (WHERE ${failedPrecommitPredicate}) AS failed_precommit,
+      COUNT(*) FILTER (
+        WHERE NOT COALESCE((${completedPredicate}), FALSE)
+          AND NOT COALESCE((${committedIncompletePredicate}), FALSE)
+          AND NOT COALESCE((${processingPredicate}), FALSE)
+          AND NOT COALESCE((${failedPrecommitPredicate}), FALSE)
+      ) AS unknown,
+      MIN(COALESCE(updated_at, last_attempt_at, created_at))
+        FILTER (WHERE ${committedIncompletePredicate}) AS oldest_committed_incomplete_at,
+      MIN(COALESCE(last_attempt_at, received_at, created_at))
+        FILTER (WHERE ${processingPredicate}) AS oldest_processing_at,
+      MAX(COALESCE(completed_at, updated_at, created_at))
+        FILTER (WHERE ${completedPredicate}) AS latest_completed_at
+    FROM codeclip_provider_deliveries
+  `);
+
+  return normalizeCodeClipProviderDeliveryOperationalSummaryRow(result.rows?.[0] || {});
+}
+
 async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
   if (!queryClient) return;
 
@@ -2599,6 +2731,9 @@ module.exports = {
   createCodeClipProviderDelivery,
   getCodeClipProviderDeliveryByIdentity,
   updateCodeClipProviderDeliveryState,
+  hasCodeClipProviderDeliveryReplayInvariants,
+  classifyCodeClipProviderDeliveryOperationalState,
+  getCodeClipProviderDeliveryOperationalSummary,
   ensureCodeClipXtraRedemptionsTable,
   saveCodeClipXtraRedemption,
   ensureCodeClipInteractionsTable,
