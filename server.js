@@ -3561,6 +3561,30 @@ function getCodeClipCorePersistenceState(result = {}) {
     : "unknown";
 }
 
+function getCodeClipDurableProviderReplay(delivery = null) {
+  if (!delivery) return null;
+  if (delivery.corePersistenceState !== "committed") return null;
+  if (delivery.completionState !== "completed") return null;
+  if (delivery.processingState !== "completed") return null;
+  if (delivery.terminalState !== true) return null;
+  if (delivery.retryEligible !== false) return null;
+  if (!delivery.publicResponseJson || typeof delivery.publicResponseJson !== "object") return null;
+
+  const httpStatus = delivery.responseStatus;
+  if (
+    !Number.isInteger(httpStatus) ||
+    httpStatus < 200 ||
+    httpStatus > 299
+  ) {
+    return null;
+  }
+
+  return {
+    httpStatus,
+    payload: delivery.publicResponseJson,
+  };
+}
+
 async function handleCodeClipProviderKeywordRoute(req, res) {
   try {
     const expectedToken = process.env.CODECLIP_PROVIDER_WEBHOOK_TOKEN || "";
@@ -3869,6 +3893,27 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         liveProvider &&
         providerDeliveryRecord?.corePersistenceState === "committed"
       ) {
+        const durableReplay = getCodeClipDurableProviderReplay(providerDeliveryRecord);
+        if (durableReplay) {
+          try {
+            await recordProviderKeywordResponse({
+              redis,
+              key: idempotencyKey,
+              payload: durableReplay.payload,
+              ttlSeconds: providerPolicy.policy.idempotency?.responseTtlSeconds || 86400,
+            });
+          } catch (cacheRepairError) {
+            console.warn("codeClip provider delivery replay cache repair rejected", {
+              provider: normalizedProvider,
+              route: "/codeclip/provider/:provider/keyword",
+              reason: "DELIVERY_DURABLE_REPLAY_CACHE_REPAIR_UNAVAILABLE",
+            });
+            return sendCodeClipProviderLedgerFailure(res);
+          }
+
+          return res.status(durableReplay.httpStatus).json(durableReplay.payload);
+        }
+
         console.warn("codeClip provider delivery processing rejected", {
           provider: normalizedProvider,
           route: "/codeclip/provider/:provider/keyword",

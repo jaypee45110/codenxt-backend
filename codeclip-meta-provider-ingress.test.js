@@ -392,16 +392,20 @@ test("completed duplicate Meta delivery reuses stored public response", async ()
       accountId,
       text: keyword,
     });
+    let runtimeCalls = 0;
 
-    await withPatchedKeywordRuntime(async (input) => ({
-      httpStatus: 200,
-      payload: {
-        success: true,
-        eventCode: input.eventCode,
-        messageId: input.messageId,
-      },
-      internal: committedPersistenceInternal(),
-    }), async () => {
+    await withPatchedKeywordRuntime(async (input) => {
+      runtimeCalls += 1;
+      return {
+        httpStatus: 200,
+        payload: {
+          success: true,
+          eventCode: input.eventCode,
+          messageId: input.messageId,
+        },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
       const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
         method: "POST",
         headers: metaHeaders(rawBody),
@@ -418,6 +422,7 @@ test("completed duplicate Meta delivery reuses stored public response", async ()
       assert.equal(first.status, 200);
       assert.equal(second.status, 200);
       assert.deepEqual(secondPayload, firstPayload);
+      assert.equal(runtimeCalls, 1);
       assertNoProviderInternals(secondPayload);
       assert.equal(
         providerDeliveryCalls.filter((call) => call.method === "create").length,
@@ -431,6 +436,60 @@ test("completed duplicate Meta delivery reuses stored public response", async ()
             call.updates.publicResponseJson
         )
       );
+    });
+  });
+});
+
+test("Redis replay has priority when durable PostgreSQL replay also exists", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-redis-priority-${Date.now()}`;
+    const keyword = `REDISPRIORITY-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const messageId = `meta-redis-priority-${Date.now()}`;
+    const rawBody = metaBody({ messageId, accountId, text: keyword });
+    let runtimeCalls = 0;
+
+    await withPatchedKeywordRuntime(async (input) => {
+      runtimeCalls += 1;
+      return {
+        httpStatus: 200,
+        payload: {
+          success: true,
+          eventCode: input.eventCode,
+          messageId: input.messageId,
+        },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const firstPayload = await first.json();
+      assert.equal(first.status, 200);
+
+      const delivery = providerDeliveries.get(providerDeliveryKey({
+        provider: "meta",
+        providerAccountId: accountId,
+        eventCode: code,
+        externalMessageId: messageId,
+      }));
+      assert.ok(delivery);
+      delivery.publicResponseJson = { shouldNotReplay: true };
+      delivery.responseStatus = 202;
+
+      const second = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const secondPayload = await second.json();
+
+      assert.equal(second.status, 200);
+      assert.deepEqual(secondPayload, firstPayload);
+      assert.equal(runtimeCalls, 1);
+      assertNoProviderInternals(secondPayload);
     });
   });
 });
@@ -487,12 +546,90 @@ test("Redis replay without durable committed core state fails closed", async () 
   });
 });
 
-test("durable committed delivery without Redis replay blocks duplicate runtime", async () => {
+test("durable completed delivery without Redis replay returns PostgreSQL replay and repairs cache", async () => {
   await withTestServer(async (baseUrl) => {
-    const accountId = `page-commit-no-replay-${Date.now()}`;
-    const keyword = `COMMITNOREPLAY-${Date.now()}`;
+    const accountId = `page-completed-no-replay-${Date.now()}`;
+    const keyword = `COMPLETEDREPLAY-${Date.now()}`;
     const code = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
-    const messageId = `meta-commit-no-replay-${Date.now()}`;
+    const messageId = `meta-completed-no-replay-${Date.now()}`;
+    const rawBody = metaBody({ messageId, accountId, text: keyword });
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider: "meta",
+      eventCode: code,
+      messageId,
+    });
+    const originalPostLimit = process.env.CODECLIP_META_PROVIDER_POST_RATE_LIMIT;
+    let runtimeCalls = 0;
+
+    process.env.CODECLIP_META_PROVIDER_POST_RATE_LIMIT = "3";
+    try {
+      await withPatchedKeywordRuntime(async (input) => {
+        runtimeCalls += 1;
+        return {
+          httpStatus: 200,
+          payload: {
+            success: true,
+            eventCode: input.eventCode,
+            messageId: input.messageId,
+          },
+          internal: committedPersistenceInternal(),
+        };
+      }, async () => {
+        const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+          method: "POST",
+          headers: metaHeaders(rawBody),
+          body: rawBody,
+        });
+        const firstPayload = await first.json();
+        assert.equal(first.status, 200);
+        assert.equal(runtimeCalls, 1);
+
+        await redis.del(getProviderKeywordResponseKey(idempotencyKey));
+        assert.equal(await redis.get(getProviderKeywordResponseKey(idempotencyKey)), null);
+
+        const second = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+          method: "POST",
+          headers: metaHeaders(rawBody),
+          body: rawBody,
+        });
+        const secondPayload = await second.json();
+
+        assert.equal(second.status, 200);
+        assert.deepEqual(secondPayload, firstPayload);
+        assert.equal(runtimeCalls, 1);
+        assertNoProviderInternals(secondPayload);
+        assert.deepEqual(
+          JSON.parse(await redis.get(getProviderKeywordResponseKey(idempotencyKey))),
+          firstPayload
+        );
+
+        const third = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+          method: "POST",
+          headers: metaHeaders(rawBody),
+          body: rawBody,
+        });
+        const thirdPayload = await third.json();
+
+        assert.equal(third.status, 200);
+        assert.deepEqual(thirdPayload, firstPayload);
+        assert.equal(runtimeCalls, 1);
+      });
+    } finally {
+      if (originalPostLimit === undefined) {
+        delete process.env.CODECLIP_META_PROVIDER_POST_RATE_LIMIT;
+      } else {
+        process.env.CODECLIP_META_PROVIDER_POST_RATE_LIMIT = originalPostLimit;
+      }
+    }
+  });
+});
+
+test("durable committed but incomplete delivery without Redis replay fails closed", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-commit-not-completed-${Date.now()}`;
+    const keyword = `NOTCOMPLETED-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const messageId = `meta-commit-not-completed-${Date.now()}`;
     const rawBody = metaBody({ messageId, accountId, text: keyword });
     const idempotencyKey = buildProviderKeywordIdempotencyKey({
       provider: "meta",
@@ -519,8 +656,16 @@ test("durable committed delivery without Redis replay blocks duplicate runtime",
         body: rawBody,
       });
       assert.equal(first.status, 200);
-      assert.equal(runtimeCalls, 1);
 
+      const delivery = providerDeliveries.get(providerDeliveryKey({
+        provider: "meta",
+        providerAccountId: accountId,
+        eventCode: code,
+        externalMessageId: messageId,
+      }));
+      assert.ok(delivery);
+      delivery.completionState = "not_completed";
+      delivery.terminalState = false;
       await redis.del(getProviderKeywordResponseKey(idempotencyKey));
 
       const second = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
@@ -535,6 +680,179 @@ test("durable committed delivery without Redis replay blocks duplicate runtime",
         ok: false,
         error: "Provider keyword processing unavailable",
       });
+      assert.equal(runtimeCalls, 1);
+      assertNoProviderInternals(secondPayload);
+    });
+  });
+});
+
+test("durable completed delivery without public response fails closed", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-completed-no-payload-${Date.now()}`;
+    const keyword = `NOPAYLOAD-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const messageId = `meta-completed-no-payload-${Date.now()}`;
+    const rawBody = metaBody({ messageId, accountId, text: keyword });
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider: "meta",
+      eventCode: code,
+      messageId,
+    });
+    let runtimeCalls = 0;
+
+    await withPatchedKeywordRuntime(async (input) => {
+      runtimeCalls += 1;
+      return {
+        httpStatus: 200,
+        payload: {
+          success: true,
+          eventCode: input.eventCode,
+          messageId: input.messageId,
+        },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      assert.equal(first.status, 200);
+
+      const delivery = providerDeliveries.get(providerDeliveryKey({
+        provider: "meta",
+        providerAccountId: accountId,
+        eventCode: code,
+        externalMessageId: messageId,
+      }));
+      assert.ok(delivery);
+      delivery.publicResponseJson = null;
+      await redis.del(getProviderKeywordResponseKey(idempotencyKey));
+
+      const second = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const secondPayload = await second.json();
+
+      assert.equal(second.status, 503);
+      assert.deepEqual(secondPayload, {
+        ok: false,
+        error: "Provider keyword processing unavailable",
+      });
+      assert.equal(runtimeCalls, 1);
+      assertNoProviderInternals(secondPayload);
+    });
+  });
+});
+
+test("durable completed delivery with invalid response status fails closed", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-completed-bad-status-${Date.now()}`;
+    const keyword = `BADSTATUS-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const messageId = `meta-completed-bad-status-${Date.now()}`;
+    const rawBody = metaBody({ messageId, accountId, text: keyword });
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider: "meta",
+      eventCode: code,
+      messageId,
+    });
+    let runtimeCalls = 0;
+
+    await withPatchedKeywordRuntime(async (input) => {
+      runtimeCalls += 1;
+      return {
+        httpStatus: 200,
+        payload: {
+          success: true,
+          eventCode: input.eventCode,
+          messageId: input.messageId,
+        },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      assert.equal(first.status, 200);
+
+      const delivery = providerDeliveries.get(providerDeliveryKey({
+        provider: "meta",
+        providerAccountId: accountId,
+        eventCode: code,
+        externalMessageId: messageId,
+      }));
+      assert.ok(delivery);
+      delivery.responseStatus = "200";
+      await redis.del(getProviderKeywordResponseKey(idempotencyKey));
+
+      const second = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const secondPayload = await second.json();
+
+      assert.equal(second.status, 503);
+      assert.deepEqual(secondPayload, {
+        ok: false,
+        error: "Provider keyword processing unavailable",
+      });
+      assert.equal(runtimeCalls, 1);
+      assertNoProviderInternals(secondPayload);
+    });
+  });
+});
+
+test("durable completed delivery replays stored non-200 2xx status", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-completed-202-${Date.now()}`;
+    const keyword = `REPLAY202-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const messageId = `meta-completed-202-${Date.now()}`;
+    const rawBody = metaBody({ messageId, accountId, text: keyword });
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider: "meta",
+      eventCode: code,
+      messageId,
+    });
+    let runtimeCalls = 0;
+
+    await withPatchedKeywordRuntime(async (input) => {
+      runtimeCalls += 1;
+      return {
+        httpStatus: 202,
+        payload: {
+          accepted: true,
+          eventCode: input.eventCode,
+          messageId: input.messageId,
+        },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const firstPayload = await first.json();
+      assert.equal(first.status, 202);
+
+      await redis.del(getProviderKeywordResponseKey(idempotencyKey));
+
+      const second = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const secondPayload = await second.json();
+
+      assert.equal(second.status, 202);
+      assert.deepEqual(secondPayload, firstPayload);
       assert.equal(runtimeCalls, 1);
       assertNoProviderInternals(secondPayload);
     });
