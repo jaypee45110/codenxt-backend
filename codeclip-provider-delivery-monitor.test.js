@@ -1,0 +1,986 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const path = require("node:path");
+
+const monitorPath =
+  process.env.CODECLIP_MONITOR_MODULE_PATH ||
+  path.resolve(
+    "/Users/jan/event-platform/codenxt-backend",
+    "scripts/codeclip-provider-delivery-monitor.js"
+  );
+
+const {
+  DEFAULTS,
+  loadConfig,
+  validateOperatorSummary,
+  pollOperatorSummary,
+  classifySummary,
+  createAlertMessage,
+  sendWebhookAlert,
+  createMonitorState,
+  processMeasurement,
+  createCodeClipProviderDeliveryMonitor,
+} = require(monitorPath);
+
+const SAFE_ADMIN_KEY = "test-admin-key-not-secret";
+const SAFE_SUMMARY_URL = "https://monitor.example.test/summary";
+const SAFE_WEBHOOK_URL = "https://alerts.example.test/hook";
+
+function validEnv(overrides = {}) {
+  return {
+    CODECLIP_OPERATOR_SUMMARY_URL: SAFE_SUMMARY_URL,
+    CODECLIP_ADMIN_KEY: SAFE_ADMIN_KEY,
+    CODECLIP_MONITOR_ALERT_WEBHOOK_URL: SAFE_WEBHOOK_URL,
+    CODECLIP_MONITOR_ALERT_WEBHOOK_KIND: "slack",
+    ...overrides,
+  };
+}
+
+function validSummary(overrides = {}) {
+  return {
+    total: 0,
+    completed: 0,
+    committedIncomplete: 0,
+    processing: 0,
+    failedPrecommit: 0,
+    unknown: 0,
+    oldestCommittedIncompleteAt: null,
+    oldestProcessingAt: null,
+    latestCompletedAt: null,
+    attentionRequired: false,
+    attentionReasons: [],
+    ...overrides,
+  };
+}
+
+function validBody(summaryOverrides = {}, bodyOverrides = {}) {
+  return {
+    ok: true,
+    vertical: "codeclip",
+    generatedAt: "2026-07-12T12:00:00.000Z",
+    providerDeliveries: validSummary(summaryOverrides),
+    ...bodyOverrides,
+  };
+}
+
+function createJsonResponse(status, body) {
+  return {
+    status,
+    async json() {
+      return body;
+    },
+  };
+}
+
+function createInvalidJsonResponse(status = 200) {
+  return {
+    status,
+    async json() {
+      throw new SyntaxError("invalid json");
+    },
+  };
+}
+
+function createLogger() {
+  const lines = {
+    log: [],
+    warn: [],
+    error: [],
+  };
+
+  return {
+    lines,
+    logger: {
+      log(line) {
+        lines.log.push(String(line));
+      },
+      warn(line) {
+        lines.warn.push(String(line));
+      },
+      error(line) {
+        lines.error.push(String(line));
+      },
+    },
+    text() {
+      return [...lines.log, ...lines.warn, ...lines.error].join("\n");
+    },
+  };
+}
+
+function createClock(start = "2026-07-12T12:00:00.000Z") {
+  let current = new Date(start);
+  return {
+    now() {
+      return new Date(current.getTime());
+    },
+    advance(ms) {
+      current = new Date(current.getTime() + ms);
+    },
+    set(value) {
+      current = new Date(value);
+    },
+  };
+}
+
+function createTimers() {
+  const timeouts = [];
+  const intervals = [];
+  return {
+    timeouts,
+    intervals,
+    setTimeout(fn, ms) {
+      const entry = { fn, ms, cleared: false };
+      timeouts.push(entry);
+      return entry;
+    },
+    clearTimeout(entry) {
+      if (entry) entry.cleared = true;
+    },
+    setInterval(fn, ms) {
+      const entry = { fn, ms, cleared: false };
+      intervals.push(entry);
+      return entry;
+    },
+    clearInterval(entry) {
+      if (entry) entry.cleared = true;
+    },
+  };
+}
+
+function baseConfig(overrides = {}) {
+  return {
+    summaryUrl: SAFE_SUMMARY_URL,
+    adminKey: SAFE_ADMIN_KEY,
+    webhookUrl: SAFE_WEBHOOK_URL,
+    webhookKind: "slack",
+    pollIntervalMs: 60000,
+    timeoutMs: 5000,
+    alertCooldownMs: 900000,
+    httpFailureThreshold: 2,
+    ...overrides,
+  };
+}
+
+function createFetchSequence(results) {
+  const calls = [];
+  const queue = [...results];
+  const fetchFn = async (...args) => {
+    calls.push(args);
+    const next = queue.shift();
+    if (next instanceof Error) throw next;
+    if (typeof next === "function") return next(...args);
+    return next;
+  };
+  fetchFn.calls = calls;
+  return fetchFn;
+}
+
+function abortError() {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function measurement(summaryOverrides = {}, overrides = {}) {
+  const summary = validSummary(summaryOverrides);
+  return {
+    ok: true,
+    httpStatus: 200,
+    ...classifySummary(summary),
+    summary,
+    ...overrides,
+  };
+}
+
+function webhookResponse(status = 204, body = "webhook-body-not-read") {
+  return {
+    status,
+    async text() {
+      throw new Error(body);
+    },
+    async json() {
+      throw new Error(body);
+    },
+  };
+}
+
+function parseLogLines(lines) {
+  return lines.map((line) => JSON.parse(line));
+}
+
+async function processWithFetch(measure, state, config, fetchResults, options = {}) {
+  const fetchFn = createFetchSequence(fetchResults);
+  const logger = options.logger || createLogger();
+  const clock = options.clock || createClock();
+  await processMeasurement(measure, state, config, {
+    fetchFn,
+    logger: logger.logger,
+    clock,
+    timers: options.timers || createTimers(),
+  });
+  return { fetchFn, logger, clock };
+}
+
+test("loadConfig rejects every missing required environment variable and whitespace required values", () => {
+  for (const key of [
+    "CODECLIP_OPERATOR_SUMMARY_URL",
+    "CODECLIP_ADMIN_KEY",
+    "CODECLIP_MONITOR_ALERT_WEBHOOK_URL",
+    "CODECLIP_MONITOR_ALERT_WEBHOOK_KIND",
+  ]) {
+    assert.throws(() => loadConfig(validEnv({ [key]: undefined })), /required/);
+    assert.throws(() => loadConfig(validEnv({ [key]: "   " })), /required/);
+  }
+});
+
+test("loadConfig accepts valid Slack and Discord configuration and normalizes webhook kind", () => {
+  const slack = loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_KIND: " slack " }));
+  const discord = loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_KIND: "DISCORD" }));
+
+  assert.equal(slack.webhookKind, "slack");
+  assert.equal(discord.webhookKind, "discord");
+  assert.equal(slack.summaryUrl, SAFE_SUMMARY_URL);
+  assert.equal(slack.webhookUrl, SAFE_WEBHOOK_URL);
+});
+
+test("loadConfig rejects invalid webhook kind, URLs, and URL credentials", () => {
+  assert.throws(
+    () => loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_KIND: "email" })),
+    /slack or discord/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ CODECLIP_OPERATOR_SUMMARY_URL: "http://example.test" })),
+    /https URL/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_URL: "http://example.test" })),
+    /https URL/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ CODECLIP_OPERATOR_SUMMARY_URL: "not a url" })),
+    /https URL/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_URL: "not a url" })),
+    /https URL/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ CODECLIP_OPERATOR_SUMMARY_URL: "https://user@example.test" })),
+    /credentials/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_URL: "https://user@example.test" })),
+    /credentials/
+  );
+});
+
+test("loadConfig applies defaults, accepts numeric overrides, and treats empty optional overrides as defaults", () => {
+  const defaults = loadConfig(validEnv());
+  assert.equal(defaults.pollIntervalMs, DEFAULTS.pollIntervalMs);
+  assert.equal(defaults.timeoutMs, DEFAULTS.timeoutMs);
+  assert.equal(defaults.alertCooldownMs, DEFAULTS.alertCooldownMs);
+  assert.equal(defaults.httpFailureThreshold, DEFAULTS.httpFailureThreshold);
+
+  const overridden = loadConfig(
+    validEnv({
+      CODECLIP_MONITOR_POLL_INTERVAL_MS: "1000",
+      CODECLIP_MONITOR_TIMEOUT_MS: "2000",
+      CODECLIP_MONITOR_ALERT_COOLDOWN_MS: "3000",
+      CODECLIP_MONITOR_HTTP_FAILURE_THRESHOLD: "4",
+    })
+  );
+  assert.equal(overridden.pollIntervalMs, 1000);
+  assert.equal(overridden.timeoutMs, 2000);
+  assert.equal(overridden.alertCooldownMs, 3000);
+  assert.equal(overridden.httpFailureThreshold, 4);
+
+  const empty = loadConfig(
+    validEnv({
+      CODECLIP_MONITOR_POLL_INTERVAL_MS: "",
+      CODECLIP_MONITOR_TIMEOUT_MS: "",
+      CODECLIP_MONITOR_ALERT_COOLDOWN_MS: "",
+      CODECLIP_MONITOR_HTTP_FAILURE_THRESHOLD: "",
+    })
+  );
+  assert.equal(empty.pollIntervalMs, DEFAULTS.pollIntervalMs);
+  assert.equal(empty.timeoutMs, DEFAULTS.timeoutMs);
+  assert.equal(empty.alertCooldownMs, DEFAULTS.alertCooldownMs);
+  assert.equal(empty.httpFailureThreshold, DEFAULTS.httpFailureThreshold);
+});
+
+test("loadConfig rejects invalid numeric overrides", () => {
+  const invalids = ["0", "-1", "1.5", "NaN", "abc"];
+  const keys = [
+    "CODECLIP_MONITOR_POLL_INTERVAL_MS",
+    "CODECLIP_MONITOR_TIMEOUT_MS",
+    "CODECLIP_MONITOR_ALERT_COOLDOWN_MS",
+    "CODECLIP_MONITOR_HTTP_FAILURE_THRESHOLD",
+  ];
+
+  for (const key of keys) {
+    for (const value of invalids) {
+      assert.throws(() => loadConfig(validEnv({ [key]: value })), /positive integer/);
+    }
+  }
+});
+
+test("validateOperatorSummary accepts valid empty and fully populated summaries", () => {
+  assert.deepEqual(validateOperatorSummary(validBody()), validSummary());
+
+  const full = validBody({
+    total: 5,
+    completed: 2,
+    committedIncomplete: 1,
+    processing: 1,
+    failedPrecommit: 1,
+    unknown: 0,
+    oldestCommittedIncompleteAt: "2026-07-12T10:00:00.000Z",
+    oldestProcessingAt: "2026-07-12T11:00:00.000Z",
+    latestCompletedAt: "2026-07-12T12:00:00.000Z",
+    attentionRequired: true,
+    attentionReasons: ["committed_incomplete"],
+  });
+
+  assert.equal(validateOperatorSummary(full).total, 5);
+});
+
+test("validateOperatorSummary rejects unexpected fields and invalid response containers", () => {
+  assert.throws(() => validateOperatorSummary(null), /Invalid response contract/);
+  assert.throws(() => validateOperatorSummary([]), /Invalid response contract/);
+  assert.throws(() => validateOperatorSummary(validBody({}, { extra: true })), /Unexpected top-level/);
+  assert.throws(
+    () => validateOperatorSummary(validBody({ extra: true })),
+    /Unexpected providerDeliveries/
+  );
+  assert.throws(() => validateOperatorSummary(validBody({}, { ok: false })), /Invalid/);
+  assert.throws(() => validateOperatorSummary(validBody({}, { vertical: "codepod" })), /Invalid/);
+  assert.throws(
+    () => validateOperatorSummary(validBody({}, { generatedAt: "not-a-date" })),
+    /Invalid/
+  );
+  assert.throws(
+    () => validateOperatorSummary(validBody({}, { providerDeliveries: null })),
+    /Invalid/
+  );
+  assert.throws(
+    () => validateOperatorSummary(validBody({}, { providerDeliveries: [] })),
+    /Invalid/
+  );
+});
+
+test("validateOperatorSummary rejects invalid count fields", () => {
+  for (const field of [
+    "total",
+    "completed",
+    "committedIncomplete",
+    "processing",
+    "failedPrecommit",
+    "unknown",
+  ]) {
+    const bodyWithMissingCount = validBody();
+    delete bodyWithMissingCount.providerDeliveries[field];
+    assert.throws(() => validateOperatorSummary(bodyWithMissingCount), /Invalid/);
+
+    assert.throws(() => validateOperatorSummary(validBody({ [field]: -1 })), /Invalid/);
+    assert.throws(() => validateOperatorSummary(validBody({ [field]: 1.5 })), /Invalid/);
+    assert.throws(() => validateOperatorSummary(validBody({ [field]: "1" })), /Invalid/);
+  }
+});
+
+test("validateOperatorSummary validates aggregate timestamps and attention fields", () => {
+  for (const field of [
+    "oldestCommittedIncompleteAt",
+    "oldestProcessingAt",
+    "latestCompletedAt",
+  ]) {
+    assert.doesNotThrow(() => validateOperatorSummary(validBody({ [field]: null })));
+    assert.throws(() => validateOperatorSummary(validBody({ [field]: "bad-date" })), /Invalid/);
+  }
+
+  assert.throws(
+    () => validateOperatorSummary(validBody({ attentionRequired: "true" })),
+    /Invalid/
+  );
+  assert.throws(
+    () => validateOperatorSummary(validBody({ attentionReasons: "reason" })),
+    /Invalid/
+  );
+  assert.throws(
+    () => validateOperatorSummary(validBody({ attentionReasons: [""] })),
+    /Invalid/
+  );
+  assert.throws(
+    () => validateOperatorSummary(validBody({ attentionReasons: ["   "] })),
+    /Invalid/
+  );
+  assert.throws(
+    () => validateOperatorSummary(validBody({ attentionReasons: [1] })),
+    /Invalid/
+  );
+  assert.doesNotThrow(() => validateOperatorSummary(validBody({ attentionReasons: [] })));
+});
+
+test("pollOperatorSummary sends safe GET request and classifies normal, critical, and warning summaries", async () => {
+  const timers = createTimers();
+  const fetchFn = createFetchSequence([
+    createJsonResponse(200, validBody()),
+    createJsonResponse(200, validBody({ committedIncomplete: 1 })),
+    createJsonResponse(200, validBody({ unknown: 1 })),
+  ]);
+  const config = baseConfig();
+
+  const normal = await pollOperatorSummary(config, { fetchFn, timers });
+  const critical = await pollOperatorSummary(config, { fetchFn, timers });
+  const warning = await pollOperatorSummary(config, { fetchFn, timers });
+
+  assert.equal(normal.ok, true);
+  assert.equal(normal.classification, "ok");
+  assert.equal(critical.classification, "critical");
+  assert.equal(critical.reason, "committed_incomplete");
+  assert.equal(warning.classification, "warning");
+  assert.equal(warning.reason, "unknown");
+
+  const [url, options] = fetchFn.calls[0];
+  assert.equal(url, SAFE_SUMMARY_URL);
+  assert.equal(options.method, "GET");
+  assert.deepEqual(Object.keys(options.headers), ["x-admin-key"]);
+  assert.equal(options.headers["x-admin-key"], SAFE_ADMIN_KEY);
+  assert.ok(timers.timeouts.every((entry) => entry.cleared));
+});
+
+test("pollOperatorSummary classifies HTTP and malformed response failures", async () => {
+  for (const status of [401, 403, 404, 503]) {
+    const result = await pollOperatorSummary(baseConfig(), {
+      fetchFn: createFetchSequence([createJsonResponse(status, { ok: false })]),
+      timers: createTimers(),
+    });
+    assert.equal(result.classification, "transport_error");
+    assert.equal(result.reason, `http_${status}`);
+    assert.equal(result.httpStatus, status);
+  }
+
+  const missing = await pollOperatorSummary(baseConfig(), {
+    fetchFn: createFetchSequence([null]),
+    timers: createTimers(),
+  });
+  assert.equal(missing.classification, "transport_error");
+  assert.equal(missing.reason, "network");
+});
+
+test("pollOperatorSummary classifies invalid JSON, invalid contract, timeout, and network exceptions", async () => {
+  const invalidJson = await pollOperatorSummary(baseConfig(), {
+    fetchFn: createFetchSequence([createInvalidJsonResponse()]),
+    timers: createTimers(),
+  });
+  assert.equal(invalidJson.reason, "invalid_json");
+
+  const invalidContract = await pollOperatorSummary(baseConfig(), {
+    fetchFn: createFetchSequence([createJsonResponse(200, validBody({}, { extra: true }))]),
+    timers: createTimers(),
+  });
+  assert.equal(invalidContract.reason, "invalid_contract");
+
+  const timeout = await pollOperatorSummary(baseConfig(), {
+    fetchFn: createFetchSequence([abortError()]),
+    timers: createTimers(),
+  });
+  assert.equal(timeout.reason, "timeout");
+
+  const network = await pollOperatorSummary(baseConfig(), {
+    fetchFn: createFetchSequence([new Error("network down")]),
+    timers: createTimers(),
+  });
+  assert.equal(network.reason, "network");
+});
+
+test("processMeasurement sends immediate committedIncomplete and unknown alerts but ignores non-alerting aggregates", async () => {
+  const config = baseConfig();
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+
+  const committed = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse()],
+    { clock, logger }
+  );
+  assert.equal(committed.fetchFn.calls.length, 1);
+  assert.equal(state.alerts.has("committed_incomplete"), true);
+
+  const unknownState = createMonitorState();
+  const unknown = await processWithFetch(
+    measurement({ unknown: 1 }),
+    unknownState,
+    config,
+    [webhookResponse()],
+    { clock: createClock(), logger: createLogger() }
+  );
+  assert.equal(unknown.fetchFn.calls.length, 1);
+  assert.equal(unknownState.alerts.has("unknown"), true);
+
+  for (const summary of [
+    { processing: 1 },
+    { failedPrecommit: 1 },
+    { attentionRequired: true, attentionReasons: ["committed_incomplete"] },
+  ]) {
+    const localState = createMonitorState();
+    const result = await processWithFetch(
+      measurement(summary),
+      localState,
+      config,
+      [],
+      { clock: createClock(), logger: createLogger() }
+    );
+    assert.equal(result.fetchFn.calls.length, 0);
+    assert.equal(localState.alerts.size, 0);
+  }
+});
+
+test("processMeasurement applies transport threshold and resets counter on a valid measurement", async () => {
+  const config = baseConfig();
+  const state = createMonitorState();
+  const logger = createLogger();
+  const clock = createClock();
+
+  const first = await processWithFetch(
+    { ok: false, httpStatus: null, classification: "transport_error", reason: "timeout", summary: null },
+    state,
+    config,
+    [],
+    { clock, logger }
+  );
+  assert.equal(first.fetchFn.calls.length, 0);
+  assert.equal(state.consecutiveTransportFailures, 1);
+
+  const second = await processWithFetch(
+    { ok: false, httpStatus: 503, classification: "transport_error", reason: "http_503", summary: null },
+    state,
+    config,
+    [webhookResponse()],
+    { clock, logger }
+  );
+  assert.equal(second.fetchFn.calls.length, 1);
+  assert.equal(state.alerts.has("transport_failure"), true);
+  assert.equal(state.alerts.get("transport_failure").reason, "http_503");
+
+  await processWithFetch(measurement(), state, config, [webhookResponse()], { clock, logger });
+  assert.equal(state.consecutiveTransportFailures, 0);
+  assert.equal(state.alerts.has("transport_failure"), false);
+});
+
+test("processMeasurement sends invalid_json and invalid_contract alerts immediately", async () => {
+  for (const reason of ["invalid_json", "invalid_contract"]) {
+    const state = createMonitorState();
+    const result = await processWithFetch(
+      { ok: false, httpStatus: 200, classification: "critical", reason, summary: null },
+      state,
+      baseConfig(),
+      [webhookResponse()],
+      { clock: createClock(), logger: createLogger() }
+    );
+    assert.equal(result.fetchFn.calls.length, 1);
+    assert.equal(state.alerts.has(reason), true);
+  }
+});
+
+test("processMeasurement suppresses alarms inside cooldown and sends reminder after cooldown", async () => {
+  const config = baseConfig({ alertCooldownMs: 1000 });
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+
+  const first = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse()],
+    { clock, logger }
+  );
+  assert.equal(first.fetchFn.calls.length, 1);
+  const firstSentAt = state.alerts.get("committed_incomplete").lastSentAt;
+
+  clock.advance(500);
+  const suppressed = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [],
+    { clock, logger }
+  );
+  assert.equal(suppressed.fetchFn.calls.length, 0);
+  assert.equal(state.alerts.get("committed_incomplete").lastSentAt, firstSentAt);
+
+  clock.advance(600);
+  const reminder = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse()],
+    { clock, logger }
+  );
+  assert.equal(reminder.fetchFn.calls.length, 1);
+  assert.ok(state.alerts.get("committed_incomplete").lastSentAt > firstSentAt);
+});
+
+test("processMeasurement retries failed first alert and failed reminder without moving cooldown", async () => {
+  const config = baseConfig({ alertCooldownMs: 1000 });
+  const clock = createClock();
+  const logger = createLogger();
+  const state = createMonitorState();
+
+  const failedFirst = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse(500)],
+    { clock, logger }
+  );
+  assert.equal(failedFirst.fetchFn.calls.length, 1);
+  assert.equal(state.alerts.has("committed_incomplete"), false);
+
+  const retried = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse()],
+    { clock, logger }
+  );
+  assert.equal(retried.fetchFn.calls.length, 1);
+  const lastSentAt = state.alerts.get("committed_incomplete").lastSentAt;
+
+  clock.advance(1100);
+  const failedReminder = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse(500)],
+    { clock, logger }
+  );
+  assert.equal(failedReminder.fetchFn.calls.length, 1);
+  assert.equal(state.alerts.get("committed_incomplete").lastSentAt, lastSentAt);
+
+  const retryReminder = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse()],
+    { clock, logger }
+  );
+  assert.equal(retryReminder.fetchFn.calls.length, 1);
+  assert.ok(state.alerts.get("committed_incomplete").lastSentAt > lastSentAt);
+});
+
+test("processMeasurement sends stable recovery messages once and clears state after delivery", async () => {
+  const recoveries = [
+    ["committed_incomplete", "committed_incomplete_recovered"],
+    ["unknown", "unknown_recovered"],
+    ["invalid_json", "invalid_json_recovered"],
+    ["invalid_contract", "invalid_contract_recovered"],
+    ["transport_failure", "transport_recovered"],
+  ];
+
+  for (const [alarmId, recoveryReason] of recoveries) {
+    const state = createMonitorState();
+    state.alerts.set(alarmId, {
+      notified: true,
+      lastSentAt: 1,
+      severity: alarmId === "unknown" ? "warning" : "critical",
+      reason: alarmId,
+    });
+    const result = await processWithFetch(
+      measurement(),
+      state,
+      baseConfig(),
+      [webhookResponse()],
+      { clock: createClock(), logger: createLogger() }
+    );
+    assert.equal(result.fetchFn.calls.length, 1);
+    const payload = JSON.parse(result.fetchFn.calls[0][1].body);
+    assert.match(payload.text, new RegExp(`reason=${recoveryReason}`));
+    assert.equal(state.alerts.has(alarmId), false);
+
+    const second = await processWithFetch(
+      measurement(),
+      state,
+      baseConfig(),
+      [],
+      { clock: createClock(), logger: createLogger() }
+    );
+    assert.equal(second.fetchFn.calls.length, 0);
+  }
+});
+
+test("processMeasurement does not recover alarms that were never delivered and retries failed recovery", async () => {
+  const config = baseConfig();
+  const state = createMonitorState();
+  state.alerts.set("committed_incomplete", {
+    notified: false,
+    lastSentAt: 1,
+    severity: "critical",
+    reason: "committed_incomplete",
+  });
+
+  const neverDelivered = await processWithFetch(
+    measurement(),
+    state,
+    config,
+    [],
+    { clock: createClock(), logger: createLogger() }
+  );
+  assert.equal(neverDelivered.fetchFn.calls.length, 0);
+  assert.equal(state.alerts.has("committed_incomplete"), true);
+
+  state.alerts.set("committed_incomplete", {
+    notified: true,
+    lastSentAt: 1,
+    severity: "critical",
+    reason: "committed_incomplete",
+  });
+
+  const failed = await processWithFetch(
+    measurement(),
+    state,
+    config,
+    [webhookResponse(500)],
+    { clock: createClock(), logger: createLogger() }
+  );
+  assert.equal(failed.fetchFn.calls.length, 1);
+  assert.equal(state.alerts.has("committed_incomplete"), true);
+
+  const retried = await processWithFetch(
+    measurement(),
+    state,
+    config,
+    [webhookResponse()],
+    { clock: createClock(), logger: createLogger() }
+  );
+  assert.equal(retried.fetchFn.calls.length, 1);
+  assert.equal(state.alerts.has("committed_incomplete"), false);
+});
+
+test("processMeasurement only recovers transport alarms on valid ok measurements", async () => {
+  const state = createMonitorState();
+  state.alerts.set("transport_failure", {
+    notified: true,
+    lastSentAt: 1,
+    severity: "critical",
+    reason: "timeout",
+  });
+
+  const invalidJson = await processWithFetch(
+    { ok: false, httpStatus: 200, classification: "critical", reason: "invalid_json", summary: null },
+    state,
+    baseConfig(),
+    [webhookResponse()],
+    { clock: createClock(), logger: createLogger() }
+  );
+  assert.equal(invalidJson.fetchFn.calls.length, 1);
+  assert.equal(state.alerts.has("transport_failure"), true);
+  assert.equal(state.alerts.has("invalid_json"), true);
+});
+
+test("sendWebhookAlert sends Slack and Discord payloads without reading response body", async () => {
+  for (const [kind, field] of [["slack", "text"], ["discord", "content"]]) {
+    const fetchFn = createFetchSequence([webhookResponse(204)]);
+    const ok = await sendWebhookAlert(
+      baseConfig({ webhookKind: kind }),
+      "safe message",
+      { fetchFn, timers: createTimers(), logger: createLogger().logger }
+    );
+    assert.equal(ok, true);
+    const [url, options] = fetchFn.calls[0];
+    assert.equal(url, SAFE_WEBHOOK_URL);
+    assert.equal(options.method, "POST");
+    assert.equal(options.headers["content-type"], "application/json");
+    const payload = JSON.parse(options.body);
+    assert.deepEqual(Object.keys(payload), [field]);
+    assert.equal(payload[field], "safe message");
+  }
+});
+
+test("sendWebhookAlert returns false for non-2xx, network, and timeout failures without leaking response body", async () => {
+  const logger = createLogger();
+  const non2xx = await sendWebhookAlert(baseConfig(), "safe message", {
+    fetchFn: createFetchSequence([webhookResponse(500, "do-not-read")]),
+    timers: createTimers(),
+    logger: logger.logger,
+    clock: createClock(),
+  });
+  const network = await sendWebhookAlert(baseConfig(), "safe message", {
+    fetchFn: createFetchSequence([new Error("network contains sensitive detail")]),
+    timers: createTimers(),
+    logger: logger.logger,
+    clock: createClock(),
+  });
+  const timeout = await sendWebhookAlert(baseConfig(), "safe message", {
+    fetchFn: createFetchSequence([abortError()]),
+    timers: createTimers(),
+    logger: logger.logger,
+    clock: createClock(),
+  });
+
+  assert.equal(non2xx, false);
+  assert.equal(network, false);
+  assert.equal(timeout, false);
+  const text = logger.text();
+  assert.doesNotMatch(text, /do-not-read|sensitive detail|https:\/\/alerts|x-admin-key|test-admin-key/);
+});
+
+test("webhook failure logging is damped but delivery attempts continue", async () => {
+  const config = baseConfig({ alertCooldownMs: 1000 });
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+
+  const first = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse(500)],
+    { clock, logger }
+  );
+  const second = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse(500)],
+    { clock, logger }
+  );
+  clock.advance(1100);
+  const third = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    [webhookResponse(500)],
+    { clock, logger }
+  );
+
+  assert.equal(first.fetchFn.calls.length, 1);
+  assert.equal(second.fetchFn.calls.length, 1);
+  assert.equal(third.fetchFn.calls.length, 1);
+  assert.equal(logger.lines.warn.length, 2);
+
+  const successLogger = createLogger();
+  const success = await processWithFetch(
+    measurement({ committedIncomplete: 1 }),
+    createMonitorState(),
+    config,
+    [webhookResponse()],
+    { clock: createClock(), logger: successLogger }
+  );
+  assert.equal(success.fetchFn.calls.length, 1);
+  assert.equal(successLogger.lines.warn.length, 0);
+});
+
+test("safe measurement, transport, startup, shutdown, and internal-error logs exclude sensitive data", async () => {
+  const logger = createLogger();
+  const clock = createClock();
+  const config = baseConfig();
+  const monitor = createCodeClipProviderDeliveryMonitor(config, {
+    fetchFn: async () => createJsonResponse(200, validBody()),
+    logger: logger.logger,
+    clock,
+    timers: createTimers(),
+  });
+
+  monitor.start();
+  monitor.stop();
+  await processMeasurement(
+    { ok: false, httpStatus: null, classification: "transport_error", reason: "network", summary: null },
+    createMonitorState(),
+    config,
+    { logger: logger.logger, clock, fetchFn: createFetchSequence([]), timers: createTimers() }
+  );
+
+  const throwingLogger = createLogger();
+  const brokenMonitor = createCodeClipProviderDeliveryMonitor(config, {
+    fetchFn: async () => createJsonResponse(200, validBody()),
+    logger: {
+      log() {
+        throw new Error("stack should not leak");
+      },
+      warn: throwingLogger.logger.warn,
+      error: throwingLogger.logger.error,
+    },
+    clock,
+    timers: createTimers(),
+  });
+  await brokenMonitor.tick();
+
+  const combined = `${logger.text()}\n${throwingLogger.text()}`;
+  assert.doesNotMatch(
+    combined,
+    /test-admin-key|https:\/\/monitor|https:\/\/alerts|x-admin-key|providerAccount|messageId|eventCode|deliveryId|stack should not leak|providerDeliveries/
+  );
+
+  const parsed = parseLogLines([...logger.lines.log, ...logger.lines.warn, ...logger.lines.error]);
+  assert.ok(parsed.some((entry) => entry.event === "started"));
+  assert.ok(parsed.some((entry) => entry.event === "stopped"));
+  assert.ok(parsed.some((entry) => entry.event === "measurement" && entry.total === null));
+});
+
+test("createCodeClipProviderDeliveryMonitor starts immediately, registers interval, avoids overlap, stops cleanly, and continues after internal errors", async () => {
+  const config = baseConfig({ pollIntervalMs: 1234 });
+  const timers = createTimers();
+  const clock = createClock();
+  const logger = createLogger();
+  let releaseFetch;
+  let fetchCalls = 0;
+  const fetchFn = async () => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) {
+      await new Promise((resolve) => {
+        releaseFetch = resolve;
+      });
+    }
+    return createJsonResponse(200, validBody());
+  };
+
+  const monitor = createCodeClipProviderDeliveryMonitor(config, {
+    fetchFn,
+    logger: logger.logger,
+    timers,
+    clock,
+  });
+
+  monitor.start();
+  assert.equal(fetchCalls, 1);
+  assert.equal(timers.intervals.length, 1);
+  assert.equal(timers.intervals[0].ms, 1234);
+
+  const overlapped = await monitor.tick();
+  assert.equal(overlapped, false);
+  assert.equal(fetchCalls, 1);
+
+  releaseFetch();
+  await new Promise((resolve) => setImmediate(resolve));
+  const afterFirst = await monitor.tick();
+  assert.equal(afterFirst, true);
+  assert.equal(fetchCalls, 2);
+
+  monitor.stop();
+  assert.equal(timers.intervals[0].cleared, true);
+  const afterStop = await monitor.tick();
+  assert.equal(afterStop, false);
+
+  const errorLogger = createLogger();
+  const errorMonitor = createCodeClipProviderDeliveryMonitor(config, {
+    fetchFn: async () => createJsonResponse(200, validBody()),
+    logger: {
+      log() {
+        throw new Error("boom");
+      },
+      warn: errorLogger.logger.warn,
+      error: errorLogger.logger.error,
+    },
+    timers: createTimers(),
+    clock,
+  });
+  const first = await errorMonitor.tick();
+  const second = await errorMonitor.tick();
+  assert.equal(first, false);
+  assert.equal(second, false);
+  assert.match(errorLogger.text(), /monitor_internal_error/);
+});
