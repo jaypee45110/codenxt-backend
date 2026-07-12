@@ -42,6 +42,7 @@ const {
   createCodeClipProviderDelivery,
   updateCodeClipProviderDeliveryState,
   hasCodeClipProviderDeliveryReplayInvariants,
+  getCodeClipProviderDeliveryOperationalSummary,
   claimCodeClipOutboxEvents,
   markCodeClipOutboxEventSucceeded,
   markCodeClipOutboxEventFailed,
@@ -5723,6 +5724,49 @@ async function requireCodePerksAdmin(req, res, next) {
   });
 }
 
+function getConfiguredCodeClipAdminKey() {
+  const configuredKey = process.env.CODECLIP_ADMIN_KEY;
+  if (typeof configuredKey !== "string" || configuredKey.trim().length === 0) {
+    return null;
+  }
+  return configuredKey;
+}
+
+function isCodeClipAdminKeyValid(providedKey, configuredKey) {
+  if (typeof providedKey !== "string" || typeof configuredKey !== "string") {
+    return false;
+  }
+
+  const providedBuffer = Buffer.from(providedKey, "utf8");
+  const configuredBuffer = Buffer.from(configuredKey, "utf8");
+
+  if (providedBuffer.length !== configuredBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(providedBuffer, configuredBuffer);
+}
+
+function requireCodeClipAdmin(req, res, next) {
+  const configuredKey = getConfiguredCodeClipAdminKey();
+  if (!configuredKey) {
+    return res.status(503).json({
+      ok: false,
+      error: "Operator inspection unavailable",
+    });
+  }
+
+  const providedKey = req.headers["x-admin-key"];
+  if (!isCodeClipAdminKeyValid(providedKey, configuredKey)) {
+    return res.status(401).json({
+      ok: false,
+      error: "Unauthorized",
+    });
+  }
+
+  return next();
+}
+
 
 
 function parseBenefitInventoryFromMeta(meta = {}) {
@@ -6087,6 +6131,30 @@ app.get("/certificate/validate/:eventCode/:certificateId", limitCertificateValid
 
 app.get("/health", (req, res) => {
   res.json({ ok: true, port: PORT });
+});
+
+app.get("/internal/codeclip/provider-deliveries/summary", requireCodeClipAdmin, async (_req, res) => {
+  const route = "/internal/codeclip/provider-deliveries/summary";
+
+  try {
+    const summary = await getCodeClipProviderDeliveryOperationalSummary();
+    return res.json({
+      ok: true,
+      vertical: "codeclip",
+      generatedAt: new Date().toISOString(),
+      providerDeliveries: summary,
+    });
+  } catch {
+    console.warn("codeClip provider delivery operator summary failed", {
+      vertical: "codeclip",
+      route,
+      operationalEvent: "operator_summary_read_failed",
+    });
+    return res.status(503).json({
+      ok: false,
+      error: "Operator inspection unavailable",
+    });
+  }
 });
 
 
