@@ -21,11 +21,12 @@ const DEFAULTS = Object.freeze({
 const REQUIRED_ENV = Object.freeze([
   "CODECLIP_OPERATOR_SUMMARY_URL",
   "CODECLIP_ADMIN_KEY",
-  "CODECLIP_MONITOR_ALERT_WEBHOOK_URL",
-  "CODECLIP_MONITOR_ALERT_WEBHOOK_KIND",
 ]);
 
-const ALLOWED_WEBHOOK_KINDS = new Set(["slack", "discord"]);
+const ALLOWED_NOTIFICATION_KINDS = new Set(["email", "slack", "discord"]);
+const WEBHOOK_NOTIFICATION_KINDS = new Set(["slack", "discord"]);
+const EMAIL_SUBJECT = "codeClip provider delivery monitor alert";
+const EMAIL_FROM_NAME = "codeClip Provider Monitor";
 
 const TOP_LEVEL_FIELDS = new Set([
   "ok",
@@ -97,6 +98,43 @@ function parseHttpsUrl(value, name) {
   return parsed.toString();
 }
 
+function normalizeNotificationKind(env = process.env) {
+  const explicitKind = String(env.CODECLIP_MONITOR_NOTIFICATION_KIND || "")
+    .trim()
+    .toLowerCase();
+
+  if (explicitKind) return { notificationKind: explicitKind, explicit: true };
+
+  const legacyKind = String(env.CODECLIP_MONITOR_ALERT_WEBHOOK_KIND || "")
+    .trim()
+    .toLowerCase();
+
+  return { notificationKind: legacyKind, explicit: false };
+}
+
+function parseEmailAddress(value, name) {
+  const email = String(value || "").trim();
+
+  if (!email) {
+    throw new Error(`${name} is required`);
+  }
+
+  if (
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+    /[<>,;]/.test(email)
+  ) {
+    throw new Error(`${name} must be a valid email address`);
+  }
+
+  return email;
+}
+
+function requireNonEmpty(value, name) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${name} is required`);
+  }
+}
+
 function loadConfig(env = process.env) {
   for (const name of REQUIRED_ENV) {
     if (typeof env[name] !== "string" || env[name].trim().length === 0) {
@@ -104,27 +142,27 @@ function loadConfig(env = process.env) {
     }
   }
 
-  const webhookKind = String(env.CODECLIP_MONITOR_ALERT_WEBHOOK_KIND || "")
-    .trim()
-    .toLowerCase();
+  const { notificationKind, explicit } = normalizeNotificationKind(env);
 
-  if (!ALLOWED_WEBHOOK_KINDS.has(webhookKind)) {
+  if (!ALLOWED_NOTIFICATION_KINDS.has(notificationKind)) {
+    throw new Error(
+      "CODECLIP_MONITOR_NOTIFICATION_KIND must be email, slack, or discord"
+    );
+  }
+
+  if (!explicit && notificationKind === "email") {
     throw new Error(
       "CODECLIP_MONITOR_ALERT_WEBHOOK_KIND must be slack or discord"
     );
   }
 
-  return {
+  const config = {
     summaryUrl: parseHttpsUrl(
       env.CODECLIP_OPERATOR_SUMMARY_URL,
       "CODECLIP_OPERATOR_SUMMARY_URL"
     ),
     adminKey: env.CODECLIP_ADMIN_KEY,
-    webhookUrl: parseHttpsUrl(
-      env.CODECLIP_MONITOR_ALERT_WEBHOOK_URL,
-      "CODECLIP_MONITOR_ALERT_WEBHOOK_URL"
-    ),
-    webhookKind,
+    notificationKind,
     pollIntervalMs: parsePositiveInteger(
       env.CODECLIP_MONITOR_POLL_INTERVAL_MS,
       "CODECLIP_MONITOR_POLL_INTERVAL_MS",
@@ -146,6 +184,24 @@ function loadConfig(env = process.env) {
       DEFAULTS.httpFailureThreshold
     ),
   };
+
+  if (WEBHOOK_NOTIFICATION_KINDS.has(notificationKind)) {
+    config.alertWebhookUrl = parseHttpsUrl(
+      env.CODECLIP_MONITOR_ALERT_WEBHOOK_URL,
+      "CODECLIP_MONITOR_ALERT_WEBHOOK_URL"
+    );
+  }
+
+  if (notificationKind === "email") {
+    config.alertEmailTo = parseEmailAddress(
+      env.CODECLIP_MONITOR_ALERT_EMAIL_TO,
+      "CODECLIP_MONITOR_ALERT_EMAIL_TO"
+    );
+    requireNonEmpty(env.RESEND_API_KEY, "RESEND_API_KEY");
+    requireNonEmpty(env.RESEND_FROM_EMAIL, "RESEND_FROM_EMAIL");
+  }
+
+  return config;
 }
 
 function isIsoTimestamp(value) {
@@ -395,13 +451,24 @@ function createAlertMessage({
   ].join(" ");
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 async function sendWebhookAlert(config, message, options = {}) {
   const fetchFn = options.fetchFn || fetch;
   const timers = options.timers || globalThis;
   const logger = options.logger || console;
   const clock = options.clock || createSystemClock();
+  const webhookKind = config.notificationKind || config.webhookKind;
+  const webhookUrl = config.alertWebhookUrl || config.webhookUrl;
   const payload =
-    config.webhookKind === "slack" ? { text: message } : { content: message };
+    webhookKind === "slack" ? { text: message } : { content: message };
 
   const { controller, timeout } = createTimeoutController(
     config.timeoutMs,
@@ -409,7 +476,7 @@ async function sendWebhookAlert(config, message, options = {}) {
   );
 
   try {
-    const response = await fetchFn(config.webhookUrl, {
+    const response = await fetchFn(webhookUrl, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -444,36 +511,78 @@ async function sendWebhookAlert(config, message, options = {}) {
   }
 }
 
-function shouldLogWebhookDeliveryFailure(state, nowMs, config) {
+async function sendEmailAlert(config, message, options = {}) {
+  const sendEmailFn =
+    options.sendEmailFn || require("../mailer").sendEmail;
+
+  try {
+    await sendEmailFn({
+      to: config.alertEmailTo,
+      subject: EMAIL_SUBJECT,
+      text: message,
+      html: `<pre>${escapeHtml(message)}</pre>`,
+      fromName: EMAIL_FROM_NAME,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function sendNotification(config, message, options = {}) {
+  if (config.notificationKind === "email") {
+    return sendEmailAlert(config, message, options);
+  }
+
+  return sendWebhookAlert(config, message, options);
+}
+
+function shouldLogNotificationDeliveryFailure(state, nowMs, config) {
   if (
-    state.lastWebhookFailureLoggedAt !== null &&
-    nowMs - state.lastWebhookFailureLoggedAt < config.alertCooldownMs
+    state.lastNotificationFailureLoggedAt !== null &&
+    nowMs - state.lastNotificationFailureLoggedAt < config.alertCooldownMs
   ) {
     return false;
   }
 
-  state.lastWebhookFailureLoggedAt = nowMs;
+  state.lastNotificationFailureLoggedAt = nowMs;
   return true;
 }
 
-async function sendWebhookAlertDamped(config, message, state, options = {}) {
+async function sendNotificationDamped(config, message, state, options = {}) {
   const clock = options.clock || createSystemClock();
   const logger = options.logger || console;
   const nowMs = clock.now().getTime();
 
-  return sendWebhookAlert(config, message, {
+  const delivered = await sendNotification(config, message, {
     ...options,
     clock,
     logger: {
       log: logger.log?.bind(logger) || (() => {}),
       error: logger.error?.bind(logger) || (() => {}),
       warn: (...args) => {
-        if (shouldLogWebhookDeliveryFailure(state, nowMs, config)) {
+        if (shouldLogNotificationDeliveryFailure(state, nowMs, config)) {
           logger.warn(...args);
         }
       },
     },
   });
+
+  if (
+    !delivered &&
+    config.notificationKind === "email" &&
+    shouldLogNotificationDeliveryFailure(state, nowMs, config)
+  ) {
+    logEvent(logger, clock, {
+      level: "warn",
+      event: "notification_delivery_failed",
+      classification: "warning",
+      reason: "email_delivery_failed",
+      httpStatus: null,
+    });
+  }
+
+  return delivered;
 }
 
 function getActiveReasons(measurement, state, config) {
@@ -578,11 +687,12 @@ async function processMeasurement(measurement, state, config, options = {}) {
       summary: measurement.summary,
     });
 
-    const delivered = await sendWebhookAlertDamped(config, message, state, {
+    const delivered = await sendNotificationDamped(config, message, state, {
       fetchFn,
       logger,
       timers,
       clock: { now: () => now },
+      sendEmailFn: options.sendEmailFn,
     });
 
     if (!delivered) continue;
@@ -608,11 +718,12 @@ async function processMeasurement(measurement, state, config, options = {}) {
       summary: measurement.summary,
     });
 
-    const delivered = await sendWebhookAlertDamped(config, message, state, {
+    const delivered = await sendNotificationDamped(config, message, state, {
       fetchFn,
       logger,
       timers,
       clock: { now: () => now },
+      sendEmailFn: options.sendEmailFn,
     });
 
     if (delivered) {
@@ -624,7 +735,7 @@ async function processMeasurement(measurement, state, config, options = {}) {
 function createMonitorState() {
   return {
     consecutiveTransportFailures: 0,
-    lastWebhookFailureLoggedAt: null,
+    lastNotificationFailureLoggedAt: null,
     alerts: new Map(),
   };
 }
@@ -656,6 +767,7 @@ function createCodeClipProviderDeliveryMonitor(config, options = {}) {
         logger,
         fetchFn,
         timers,
+        sendEmailFn: options.sendEmailFn,
       });
 
       return true;
@@ -685,6 +797,7 @@ function createCodeClipProviderDeliveryMonitor(config, options = {}) {
 
     logEvent(logger, clock, {
       event: "started",
+      notificationKind: config.notificationKind,
       pollIntervalMs: config.pollIntervalMs,
       timeoutMs: config.timeoutMs,
       alertCooldownMs: config.alertCooldownMs,
@@ -761,6 +874,8 @@ module.exports = {
   classifySummary,
   createAlertMessage,
   sendWebhookAlert,
+  sendEmailAlert,
+  sendNotification,
   createMonitorState,
   processMeasurement,
   createCodeClipProviderDeliveryMonitor,

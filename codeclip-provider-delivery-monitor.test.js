@@ -17,6 +17,7 @@ const {
   classifySummary,
   createAlertMessage,
   sendWebhookAlert,
+  sendNotification,
   createMonitorState,
   processMeasurement,
   createCodeClipProviderDeliveryMonitor,
@@ -25,6 +26,9 @@ const {
 const SAFE_ADMIN_KEY = "test-admin-key-not-secret";
 const SAFE_SUMMARY_URL = "https://monitor.example.test/summary";
 const SAFE_WEBHOOK_URL = "https://alerts.example.test/hook";
+const SAFE_EMAIL_TO = "monitor-recipient@example.test";
+const SAFE_RESEND_KEY = "test-resend-key-not-secret";
+const SAFE_FROM_EMAIL = "codeClip Monitor <monitor@example.test>";
 
 function validEnv(overrides = {}) {
   return {
@@ -151,8 +155,8 @@ function baseConfig(overrides = {}) {
   return {
     summaryUrl: SAFE_SUMMARY_URL,
     adminKey: SAFE_ADMIN_KEY,
-    webhookUrl: SAFE_WEBHOOK_URL,
-    webhookKind: "slack",
+    alertWebhookUrl: SAFE_WEBHOOK_URL,
+    notificationKind: "slack",
     pollIntervalMs: 60000,
     timeoutMs: 5000,
     alertCooldownMs: 900000,
@@ -173,6 +177,19 @@ function createFetchSequence(results) {
   };
   fetchFn.calls = calls;
   return fetchFn;
+}
+
+function createEmailSender(results = [true]) {
+  const calls = [];
+  const queue = [...results];
+  const sendEmailFn = async (payload) => {
+    calls.push(payload);
+    const next = queue.shift();
+    if (next instanceof Error) throw next;
+    return next;
+  };
+  sendEmailFn.calls = calls;
+  return sendEmailFn;
 }
 
 function abortError() {
@@ -214,6 +231,7 @@ async function processWithFetch(measure, state, config, fetchResults, options = 
   const clock = options.clock || createClock();
   await processMeasurement(measure, state, config, {
     fetchFn,
+    sendEmailFn: options.sendEmailFn,
     logger: logger.logger,
     clock,
     timers: options.timers || createTimers(),
@@ -221,29 +239,56 @@ async function processWithFetch(measure, state, config, fetchResults, options = 
   return { fetchFn, logger, clock };
 }
 
-test("loadConfig rejects every missing required environment variable and whitespace required values", () => {
+test("loadConfig rejects every missing core environment variable and whitespace core values", () => {
   for (const key of [
     "CODECLIP_OPERATOR_SUMMARY_URL",
     "CODECLIP_ADMIN_KEY",
-    "CODECLIP_MONITOR_ALERT_WEBHOOK_URL",
-    "CODECLIP_MONITOR_ALERT_WEBHOOK_KIND",
   ]) {
     assert.throws(() => loadConfig(validEnv({ [key]: undefined })), /required/);
     assert.throws(() => loadConfig(validEnv({ [key]: "   " })), /required/);
   }
 });
 
-test("loadConfig accepts valid Slack and Discord configuration and normalizes webhook kind", () => {
+test("loadConfig accepts legacy Slack and Discord configuration and normalizes notification kind", () => {
   const slack = loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_KIND: " slack " }));
   const discord = loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_KIND: "DISCORD" }));
 
-  assert.equal(slack.webhookKind, "slack");
-  assert.equal(discord.webhookKind, "discord");
+  assert.equal(slack.notificationKind, "slack");
+  assert.equal(discord.notificationKind, "discord");
   assert.equal(slack.summaryUrl, SAFE_SUMMARY_URL);
-  assert.equal(slack.webhookUrl, SAFE_WEBHOOK_URL);
+  assert.equal(slack.alertWebhookUrl, SAFE_WEBHOOK_URL);
 });
 
-test("loadConfig rejects invalid webhook kind, URLs, and URL credentials", () => {
+test("loadConfig accepts explicit Slack, Discord, and email notification configuration", () => {
+  const slack = loadConfig(
+    validEnv({ CODECLIP_MONITOR_NOTIFICATION_KIND: " slack " })
+  );
+  const discord = loadConfig(
+    validEnv({ CODECLIP_MONITOR_NOTIFICATION_KIND: "DISCORD" })
+  );
+  const email = loadConfig(
+    validEnv({
+      CODECLIP_MONITOR_NOTIFICATION_KIND: "email",
+      CODECLIP_MONITOR_ALERT_WEBHOOK_KIND: undefined,
+      CODECLIP_MONITOR_ALERT_WEBHOOK_URL: undefined,
+      CODECLIP_MONITOR_ALERT_EMAIL_TO: ` ${SAFE_EMAIL_TO} `,
+      RESEND_API_KEY: SAFE_RESEND_KEY,
+      RESEND_FROM_EMAIL: SAFE_FROM_EMAIL,
+    })
+  );
+
+  assert.equal(slack.notificationKind, "slack");
+  assert.equal(discord.notificationKind, "discord");
+  assert.equal(email.notificationKind, "email");
+  assert.equal(email.alertEmailTo, SAFE_EMAIL_TO);
+  assert.equal(email.alertWebhookUrl, undefined);
+});
+
+test("loadConfig rejects invalid notification kind, URLs, and URL credentials", () => {
+  assert.throws(
+    () => loadConfig(validEnv({ CODECLIP_MONITOR_NOTIFICATION_KIND: "pager" })),
+    /email, slack, or discord/
+  );
   assert.throws(
     () => loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_KIND: "email" })),
     /slack or discord/
@@ -271,6 +316,39 @@ test("loadConfig rejects invalid webhook kind, URLs, and URL credentials", () =>
   assert.throws(
     () => loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_WEBHOOK_URL: "https://user@example.test" })),
     /credentials/
+  );
+});
+
+test("loadConfig validates email-only requirements without requiring webhook configuration", () => {
+  const baseEmailEnv = {
+    CODECLIP_MONITOR_NOTIFICATION_KIND: "email",
+    CODECLIP_MONITOR_ALERT_WEBHOOK_KIND: undefined,
+    CODECLIP_MONITOR_ALERT_WEBHOOK_URL: undefined,
+    CODECLIP_MONITOR_ALERT_EMAIL_TO: SAFE_EMAIL_TO,
+    RESEND_API_KEY: SAFE_RESEND_KEY,
+    RESEND_FROM_EMAIL: SAFE_FROM_EMAIL,
+  };
+
+  assert.doesNotThrow(() => loadConfig(validEnv(baseEmailEnv)));
+  assert.throws(
+    () => loadConfig(validEnv({ ...baseEmailEnv, CODECLIP_MONITOR_ALERT_EMAIL_TO: undefined })),
+    /CODECLIP_MONITOR_ALERT_EMAIL_TO/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ ...baseEmailEnv, CODECLIP_MONITOR_ALERT_EMAIL_TO: "not-an-email" })),
+    /valid email/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ ...baseEmailEnv, CODECLIP_MONITOR_ALERT_EMAIL_TO: "a@example.test,b@example.test" })),
+    /valid email/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ ...baseEmailEnv, RESEND_API_KEY: undefined })),
+    /RESEND_API_KEY/
+  );
+  assert.throws(
+    () => loadConfig(validEnv({ ...baseEmailEnv, RESEND_FROM_EMAIL: "   " })),
+    /RESEND_FROM_EMAIL/
   );
 });
 
@@ -672,6 +750,124 @@ test("processMeasurement retries failed first alert and failed reminder without 
   assert.ok(state.alerts.get("committed_incomplete").lastSentAt > lastSentAt);
 });
 
+test("processMeasurement uses email provider for alert, reminder, and recovery", async () => {
+  const config = baseConfig({
+    notificationKind: "email",
+    alertEmailTo: SAFE_EMAIL_TO,
+    alertCooldownMs: 1000,
+  });
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+  const sendEmailFn = createEmailSender([true, true, true]);
+
+  await processMeasurement(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    {
+      sendEmailFn,
+      fetchFn: createFetchSequence([webhookResponse()]),
+      logger: logger.logger,
+      clock,
+      timers: createTimers(),
+    }
+  );
+
+  assert.equal(sendEmailFn.calls.length, 1);
+  assert.equal(state.alerts.has("committed_incomplete"), true);
+
+  await processMeasurement(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    {
+      sendEmailFn,
+      fetchFn: createFetchSequence([webhookResponse()]),
+      logger: logger.logger,
+      clock,
+      timers: createTimers(),
+    }
+  );
+
+  assert.equal(sendEmailFn.calls.length, 1);
+
+  clock.advance(1001);
+  await processMeasurement(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    {
+      sendEmailFn,
+      fetchFn: createFetchSequence([webhookResponse()]),
+      logger: logger.logger,
+      clock,
+      timers: createTimers(),
+    }
+  );
+
+  assert.equal(sendEmailFn.calls.length, 2);
+  assert.match(sendEmailFn.calls[1].text, /reason=committed_incomplete/);
+
+  await processMeasurement(measurement(), state, config, {
+    sendEmailFn,
+    fetchFn: createFetchSequence([webhookResponse()]),
+    logger: logger.logger,
+    clock,
+    timers: createTimers(),
+  });
+
+  assert.equal(sendEmailFn.calls.length, 3);
+  assert.match(sendEmailFn.calls[2].text, /reason=committed_incomplete_recovered/);
+  assert.equal(state.alerts.has("committed_incomplete"), false);
+  assert.doesNotMatch(logger.text(), /monitor-recipient|test-resend-key|CodeClip Monitor <monitor@example.test>/i);
+});
+
+test("processMeasurement treats email delivery failure as notification failure", async () => {
+  const config = baseConfig({
+    notificationKind: "email",
+    alertEmailTo: SAFE_EMAIL_TO,
+  });
+  const state = createMonitorState();
+  const sendEmailFn = createEmailSender([new Error("email provider response should not leak")]);
+  const logger = createLogger();
+
+  await processMeasurement(
+    measurement({ committedIncomplete: 1 }),
+    state,
+    config,
+    {
+      sendEmailFn,
+      fetchFn: createFetchSequence([webhookResponse()]),
+      logger: logger.logger,
+      clock: createClock(),
+      timers: createTimers(),
+    }
+  );
+
+  assert.equal(sendEmailFn.calls.length, 1);
+  assert.equal(state.alerts.has("committed_incomplete"), false);
+  assert.doesNotMatch(logger.text(), /email provider response|monitor-recipient|test-resend-key/);
+});
+
+test("processMeasurement normal email measurement sends no notification", async () => {
+  const sendEmailFn = createEmailSender();
+  await processMeasurement(
+    measurement(),
+    createMonitorState(),
+    baseConfig({ notificationKind: "email", alertEmailTo: SAFE_EMAIL_TO }),
+    {
+      sendEmailFn,
+      fetchFn: createFetchSequence([webhookResponse()]),
+      logger: createLogger().logger,
+      clock: createClock(),
+      timers: createTimers(),
+    }
+  );
+
+  assert.equal(sendEmailFn.calls.length, 0);
+});
+
 test("processMeasurement sends stable recovery messages once and clears state after delivery", async () => {
   const recoveries = [
     ["committed_incomplete", "committed_incomplete_recovered"],
@@ -781,11 +977,81 @@ test("processMeasurement only recovers transport alarms on valid ok measurements
   assert.equal(state.alerts.has("invalid_json"), true);
 });
 
+test("sendNotification selects email provider and sends safe email content", async () => {
+  const config = baseConfig({
+    notificationKind: "email",
+    alertEmailTo: SAFE_EMAIL_TO,
+  });
+  const sendEmailFn = createEmailSender();
+  const fetchFn = createFetchSequence([webhookResponse()]);
+  const message = createAlertMessage({
+    severity: "critical",
+    reason: "committed_incomplete",
+    timestamp: "2026-07-12T12:00:00.000Z",
+    httpStatus: 200,
+    summary: validSummary({ committedIncomplete: 1 }),
+  });
+
+  const ok = await sendNotification(config, message, {
+    sendEmailFn,
+    fetchFn,
+    timers: createTimers(),
+    logger: createLogger().logger,
+  });
+
+  assert.equal(ok, true);
+  assert.equal(fetchFn.calls.length, 0);
+  assert.equal(sendEmailFn.calls.length, 1);
+  assert.deepEqual(sendEmailFn.calls[0], {
+    to: SAFE_EMAIL_TO,
+    subject: "codeClip provider delivery monitor alert",
+    text: message,
+    html: `<pre>${message}</pre>`,
+    fromName: "codeClip Provider Monitor",
+  });
+
+  const serialized = JSON.stringify(sendEmailFn.calls[0]);
+  assert.doesNotMatch(serialized, /test-admin-key|https:\/\/monitor|test-resend-key/);
+});
+
+test("sendNotification treats email provider failure as delivery failure", async () => {
+  const config = baseConfig({
+    notificationKind: "email",
+    alertEmailTo: SAFE_EMAIL_TO,
+  });
+  const logger = createLogger();
+  const ok = await sendNotification(config, "safe message", {
+    sendEmailFn: createEmailSender([new Error("provider response should not leak")]),
+    timers: createTimers(),
+    logger: logger.logger,
+  });
+
+  assert.equal(ok, false);
+  assert.doesNotMatch(logger.text(), /provider response should not leak|monitor-recipient|test-resend-key/);
+});
+
+test("sendNotification keeps Slack and Discord on webhook transport", async () => {
+  for (const kind of ["slack", "discord"]) {
+    const fetchFn = createFetchSequence([webhookResponse(204)]);
+    const sendEmailFn = createEmailSender();
+    const ok = await sendNotification(baseConfig({ notificationKind: kind }), "safe message", {
+      fetchFn,
+      sendEmailFn,
+      timers: createTimers(),
+      logger: createLogger().logger,
+    });
+
+    assert.equal(ok, true);
+    assert.equal(fetchFn.calls.length, 1);
+    assert.equal(sendEmailFn.calls.length, 0);
+  }
+});
+
 test("sendWebhookAlert sends Slack and Discord payloads without reading response body", async () => {
   for (const [kind, field] of [["slack", "text"], ["discord", "content"]]) {
     const fetchFn = createFetchSequence([webhookResponse(204)]);
     const ok = await sendWebhookAlert(
-      baseConfig({ webhookKind: kind }),
+      baseConfig({ notificationKind: kind }),
       "safe message",
       { fetchFn, timers: createTimers(), logger: createLogger().logger }
     );
