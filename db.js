@@ -1240,6 +1240,51 @@ async function getCodeClipProviderDeliveryOperationalSummary(queryClient = pool)
   return normalizeCodeClipProviderDeliveryOperationalSummaryRow(result.rows?.[0] || {});
 }
 
+async function ensureCodeClipProviderAccountBindingsTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_provider_account_bindings (
+      id BIGSERIAL PRIMARY KEY,
+      vertical TEXT NOT NULL,
+      event_code TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      provider_account_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      display_name TEXT,
+      created_by TEXT NOT NULL DEFAULT 'operator',
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      disabled_at TIMESTAMPTZ,
+      CHECK (vertical = 'codeclip'),
+      CHECK (status IN ('active', 'disabled')),
+      CHECK (provider IN ('meta', 'sms')),
+      CHECK (
+        (provider = 'meta' AND channel IN ('instagram', 'messenger', 'whatsapp'))
+        OR (provider = 'sms' AND channel = 'sms')
+      )
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS codeclip_provider_account_bindings_active_identity_idx
+    ON codeclip_provider_account_bindings (vertical, provider, provider_account_id)
+    WHERE status = 'active'
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_account_bindings_event_code_idx
+    ON codeclip_provider_account_bindings (event_code)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_account_bindings_status_idx
+    ON codeclip_provider_account_bindings (status)
+  `);
+}
+
 async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
   if (!queryClient) return;
 
@@ -2727,6 +2772,7 @@ module.exports = {
   insertCodePodKeywordInteraction,
   getCodePodKeywordInteraction,
   getCodePodKeywordInteractionSummary,
+  ensureCodeClipProviderAccountBindingsTable,
   ensureCodeClipProviderDeliveriesTable,
   createCodeClipProviderDelivery,
   getCodeClipProviderDeliveryByIdentity,
