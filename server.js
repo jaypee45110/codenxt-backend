@@ -6311,6 +6311,165 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, port: PORT });
 });
 
+function sendCodeClipBindingOperatorUnavailable(res) {
+  return res.status(503).json({
+    ok: false,
+    error: "Provider binding operation unavailable",
+  });
+}
+
+function sendCodeClipBindingOperatorInvalid(res) {
+  return res.status(400).json({
+    ok: false,
+    error: "Invalid provider binding request",
+  });
+}
+
+function sendCodeClipBindingOperatorNotFound(res) {
+  return res.status(404).json({
+    ok: false,
+    error: "Provider binding not found",
+  });
+}
+
+function isCodeClipEventRecord(event) {
+  return String(event?.vertical || event?.raw_event?.vertical || "").trim().toLowerCase() === "codeclip";
+}
+
+async function getCodeClipOperatorEventByCode(eventCode) {
+  const normalizedEventCode = String(eventCode || "").trim();
+  if (!normalizedEventCode) return null;
+
+  const event = await getCampaignByCode(normalizedEventCode);
+  if (!event || !isCodeClipEventRecord(event)) return null;
+  return event;
+}
+
+function isExplicitTrue(value) {
+  return String(value || "").trim().toLowerCase() === "true";
+}
+
+function isProviderBindingError(error, code) {
+  return error?.name === "CodeClipProviderAccountBindingError" && error.code === code;
+}
+
+app.get("/internal/codeclip/events/:eventCode/provider-bindings", requireCodeClipAdmin, async (req, res) => {
+  const eventCode = String(req.params.eventCode || "").trim();
+  const {
+    listCodeClipProviderAccountBindingsForEvent,
+    toPublicCodeClipProviderBinding,
+  } = require("./verticals/codeclip/provider-account-bindings");
+
+  try {
+    const event = await getCodeClipOperatorEventByCode(eventCode);
+    if (!event) {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    const bindings = await listCodeClipProviderAccountBindingsForEvent(eventCode, {
+      includeDisabled: isExplicitTrue(req.query?.includeDisabled),
+      queryClient: database.pool,
+    });
+
+    return res.json({
+      ok: true,
+      eventCode,
+      bindings: bindings.map(toPublicCodeClipProviderBinding),
+    });
+  } catch (error) {
+    console.warn("codeClip provider binding operator list failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/events/:eventCode/provider-bindings",
+      operationalEvent: "provider_binding_list_failed",
+    });
+    return sendCodeClipBindingOperatorUnavailable(res);
+  }
+});
+
+app.post("/internal/codeclip/events/:eventCode/provider-bindings", requireCodeClipAdmin, async (req, res) => {
+  const eventCode = String(req.params.eventCode || "").trim();
+  const {
+    createCodeClipProviderAccountBinding,
+    toPublicCodeClipProviderBinding,
+  } = require("./verticals/codeclip/provider-account-bindings");
+
+  try {
+    const event = await getCodeClipOperatorEventByCode(eventCode);
+    if (!event) {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    const result = await createCodeClipProviderAccountBinding(
+      {
+        provider: req.body?.provider,
+        channel: req.body?.channel,
+        providerAccountId: req.body?.providerAccountId,
+        displayName: req.body?.displayName,
+        eventCode,
+        createdBy: "operator",
+      },
+      {
+        queryClient: database.pool,
+        getEventByCode: getCampaignByCode,
+      }
+    );
+
+    return res.status(result.created ? 201 : 200).json({
+      ok: true,
+      created: Boolean(result.created),
+      binding: toPublicCodeClipProviderBinding(result.row),
+    });
+  } catch (error) {
+    if (isProviderBindingError(error, "INVALID_PROVIDER_BINDING")) {
+      return sendCodeClipBindingOperatorInvalid(res);
+    }
+    if (isProviderBindingError(error, "CODECLIP_EVENT_NOT_FOUND")) {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+    if (isProviderBindingError(error, "PROVIDER_ACCOUNT_BINDING_CONFLICT")) {
+      return res.status(409).json({
+        ok: false,
+        error: "Provider account binding conflict",
+      });
+    }
+
+    console.warn("codeClip provider binding operator create failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/events/:eventCode/provider-bindings",
+      operationalEvent: "provider_binding_create_failed",
+    });
+    return sendCodeClipBindingOperatorUnavailable(res);
+  }
+});
+
+app.post("/internal/codeclip/provider-bindings/:bindingId/disable", requireCodeClipAdmin, async (req, res) => {
+  const bindingId = String(req.params.bindingId || "").trim();
+  const {
+    disableCodeClipProviderAccountBinding,
+    toPublicCodeClipProviderBinding,
+  } = require("./verticals/codeclip/provider-account-bindings");
+
+  try {
+    const binding = await disableCodeClipProviderAccountBinding(bindingId, {
+      queryClient: database.pool,
+    });
+
+    if (!binding) return sendCodeClipBindingOperatorNotFound(res);
+
+    return res.json({
+      ok: true,
+      binding: toPublicCodeClipProviderBinding(binding),
+    });
+  } catch (error) {
+    console.warn("codeClip provider binding operator disable failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/provider-bindings/:bindingId/disable",
+      operationalEvent: "provider_binding_disable_failed",
+    });
+    return sendCodeClipBindingOperatorUnavailable(res);
+  }
+});
+
 app.get("/internal/codeclip/provider-deliveries/summary", requireCodeClipAdmin, async (_req, res) => {
   const route = "/internal/codeclip/provider-deliveries/summary";
 

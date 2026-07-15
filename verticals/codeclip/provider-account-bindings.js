@@ -279,7 +279,7 @@ async function createCodeClipProviderAccountBinding(
 
   const existing = await getActiveBindingByIdentity(normalized, client);
   if (existing) {
-    if (existing.eventCode === normalized.eventCode) {
+    if (existing.eventCode === normalized.eventCode && existing.channel === normalized.channel) {
       return {
         status: "existing",
         created: false,
@@ -287,7 +287,7 @@ async function createCodeClipProviderAccountBinding(
         row: existing,
       };
     }
-    throw bindingConflict("provider account is already bound to another episode", {
+    throw bindingConflict("provider account is already bound to another episode or channel", {
       provider: normalized.provider,
       eventCode: existing.eventCode,
     });
