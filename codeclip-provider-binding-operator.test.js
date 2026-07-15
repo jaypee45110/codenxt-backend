@@ -11,6 +11,8 @@ const state = {
   bindings: [],
   nextBindingId: 1,
   fail: false,
+  failReactivateUniqueViolation: false,
+  reactivateReturnsNoRows: false,
 };
 
 function resetState() {
@@ -18,6 +20,8 @@ function resetState() {
   state.bindings.length = 0;
   state.nextBindingId = 1;
   state.fail = false;
+  state.failReactivateUniqueViolation = false;
+  state.reactivateReturnsNoRows = false;
 }
 
 function addEvent(eventCode, vertical = "codeclip") {
@@ -112,6 +116,35 @@ const pool = {
           (item) => String(item.id) === String(params[0]) && item.vertical === "codeclip"
         ) || null;
       return { rows: row ? [row] : [] };
+    }
+
+    if (/UPDATE codeclip_provider_account_bindings/.test(sql) && /display_name = \$2/.test(sql)) {
+      const row =
+        state.bindings.find(
+          (item) => String(item.id) === String(params[0]) && item.vertical === "codeclip"
+        ) || null;
+      if (!row) return { rows: [] };
+      row.display_name = params[1];
+      row.updated_at = "2026-07-15T00:10:00.000Z";
+      return { rows: [row] };
+    }
+
+    if (/UPDATE codeclip_provider_account_bindings/.test(sql) && /status = 'active'/.test(sql)) {
+      if (state.failReactivateUniqueViolation) {
+        const error = new Error("duplicate active binding");
+        error.code = "23505";
+        throw error;
+      }
+      if (state.reactivateReturnsNoRows) return { rows: [] };
+      const row =
+        state.bindings.find(
+          (item) => String(item.id) === String(params[0]) && item.vertical === "codeclip"
+        ) || null;
+      if (!row) return { rows: [] };
+      row.status = "active";
+      row.disabled_at = null;
+      row.updated_at = "2026-07-15T00:10:00.000Z";
+      return { rows: [row] };
     }
 
     if (/UPDATE codeclip_provider_account_bindings/.test(sql)) {
@@ -257,6 +290,36 @@ async function listBindingsRequest(baseUrl, eventCode, query = "", headers = adm
 async function disableBindingRequest(baseUrl, bindingId, headers = adminHeaders()) {
   return readJson(
     await fetch(`${baseUrl}/internal/codeclip/provider-bindings/${bindingId}/disable`, {
+      method: "POST",
+      headers,
+    })
+  );
+}
+
+async function getBindingRequest(baseUrl, bindingId, headers = adminHeaders()) {
+  return readJson(
+    await fetch(`${baseUrl}/internal/codeclip/provider-bindings/${bindingId}`, {
+      headers,
+    })
+  );
+}
+
+async function updateBindingRequest(baseUrl, bindingId, body, headers = adminHeaders()) {
+  return readJson(
+    await fetch(`${baseUrl}/internal/codeclip/provider-bindings/${bindingId}`, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        ...headers,
+      },
+      body: JSON.stringify(body),
+    })
+  );
+}
+
+async function reactivateBindingRequest(baseUrl, bindingId, headers = adminHeaders()) {
+  return readJson(
+    await fetch(`${baseUrl}/internal/codeclip/provider-bindings/${bindingId}/reactivate`, {
       method: "POST",
       headers,
     })
@@ -475,6 +538,232 @@ test("codeClip provider binding operator disables bindings idempotently", async 
   });
 });
 
+test("codeClip provider binding operator reads active and disabled bindings safely", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const active = addBinding({ eventCode: "CC-GET", providerAccountId: "get-active-secret-123456" });
+    const disabled = addBinding({
+      eventCode: "CC-GET",
+      providerAccountId: "get-disabled-secret-123456",
+      status: "disabled",
+    });
+    const foreign = addBinding({
+      eventCode: "CP-GET",
+      providerAccountId: "get-foreign-secret-123456",
+      vertical: "codepod",
+    });
+
+    const activeResponse = await getBindingRequest(baseUrl, active.id);
+    const disabledResponse = await getBindingRequest(baseUrl, disabled.id);
+    const missing = await getBindingRequest(baseUrl, "missing-binding");
+    const foreignResponse = await getBindingRequest(baseUrl, foreign.id);
+
+    assert.equal(activeResponse.status, 200);
+    assert.equal(activeResponse.body.binding.status, "active");
+    assert.equal(activeResponse.body.binding.maskedAccountId.endsWith("3456"), true);
+    assert.equal(activeResponse.body.binding.providerAccountId, undefined);
+    assert.equal(disabledResponse.status, 200);
+    assert.equal(disabledResponse.body.binding.status, "disabled");
+    assert.equal(missing.status, 404);
+    assert.deepEqual(missing.body, { ok: false, error: "Provider binding not found" });
+    assert.equal(foreignResponse.status, 404);
+    assert.deepEqual(foreignResponse.body, { ok: false, error: "Provider binding not found" });
+    assertNoLeaks(activeResponse.body, "get-active-secret-123456");
+    assertNoLeaks(disabledResponse.body, "get-disabled-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator update changes only displayName", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const active = addBinding({
+      eventCode: "CC-UPDATE",
+      providerAccountId: "update-active-secret-123456",
+      displayName: "Old active",
+    });
+    const disabled = addBinding({
+      eventCode: "CC-UPDATE",
+      providerAccountId: "update-disabled-secret-123456",
+      status: "disabled",
+      displayName: "Old disabled",
+    });
+    const before = { ...state.bindings[0] };
+
+    const updated = await updateBindingRequest(baseUrl, active.id, { displayName: " Main Instagram " });
+    const clearedEmpty = await updateBindingRequest(baseUrl, active.id, { displayName: "" });
+    const clearedNull = await updateBindingRequest(baseUrl, disabled.id, { displayName: null });
+
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.binding.displayName, "Main Instagram");
+    assert.equal(updated.body.binding.updatedAt, "2026-07-15T00:10:00.000Z");
+    assert.equal(clearedEmpty.status, 200);
+    assert.equal(clearedEmpty.body.binding.displayName, null);
+    assert.equal(clearedNull.status, 200);
+    assert.equal(clearedNull.body.binding.displayName, null);
+    assert.equal(state.bindings[0].event_code, before.event_code);
+    assert.equal(state.bindings[0].provider, before.provider);
+    assert.equal(state.bindings[0].channel, before.channel);
+    assert.equal(state.bindings[0].provider_account_id, before.provider_account_id);
+    assert.equal(state.bindings[0].status, before.status);
+    assertNoLeaks(updated.body, "update-active-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator update rejects missing or forbidden fields", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const binding = addBinding({
+      eventCode: "CC-UPDATE-INVALID",
+      providerAccountId: "update-invalid-secret-123456",
+      displayName: "Before",
+    });
+    const forbiddenBodies = [
+      {},
+      { displayName: undefined },
+      { eventCode: "CC-OTHER" },
+      { provider: "sms" },
+      { channel: "messenger" },
+      { providerAccountId: "other-account" },
+      { status: "disabled" },
+      { vertical: "codepod" },
+      { id: "other-id" },
+      { createdBy: "someone" },
+      { displayName: "Allowed", eventCode: "CC-OTHER" },
+    ];
+
+    for (const body of forbiddenBodies) {
+      const response = await updateBindingRequest(baseUrl, binding.id, body);
+      assert.equal(response.status, 400);
+      assert.deepEqual(response.body, {
+        ok: false,
+        error: "Invalid provider binding request",
+      });
+      assertNoLeaks(response.body, "update-invalid-secret-123456");
+    }
+
+    assert.equal(state.bindings[0].display_name, "Before");
+    assert.equal(state.bindings[0].event_code, "CC-UPDATE-INVALID");
+    assert.equal(state.bindings[0].provider_account_id, "update-invalid-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator update hides unavailable bindings", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const foreign = addBinding({
+      eventCode: "CP-UPDATE",
+      providerAccountId: "update-foreign-secret-123456",
+      vertical: "codepod",
+    });
+
+    const missing = await updateBindingRequest(baseUrl, "missing-binding", { displayName: "Name" });
+    const foreignResponse = await updateBindingRequest(baseUrl, foreign.id, { displayName: "Name" });
+
+    assert.equal(missing.status, 404);
+    assert.deepEqual(missing.body, { ok: false, error: "Provider binding not found" });
+    assert.equal(foreignResponse.status, 404);
+    assert.deepEqual(foreignResponse.body, { ok: false, error: "Provider binding not found" });
+    assertNoLeaks(foreignResponse.body, "update-foreign-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator reactivates disabled binding in place", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const binding = addBinding({
+      eventCode: "CC-REACTIVATE",
+      providerAccountId: "reactivate-secret-123456",
+      status: "disabled",
+    });
+
+    const response = await reactivateBindingRequest(baseUrl, binding.id);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.reactivated, true);
+    assert.equal(response.body.binding.id, binding.id);
+    assert.equal(response.body.binding.status, "active");
+    assert.equal(response.body.binding.disabledAt, null);
+    assert.equal(state.bindings.length, 1);
+    assert.equal(state.bindings[0].id, binding.id);
+    assert.equal(state.bindings[0].disabled_at, null);
+    assertNoLeaks(response.body, "reactivate-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator reactivation is idempotent for active binding", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const binding = addBinding({
+      eventCode: "CC-REACTIVATE-IDEM",
+      providerAccountId: "reactivate-idem-secret-123456",
+    });
+
+    const response = await reactivateBindingRequest(baseUrl, binding.id);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.reactivated, false);
+    assert.equal(response.body.binding.id, binding.id);
+    assert.equal(response.body.binding.status, "active");
+    assert.equal(state.bindings.length, 1);
+    assertNoLeaks(response.body, "reactivate-idem-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator reactivation conflicts with another active binding", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const disabled = addBinding({
+      eventCode: "CC-REACTIVATE-A",
+      providerAccountId: "reactivate-conflict-secret-123456",
+      status: "disabled",
+    });
+    const competing = addBinding({
+      eventCode: "CC-REACTIVATE-B",
+      providerAccountId: "reactivate-conflict-secret-123456",
+    });
+    const beforeDisabled = { ...disabled };
+    const beforeCompeting = { ...competing };
+
+    const response = await reactivateBindingRequest(baseUrl, disabled.id);
+
+    assert.equal(response.status, 409);
+    assert.deepEqual(response.body, {
+      ok: false,
+      error: "Provider account binding conflict",
+    });
+    assert.equal(state.bindings[0].status, "disabled");
+    assert.equal(state.bindings[0].disabled_at, beforeDisabled.disabled_at);
+    assert.equal(state.bindings[0].event_code, beforeDisabled.event_code);
+    assert.equal(state.bindings[0].provider_account_id, beforeDisabled.provider_account_id);
+    assert.equal(state.bindings[1].status, beforeCompeting.status);
+    assert.equal(state.bindings[1].event_code, beforeCompeting.event_code);
+    assertNoLeaks(response.body, "reactivate-conflict-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator reactivation hides unavailable bindings and empty updates", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const foreign = addBinding({
+      eventCode: "CP-REACTIVATE",
+      providerAccountId: "reactivate-foreign-secret-123456",
+      vertical: "codepod",
+      status: "disabled",
+    });
+    const noRows = addBinding({
+      eventCode: "CC-REACTIVATE-NOROW",
+      providerAccountId: "reactivate-norow-secret-123456",
+      status: "disabled",
+    });
+
+    const missing = await reactivateBindingRequest(baseUrl, "missing-binding");
+    const foreignResponse = await reactivateBindingRequest(baseUrl, foreign.id);
+    state.reactivateReturnsNoRows = true;
+    const noRowsResponse = await reactivateBindingRequest(baseUrl, noRows.id);
+
+    assert.equal(missing.status, 404);
+    assert.deepEqual(missing.body, { ok: false, error: "Provider binding not found" });
+    assert.equal(foreignResponse.status, 404);
+    assert.deepEqual(foreignResponse.body, { ok: false, error: "Provider binding not found" });
+    assert.equal(noRowsResponse.status, 404);
+    assert.deepEqual(noRowsResponse.body, { ok: false, error: "Provider binding not found" });
+    assertNoLeaks(foreignResponse.body, "reactivate-foreign-secret-123456");
+    assertNoLeaks(noRowsResponse.body, "reactivate-norow-secret-123456");
+  });
+});
+
 test("codeClip provider binding operator database failures are public-safe", async () => {
   await withAuthorizedServer(async (baseUrl) => {
     addEvent("CC-FAIL");
@@ -484,8 +773,11 @@ test("codeClip provider binding operator database failures are public-safe", asy
     const create = await createBindingRequest(baseUrl, "CC-FAIL", validBody({ providerAccountId: "fail-create-123456" }));
     const list = await listBindingsRequest(baseUrl, "CC-FAIL");
     const disable = await disableBindingRequest(baseUrl, binding.id);
+    const read = await getBindingRequest(baseUrl, binding.id);
+    const update = await updateBindingRequest(baseUrl, binding.id, { displayName: "Name" });
+    const reactivate = await reactivateBindingRequest(baseUrl, binding.id);
 
-    for (const response of [create, list, disable]) {
+    for (const response of [create, list, disable, read, update, reactivate]) {
       assert.equal(response.status, 503);
       assert.deepEqual(response.body, {
         ok: false,

@@ -418,6 +418,93 @@ async function disableCodeClipProviderAccountBinding(id, { queryClient } = {}) {
   return mapCodeClipProviderAccountBindingRow(result.rows?.[0] || null);
 }
 
+async function updateCodeClipProviderAccountBinding(
+  id,
+  input = {},
+  { queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  if (!id) return null;
+  const value = requirePlainObject(input, "binding update");
+  if (!Object.hasOwn(value, "displayName")) {
+    throw invalidBinding("displayName is required", { fieldName: "displayName" });
+  }
+  if (value.displayName === undefined) {
+    throw invalidBinding("displayName is required", { fieldName: "displayName" });
+  }
+
+  const normalizedDisplayName = normalizeOptionalString(value.displayName, "displayName", 160);
+  const result = await client.query(
+    `
+      UPDATE codeclip_provider_account_bindings
+      SET
+        display_name = $2,
+        updated_at = NOW()
+      WHERE id = $1
+        AND vertical = 'codeclip'
+      RETURNING *
+    `,
+    [id, normalizedDisplayName]
+  );
+  return mapCodeClipProviderAccountBindingRow(result.rows?.[0] || null);
+}
+
+async function reactivateCodeClipProviderAccountBinding(id, { queryClient } = {}) {
+  const client = requireQueryClient(queryClient);
+  if (!id) return { reactivated: false, row: null };
+
+  const existing = await getCodeClipProviderAccountBindingById(id, { queryClient: client });
+  if (!existing) return { reactivated: false, row: null };
+  if (existing.status === ACTIVE_STATUS) {
+    return { reactivated: false, row: existing };
+  }
+
+  const active = await getActiveBindingByIdentity(
+    {
+      provider: existing.provider,
+      providerAccountId: existing.providerAccountId,
+    },
+    client
+  );
+  if (active && String(active.id) !== String(existing.id)) {
+    throw bindingConflict("provider account is already bound to another active binding", {
+      provider: existing.provider,
+      eventCode: active.eventCode,
+    });
+  }
+
+  try {
+    const result = await client.query(
+      `
+        UPDATE codeclip_provider_account_bindings
+        SET
+          status = 'active',
+          disabled_at = NULL,
+          updated_at = NOW()
+        WHERE id = $1
+          AND vertical = 'codeclip'
+        RETURNING *
+      `,
+      [id]
+    );
+    const row = mapCodeClipProviderAccountBindingRow(result.rows?.[0] || null);
+    if (!row) return { reactivated: false, row: null };
+
+    return {
+      reactivated: true,
+      row,
+    };
+  } catch (error) {
+    if (error?.code === "23505") {
+      throw bindingConflict("provider account is already bound to another active binding", {
+        provider: existing.provider,
+        eventCode: existing.eventCode,
+      });
+    }
+    throw error;
+  }
+}
+
 module.exports = {
   CODECLIP_VERTICAL,
   CodeClipProviderAccountBindingError,
@@ -427,6 +514,8 @@ module.exports = {
   findActiveCodeClipProviderAccountBinding,
   listCodeClipProviderAccountBindingsForEvent,
   disableCodeClipProviderAccountBinding,
+  updateCodeClipProviderAccountBinding,
+  reactivateCodeClipProviderAccountBinding,
   maskCodeClipProviderAccountId,
   toPublicCodeClipProviderBinding,
 };

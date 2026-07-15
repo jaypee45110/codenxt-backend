@@ -10,7 +10,9 @@ const {
   listCodeClipProviderAccountBindingsForEvent,
   maskCodeClipProviderAccountId,
   normalizeCodeClipProviderAccountBindingInput,
+  reactivateCodeClipProviderAccountBinding,
   toPublicCodeClipProviderBinding,
+  updateCodeClipProviderAccountBinding,
 } = require("./verticals/codeclip/provider-account-bindings");
 
 function createBindingRow(overrides = {}) {
@@ -57,6 +59,8 @@ function createBindingClient() {
   return {
     calls,
     rows,
+    failReactivateUniqueViolation: false,
+    reactivateReturnsNoRows: false,
     async query(sql, params = []) {
       calls.push({ sql, params });
 
@@ -93,6 +97,29 @@ function createBindingClient() {
       if (/WHERE id = \$1/.test(sql) && /FROM codeclip_provider_account_bindings/.test(sql)) {
         const row = findById(params[0]);
         return { rows: row ? [row] : [] };
+      }
+
+      if (/UPDATE codeclip_provider_account_bindings/.test(sql) && /display_name = \$2/.test(sql)) {
+        const row = findById(params[0]);
+        if (!row) return { rows: [] };
+        row.display_name = params[1];
+        row.updated_at = "2026-07-14T02:00:00.000Z";
+        return { rows: [row] };
+      }
+
+      if (/UPDATE codeclip_provider_account_bindings/.test(sql) && /status = 'active'/.test(sql)) {
+        if (this.failReactivateUniqueViolation) {
+          const error = new Error("duplicate active binding");
+          error.code = "23505";
+          throw error;
+        }
+        if (this.reactivateReturnsNoRows) return { rows: [] };
+        const row = findById(params[0]);
+        if (!row) return { rows: [] };
+        row.status = "active";
+        row.disabled_at = null;
+        row.updated_at = "2026-07-14T02:00:00.000Z";
+        return { rows: [row] };
       }
 
       if (/UPDATE codeclip_provider_account_bindings/.test(sql)) {
@@ -433,6 +460,158 @@ test("codeClip provider account binding can rebind after deactivation", async ()
   assert.equal(active.id, second.row.id);
   assert.equal(client.rows.filter((row) => row.status === "active").length, 1);
   assert.equal(client.rows.filter((row) => row.status === "disabled").length, 1);
+});
+
+test("codeClip provider account binding update only changes display name", async () => {
+  const client = createBindingClient();
+  const created = await createBinding(client, {
+    displayName: "Old label",
+  });
+  const before = { ...client.rows[0] };
+
+  const updated = await updateCodeClipProviderAccountBinding(
+    created.row.id,
+    { displayName: " New label " },
+    { queryClient: client }
+  );
+
+  assert.equal(updated.id, created.row.id);
+  assert.equal(updated.displayName, "New label");
+  assert.equal(updated.updatedAt, "2026-07-14T02:00:00.000Z");
+  assert.equal(client.rows.length, 1);
+  assert.equal(client.rows[0].event_code, before.event_code);
+  assert.equal(client.rows[0].provider, before.provider);
+  assert.equal(client.rows[0].channel, before.channel);
+  assert.equal(client.rows[0].provider_account_id, before.provider_account_id);
+  assert.equal(client.rows[0].status, before.status);
+});
+
+test("codeClip provider account binding update clears display name with empty string or null", async () => {
+  const client = createBindingClient();
+  const created = await createBinding(client, {
+    displayName: "Old label",
+  });
+
+  const empty = await updateCodeClipProviderAccountBinding(
+    created.row.id,
+    { displayName: "" },
+    { queryClient: client }
+  );
+  const nullValue = await updateCodeClipProviderAccountBinding(
+    created.row.id,
+    { displayName: null },
+    { queryClient: client }
+  );
+
+  assert.equal(empty.displayName, null);
+  assert.equal(nullValue.displayName, null);
+  assert.equal(client.rows[0].display_name, null);
+});
+
+test("codeClip provider account binding update rejects missing or undefined displayName", async () => {
+  const client = createBindingClient();
+  const created = await createBinding(client);
+
+  for (const input of [{}, { displayName: undefined }, null]) {
+    await assert.rejects(
+      () => updateCodeClipProviderAccountBinding(created.row.id, input, { queryClient: client }),
+      (error) => {
+        assert.ok(error instanceof CodeClipProviderAccountBindingError);
+        assert.equal(error.code, "INVALID_PROVIDER_BINDING");
+        return true;
+      }
+    );
+  }
+});
+
+test("codeClip provider account binding reactivates disabled row in place", async () => {
+  const client = createBindingClient();
+  const created = await createBinding(client);
+  const disabled = await disableCodeClipProviderAccountBinding(created.row.id, { queryClient: client });
+
+  const result = await reactivateCodeClipProviderAccountBinding(created.row.id, { queryClient: client });
+
+  assert.equal(result.reactivated, true);
+  assert.equal(result.row.id, created.row.id);
+  assert.equal(result.row.status, "active");
+  assert.equal(result.row.disabledAt, null);
+  assert.equal(client.rows.length, 1);
+  assert.equal(client.rows[0].id, created.row.id);
+  assert.equal(client.rows[0].disabled_at, null);
+  assert.notEqual(disabled.disabledAt, null);
+});
+
+test("codeClip provider account binding reactivation is idempotent for active row", async () => {
+  const client = createBindingClient();
+  const created = await createBinding(client);
+
+  const result = await reactivateCodeClipProviderAccountBinding(created.row.id, { queryClient: client });
+
+  assert.equal(result.reactivated, false);
+  assert.equal(result.row.id, created.row.id);
+  assert.equal(result.row.status, "active");
+  assert.equal(
+    client.calls.some((call) => /UPDATE codeclip_provider_account_bindings/.test(call.sql)),
+    false
+  );
+});
+
+test("codeClip provider account binding reactivation conflict leaves disabled row unchanged", async () => {
+  const client = createBindingClient();
+  const first = await createBinding(client);
+  const disabled = await disableCodeClipProviderAccountBinding(first.row.id, { queryClient: client });
+  await createBinding(client, { eventCode: "CC-BIND-2" });
+
+  await assert.rejects(
+    () => reactivateCodeClipProviderAccountBinding(first.row.id, { queryClient: client }),
+    (error) => {
+      assert.ok(error instanceof CodeClipProviderAccountBindingError);
+      assert.equal(error.code, "PROVIDER_ACCOUNT_BINDING_CONFLICT");
+      return true;
+    }
+  );
+
+  assert.equal(client.rows[0].id, first.row.id);
+  assert.equal(client.rows[0].status, "disabled");
+  assert.equal(client.rows[0].disabled_at, disabled.disabledAt);
+  assert.equal(client.rows[0].event_code, "CC-BIND-1");
+  assert.equal(client.rows[0].provider, "meta");
+  assert.equal(client.rows[0].channel, "instagram");
+  assert.equal(client.rows[0].provider_account_id, "page-1");
+});
+
+test("codeClip provider account binding reactivation maps unique violation to conflict", async () => {
+  const client = createBindingClient();
+  const created = await createBinding(client);
+  const disabled = await disableCodeClipProviderAccountBinding(created.row.id, { queryClient: client });
+  client.failReactivateUniqueViolation = true;
+
+  await assert.rejects(
+    () => reactivateCodeClipProviderAccountBinding(created.row.id, { queryClient: client }),
+    (error) => {
+      assert.ok(error instanceof CodeClipProviderAccountBindingError);
+      assert.equal(error.code, "PROVIDER_ACCOUNT_BINDING_CONFLICT");
+      return true;
+    }
+  );
+
+  assert.equal(client.rows[0].status, "disabled");
+  assert.equal(client.rows[0].disabled_at, disabled.disabledAt);
+  assert.equal(client.rows[0].event_code, "CC-BIND-1");
+  assert.equal(client.rows[0].provider, "meta");
+  assert.equal(client.rows[0].channel, "instagram");
+  assert.equal(client.rows[0].provider_account_id, "page-1");
+});
+
+test("codeClip provider account binding reactivation does not report success without row", async () => {
+  const client = createBindingClient();
+  const created = await createBinding(client);
+  await disableCodeClipProviderAccountBinding(created.row.id, { queryClient: client });
+  client.reactivateReturnsNoRows = true;
+
+  const result = await reactivateCodeClipProviderAccountBinding(created.row.id, { queryClient: client });
+
+  assert.deepEqual(result, { reactivated: false, row: null });
 });
 
 test("codeClip provider account binding listing is event isolated", async () => {
