@@ -145,7 +145,12 @@ CODEPERKS_REPO="${PLATFORM_ROOT}/codeperks-deploy"
 CODEPAGE_REPO="${PLATFORM_ROOT}/codepage-deploy"
 CODESTACK_REPO="${PLATFORM_ROOT}/codestack-deploy"
 CODECLIP_REPO="${PLATFORM_ROOT}/codeclip-deploy"
-BACKEND_TESTS=("${BACKEND_REPO}"/*.test.js)
+BACKEND_TESTS=()
+for backend_test in "${BACKEND_REPO}"/*.test.js; do
+  if [[ -f "${backend_test}" ]]; then
+    BACKEND_TESTS+=("${backend_test}")
+  fi
+done
 
 require_repo "Backend" "${BACKEND_REPO}" "server.js"
 require_repo "codeDemo" "${CODEDEMO_REPO}" "playwright.coas.config.js"
@@ -167,11 +172,25 @@ require_file "${CODEPAGE_REPO}/tests/codepage-product-journey.spec.js"
 require_file "${CODESTACK_REPO}/tests/codestack-product-journey.spec.js"
 require_file "${CODEPOD_REPO}/e2e/codepod-screen-video-guardrail.spec.ts"
 require_file "${CODECLIP_REPO}/frontend-vertical-isolation.test.js"
+require_file "${CODECLIP_REPO}/package.json"
+require_file "${CODECLIP_REPO}/playwright.coas.config.ts"
+require_file "${CODECLIP_REPO}/e2e/codeclip-coas-regression.spec.ts"
+
+if [[ "${#BACKEND_TESTS[@]}" -eq 0 ]]; then
+  echo "ERROR: No backend test files discovered in ${BACKEND_REPO}." >&2
+  exit 2
+fi
+
+if ! node -e "const p=require(process.argv[1]); process.exit(p.scripts && p.scripts['test:coas'] ? 0 : 1)" "${CODECLIP_REPO}/package.json"; then
+  echo "ERROR: codeClip package.json is missing required script: test:coas" >&2
+  exit 2
+fi
 
 echo "COAS regression suite"
 echo "Backend: ${BACKEND_REPO}"
 echo "Mode: standard mock/local regression"
 echo "Execution: sequential"
+echo "Backend test files discovered: ${#BACKEND_TESTS[@]}"
 
 report_repo_state "Backend" "${BACKEND_REPO}"
 report_repo_state "codeDemo" "${CODEDEMO_REPO}"
@@ -216,6 +235,9 @@ run_step "codePod containment guardrail" "${CODEPOD_REPO}" \
 run_step "codeClip frontend isolation guardrail" "${CODECLIP_REPO}" \
   node --test frontend-vertical-isolation.test.js
 run_step "codeClip build" "${CODECLIP_REPO}" npm run build
+echo
+echo "codeClip COAS Playwright: running"
+run_step "codeClip COAS Playwright" "${CODECLIP_REPO}" npm run test:coas
 
 if [[ "${LIVE_REQUESTED}" -eq 1 ]]; then
   echo
