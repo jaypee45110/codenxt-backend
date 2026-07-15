@@ -58,6 +58,14 @@ function eventNotFound(message, details = {}) {
   );
 }
 
+function bindingAmbiguous(message, details = {}) {
+  return new CodeClipProviderAccountBindingError(
+    "PROVIDER_ACCOUNT_BINDING_AMBIGUOUS",
+    message,
+    details
+  );
+}
+
 function requireQueryClient(queryClient) {
   if (!queryClient || typeof queryClient.query !== "function") {
     throw new CodeClipProviderAccountBindingError(
@@ -240,11 +248,18 @@ async function getActiveBindingByIdentity(normalized, queryClient) {
         AND provider = $2
         AND provider_account_id = $3
         AND status = 'active'
-      LIMIT 1
+      LIMIT 2
     `,
     [CODECLIP_VERTICAL, normalized.provider, normalized.providerAccountId]
   );
-  return mapCodeClipProviderAccountBindingRow(result.rows?.[0] || null);
+  const rows = result.rows || [];
+  if (!rows.length) return null;
+  if (rows.length > 1) {
+    throw bindingAmbiguous("multiple active provider account bindings found", {
+      provider: normalized.provider,
+    });
+  }
+  return mapCodeClipProviderAccountBindingRow(rows[0]);
 }
 
 async function createCodeClipProviderAccountBinding(

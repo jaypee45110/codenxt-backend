@@ -3539,6 +3539,14 @@ function sendCodeClipProviderLedgerFailure(res) {
   });
 }
 
+function sendCodeClipProviderProcessingDuplicate(res) {
+  return res.status(202).json({
+    ok: false,
+    duplicate: true,
+    status: "processing",
+  });
+}
+
 function isCodeClipProviderDeliveryUpdateConfirmed(result) {
   return result?.status === "updated" && Boolean(result.row);
 }
@@ -3570,6 +3578,82 @@ function getCodeClipDurableProviderReplay(delivery = null) {
     httpStatus: delivery.responseStatus,
     payload: delivery.publicResponseJson,
   };
+}
+
+async function resolveCodeClipProviderPreBindingReplay({
+  provider,
+  providerAccountId,
+  messageId,
+  redis,
+  redisEnabled,
+  responseTtlSeconds,
+  readProviderKeywordResponse,
+  recordProviderKeywordResponse,
+  buildProviderKeywordIdempotencyKey,
+} = {}) {
+  const deliveryLookup = await database.findCodeClipProviderDeliveryForReplayIdentity({
+    provider,
+    providerAccountId,
+    externalMessageId: messageId,
+    queryClient: database.pool,
+  });
+
+  if (deliveryLookup.status === "not_found") return { status: "not_found" };
+  if (deliveryLookup.status === "ambiguous") return { status: "failed" };
+  if (deliveryLookup.status === "unavailable") return { status: "unavailable" };
+  if (deliveryLookup.status !== "found" || !deliveryLookup.row) return { status: "failed" };
+
+  const delivery = deliveryLookup.row;
+  const eventCode = String(delivery.eventCode || "").trim();
+  const durableReplay = getCodeClipDurableProviderReplay(delivery);
+  if (durableReplay) {
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider,
+      eventCode,
+      messageId,
+    });
+
+    if (redisEnabled && idempotencyKey) {
+      const storedResponse = await readProviderKeywordResponse({
+        redis,
+        key: idempotencyKey,
+      });
+      if (storedResponse) {
+        return {
+          status: "replay",
+          httpStatus: durableReplay.httpStatus,
+          payload: storedResponse,
+          eventCode,
+          delivery,
+        };
+      }
+
+      try {
+        await recordProviderKeywordResponse({
+          redis,
+          key: idempotencyKey,
+          payload: durableReplay.payload,
+          ttlSeconds: responseTtlSeconds,
+        });
+      } catch {
+        return { status: "failed", eventCode, delivery };
+      }
+    }
+
+    return {
+      status: "replay",
+      httpStatus: durableReplay.httpStatus,
+      payload: durableReplay.payload,
+      eventCode,
+      delivery,
+    };
+  }
+
+  if (delivery.processingState === "processing") {
+    return { status: "processing", eventCode, delivery };
+  }
+
+  return { status: "failed", eventCode, delivery };
 }
 
 function emitCodeClipProviderDeliverySignal(level, signal = {}) {
@@ -3608,6 +3692,9 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
     const {
       buildCodeClipProviderActivationRequest,
     } = require("./verticals/codeclip/provider-activation-request");
+    const {
+      resolveCodeClipProviderAccountBindingRoute,
+    } = require("./verticals/codeclip/provider-account-binding-routing");
     const {
       buildProviderKeywordIdempotencyKey,
       claimProviderKeywordIdempotency,
@@ -3701,14 +3788,99 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       providerAccountId: providerEnvelope.envelope.providerAccountId,
     };
     const normalizedProviderInput = normalizeProviderKeywordIngress(req.params.provider, providerAdapterInput);
-    const activationRequest = buildCodeClipProviderActivationRequest({
-      provider: req.params.provider,
-      normalizedProviderInput,
-      body: providerAdapterInput,
-      headers: req.headers || {},
-      metadata: providerEnvelope.envelope.metadata,
-      events,
-    });
+    let activationRequest = null;
+
+    if (liveProvider) {
+      const keyword = String(normalizedProviderInput.keyword || "").trim();
+      const messageId = String(normalizedProviderInput.messageId || "").trim();
+      if (!keyword || !messageId) {
+        return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
+      }
+
+      const preBindingReplay = await resolveCodeClipProviderPreBindingReplay({
+        provider: normalizedProvider,
+        providerAccountId,
+        messageId,
+        redis,
+        redisEnabled: Boolean(process.env.REDIS_URL),
+        responseTtlSeconds: providerPolicy.policy.idempotency?.responseTtlSeconds || 86400,
+        readProviderKeywordResponse,
+        recordProviderKeywordResponse,
+        buildProviderKeywordIdempotencyKey,
+      });
+
+      if (preBindingReplay.status === "replay") {
+        emitCodeClipProviderDeliverySignal("info", {
+          provider: normalizedProvider,
+          operationalEvent: "pre_binding_replay",
+          eventCode: preBindingReplay.eventCode,
+          deliveryId: preBindingReplay.delivery?.id,
+        });
+        return res.status(preBindingReplay.httpStatus).json(preBindingReplay.payload);
+      }
+
+      if (preBindingReplay.status === "processing") {
+        return sendCodeClipProviderProcessingDuplicate(res);
+      }
+
+      if (["failed", "unavailable"].includes(preBindingReplay.status)) {
+        return sendCodeClipProviderLedgerFailure(res);
+      }
+
+      if (preBindingReplay.status !== "not_found") {
+        return sendCodeClipProviderLedgerFailure(res);
+      }
+
+      const bindingRoute = await resolveCodeClipProviderAccountBindingRoute({
+        provider: normalizedProvider,
+        providerAccountId,
+        channel: providerEnvelope.envelope.channel,
+        keyword,
+        queryClient: database.pool,
+        getEventByCode: database.getCampaignByCode,
+      });
+
+      if (!bindingRoute.ok) {
+        if (bindingRoute.reason === "NO_MATCH") {
+          return res.status(404).json({
+            ok: false,
+            error: "Event not found",
+          });
+        }
+
+        emitCodeClipProviderDeliverySignal("warn", {
+          provider: normalizedProvider,
+          operationalEvent: "provider_account_binding_failure",
+          reason: bindingRoute.reason || "PROVIDER_ACCOUNT_BINDING_FAILED",
+        });
+        return sendCodeClipProviderLedgerFailure(res);
+      }
+
+      activationRequest = {
+        ok: true,
+        provider: normalizedProvider,
+        eventCode: bindingRoute.eventCode,
+        keyword,
+        messageId,
+        providerAccountId,
+        event: bindingRoute.event,
+        resolution: bindingRoute.resolution,
+        idempotency: {
+          provider: normalizedProvider,
+          eventCode: bindingRoute.eventCode,
+          messageId,
+        },
+      };
+    } else {
+      activationRequest = buildCodeClipProviderActivationRequest({
+        provider: req.params.provider,
+        normalizedProviderInput,
+        body: providerAdapterInput,
+        headers: req.headers || {},
+        metadata: providerEnvelope.envelope.metadata,
+        events,
+      });
+    }
 
     if (!activationRequest.ok) {
       if (["PROVIDER_REQUIRED", "KEYWORD_REQUIRED"].includes(activationRequest.reason)) {

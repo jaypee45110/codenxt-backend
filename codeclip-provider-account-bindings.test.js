@@ -36,14 +36,18 @@ function createBindingClient() {
   const rows = [];
   let nextId = 1;
 
-  function findActive(provider, providerAccountId) {
-    return rows.find(
+  function findActiveRows(provider, providerAccountId) {
+    return rows.filter(
       (row) =>
         row.vertical === "codeclip" &&
         row.provider === provider &&
         row.provider_account_id === providerAccountId &&
         row.status === "active"
-    ) || null;
+    );
+  }
+
+  function findActive(provider, providerAccountId) {
+    return findActiveRows(provider, providerAccountId)[0] || null;
   }
 
   function findById(id) {
@@ -83,8 +87,7 @@ function createBindingClient() {
         /provider_account_id = \$3/.test(sql) &&
         /status = 'active'/.test(sql)
       ) {
-        const row = findActive(params[1], params[2]);
-        return { rows: row ? [row] : [] };
+        return { rows: findActiveRows(params[1], params[2]).slice(0, 2) };
       }
 
       if (/WHERE id = \$1/.test(sql) && /FROM codeclip_provider_account_bindings/.test(sql)) {
@@ -392,6 +395,26 @@ test("codeClip provider account binding active lookup excludes disabled rows", a
   assert.equal(activeAfterDisable, null);
   assert.equal(disabledAgain.status, "disabled");
   assert.equal(disabledAgain.disabledAt, disabled.disabledAt);
+});
+
+test("codeClip provider account binding active lookup detects ambiguous active rows", async () => {
+  const client = createBindingClient();
+  client.rows.push(
+    createBindingRow({ id: 1, event_code: "CC-BIND-1" }),
+    createBindingRow({ id: 2, event_code: "CC-BIND-2" })
+  );
+
+  await assert.rejects(
+    () =>
+      findActiveCodeClipProviderAccountBinding(
+        { provider: "meta", providerAccountId: "page-1" },
+        { queryClient: client }
+      ),
+    (error) => {
+      assert.equal(error.code, "PROVIDER_ACCOUNT_BINDING_AMBIGUOUS");
+      return true;
+    }
+  );
 });
 
 test("codeClip provider account binding can rebind after deactivation", async () => {

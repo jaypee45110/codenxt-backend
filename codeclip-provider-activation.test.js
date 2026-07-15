@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  eventMatchesBoundProviderActivation,
   resolveCodeClipProviderActivationEvent,
 } = require("./verticals/codeclip/provider-activation");
 
@@ -191,5 +192,23 @@ test("codeClip provider activation lookup returns no match for missing activatio
       ],
     }),
     { ok: false, reason: "NO_MATCH" }
+  );
+});
+
+test("bound codeClip provider activation accepts keyword ingress when activation method is both", () => {
+  assert.equal(
+    eventMatchesBoundProviderActivation(
+      codeClipEvent({
+        activationMethod: "both",
+        activationChannels: ["Messenger"],
+        providerAccountIds: ["legacy-other-account"],
+      }),
+      {
+        provider: "meta",
+        channel: "messenger",
+        keyword: "clip",
+      }
+    ),
+    true
   );
 });

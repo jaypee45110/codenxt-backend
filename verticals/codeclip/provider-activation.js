@@ -106,6 +106,21 @@ function eventMatchesProviderActivation(event, { provider, keyword, providerAcco
   return !!eventKeyword && eventKeyword === normalizeToken(keyword);
 }
 
+function eventMatchesBoundProviderActivation(event, { provider, channel, keyword } = {}) {
+  if (normalizeToken(event?.vertical) !== "codeclip") return false;
+
+  const status = normalizeToken(event?.status || event?.metadata?.status || event?.config?.status);
+  if (status && status !== "active") return false;
+
+  const activationMethod = normalizeToken(readActivationValue(event, "activationMethod"));
+  if (activationMethod && !["keyword", "both"].includes(activationMethod)) return false;
+
+  if (!providerMatchesActivationChannels(channel || provider, event)) return false;
+
+  const eventKeyword = normalizeToken(readActivationValue(event, "activationKeyword"));
+  return !!eventKeyword && eventKeyword === normalizeToken(keyword);
+}
+
 function resolveCodeClipProviderActivationEvent({
   provider,
   keyword,
@@ -137,5 +152,6 @@ function resolveCodeClipProviderActivationEvent({
 }
 
 module.exports = {
+  eventMatchesBoundProviderActivation,
   resolveCodeClipProviderActivationEvent,
 };

@@ -27,6 +27,8 @@ const dbModulePath = require.resolve("./db");
 const originalDb = require(dbModulePath);
 const providerDeliveries = new Map();
 const providerDeliveryCalls = [];
+const providerBindings = [];
+const campaignsByCode = new Map();
 
 function providerDeliveryKey(identity = {}) {
   return [
@@ -40,8 +42,13 @@ function providerDeliveryKey(identity = {}) {
 function resetProviderDeliveryLedger() {
   providerDeliveries.clear();
   providerDeliveryCalls.length = 0;
+  providerBindings.length = 0;
+  campaignsByCode.clear();
   createCodeClipProviderDeliveryStub.fail = false;
   updateCodeClipProviderDeliveryStateStub.fail = false;
+  providerBindingPool.failDeliveryLookup = false;
+  providerBindingPool.failBindingLookup = false;
+  providerBindingPool.bindingLookupCount = 0;
 }
 
 function createProviderDeliveryRow(delivery = {}) {
@@ -64,6 +71,123 @@ function createProviderDeliveryRow(delivery = {}) {
     retryEligible: false,
     terminalState: false,
   };
+}
+
+function providerDeliverySqlRow(row = {}) {
+  return {
+    id: row.id || `${row.provider}-${row.eventCode}-${row.externalMessageId}`,
+    provider: row.provider,
+    provider_account_id: row.providerAccountId,
+    event_code: row.eventCode,
+    event_id: row.eventId,
+    external_message_id: row.externalMessageId,
+    idempotency_key: row.idempotencyKey,
+    payload_fingerprint: row.payloadFingerprint,
+    verification_state: row.verificationState,
+    processing_state: row.processingState,
+    attempt_count: row.attemptCount,
+    core_persistence_state: row.corePersistenceState,
+    completion_state: row.completionState,
+    response_status: row.responseStatus,
+    public_response_json: row.publicResponseJson,
+    error_class: row.errorClass,
+    retry_eligible: row.retryEligible,
+    terminal_state: row.terminalState,
+    received_at: row.receivedAt || "2026-07-14T00:00:00.000Z",
+    last_attempt_at: row.lastAttemptAt || null,
+    completed_at: row.completedAt || null,
+    created_at: row.createdAt || "2026-07-14T00:00:00.000Z",
+    updated_at: row.updatedAt || "2026-07-14T00:00:00.000Z",
+  };
+}
+
+function createBindingRow({ eventCode, providerAccountId, status = "active", channel = "messenger" } = {}) {
+  return {
+    id: `binding-${providerBindings.length + 1}`,
+    vertical: "codeclip",
+    event_code: eventCode,
+    provider: "meta",
+    channel,
+    provider_account_id: providerAccountId,
+    status,
+    display_name: null,
+    created_by: "test",
+    metadata: {},
+    created_at: "2026-07-14T00:00:00.000Z",
+    updated_at: "2026-07-14T00:00:00.000Z",
+    disabled_at: status === "disabled" ? "2026-07-14T00:01:00.000Z" : null,
+  };
+}
+
+function addMetaBinding({ eventCode, accountId, status = "active", channel = "messenger" }) {
+  const row = createBindingRow({ eventCode, providerAccountId: accountId, status, channel });
+  providerBindings.push(row);
+  return row;
+}
+
+const providerBindingPool = {
+  failDeliveryLookup: false,
+  failBindingLookup: false,
+  bindingLookupCount: 0,
+  async query(sql, params = []) {
+    if (
+      /FROM codeclip_provider_deliveries/.test(sql) &&
+      /external_message_id = \$3/.test(sql)
+    ) {
+      if (providerBindingPool.failDeliveryLookup) {
+        throw new Error("forced provider delivery lookup failure");
+      }
+
+      return {
+        rows: Array.from(providerDeliveries.values())
+          .filter((row) =>
+            row.provider === params[0] &&
+            row.providerAccountId === params[1] &&
+            row.externalMessageId === params[2]
+          )
+          .slice(0, 2)
+          .map(providerDeliverySqlRow),
+      };
+    }
+
+    if (
+      /FROM codeclip_provider_account_bindings/.test(sql) &&
+      /provider_account_id = \$3/.test(sql)
+    ) {
+      providerBindingPool.bindingLookupCount += 1;
+      if (providerBindingPool.failBindingLookup) {
+        throw new Error("forced provider binding lookup failure");
+      }
+
+      return {
+        rows: providerBindings
+          .filter((row) =>
+            row.vertical === params[0] &&
+            row.provider === params[1] &&
+            row.provider_account_id === params[2] &&
+            row.status === "active"
+          )
+          .slice(0, 2),
+      };
+    }
+
+    return { rows: [] };
+  },
+};
+
+async function saveCampaignStub(event = {}) {
+  if (event?.code) {
+    campaignsByCode.set(event.code, {
+      id: event.id,
+      vertical: event.vertical,
+      event_code: event.code,
+      raw_event: event,
+    });
+  }
+}
+
+async function getCampaignByCodeStub(eventCode) {
+  return campaignsByCode.get(eventCode) || null;
 }
 
 async function createCodeClipProviderDeliveryStub(delivery = {}) {
@@ -112,6 +236,9 @@ require.cache[dbModulePath] = {
   loaded: true,
   exports: {
     ...originalDb,
+    pool: providerBindingPool,
+    saveCampaign: saveCampaignStub,
+    getCampaignByCode: getCampaignByCodeStub,
     createCodeClipProviderDelivery: createCodeClipProviderDeliveryStub,
     updateCodeClipProviderDeliveryState: updateCodeClipProviderDeliveryStateStub,
   },
@@ -223,7 +350,16 @@ function metaBody({ messageId, accountId, senderId = "sender-1", text = " vip " 
   });
 }
 
-async function createCodeClipMetaEvent(baseUrl, { accountId, keyword = "VIP" }) {
+async function createCodeClipMetaEvent(baseUrl, {
+  accountId,
+  keyword = "VIP",
+  activationChannels = ["Messenger"],
+  activationMethod = "keyword",
+  status = "active",
+  bindAccount = true,
+  bindingChannel = "messenger",
+  legacyProviderAccountIds = false,
+} = {}) {
   const code = `CC-META-${Date.now()}-${Math.random().toString(16).slice(2)}`.toUpperCase();
   const response = await fetch(`${baseUrl}/event`, {
     method: "POST",
@@ -235,10 +371,11 @@ async function createCodeClipMetaEvent(baseUrl, { accountId, keyword = "VIP" }) 
       startAt: "2099-01-01T10:00:00.000Z",
       unlockAt: "2099-01-01T10:00:00.000Z",
       endAt: "2099-01-01T11:00:00.000Z",
-      activationMethod: "keyword",
+      status,
+      activationMethod,
       activationKeyword: keyword,
-      activationChannels: ["Messenger"],
-      providerAccountIds: [accountId],
+      activationChannels,
+      ...(legacyProviderAccountIds ? { providerAccountIds: [accountId] } : {}),
       rewards: {
         openClip: {
           enabled: true,
@@ -249,6 +386,9 @@ async function createCodeClipMetaEvent(baseUrl, { accountId, keyword = "VIP" }) 
   });
 
   assert.equal(response.status, 200);
+  if (bindAccount) {
+    addMetaBinding({ eventCode: code, accountId, channel: bindingChannel });
+  }
   return code;
 }
 
@@ -277,6 +417,24 @@ function assertNoProviderInternals(payload) {
   }
 }
 
+function assertProviderUnavailable(response, payload) {
+  assert.equal(response.status, 503);
+  assert.deepEqual(payload, {
+    ok: false,
+    error: "Provider keyword processing unavailable",
+  });
+  assertNoProviderInternals(payload);
+}
+
+function assertProviderNoMatch(response, payload) {
+  assert.equal(response.status, 404);
+  assert.deepEqual(payload, {
+    ok: false,
+    error: "Event not found",
+  });
+  assertNoProviderInternals(payload);
+}
+
 async function withPatchedKeywordRuntime(handler, run) {
   const originalHandler = codeClipVertical.service.handleCodeClipKeywordEntry;
   codeClipVertical.service.handleCodeClipKeywordEntry = handler;
@@ -285,6 +443,20 @@ async function withPatchedKeywordRuntime(handler, run) {
     await run();
   } finally {
     codeClipVertical.service.handleCodeClipKeywordEntry = originalHandler;
+  }
+}
+
+async function withConsoleWarnSpy(run) {
+  const originalWarn = console.warn;
+  const entries = [];
+  console.warn = (...args) => {
+    entries.push(args);
+  };
+
+  try {
+    await run(entries);
+  } finally {
+    console.warn = originalWarn;
   }
 }
 
@@ -426,7 +598,7 @@ test("completed duplicate Meta delivery reuses stored public response", async ()
       assertNoProviderInternals(secondPayload);
       assert.equal(
         providerDeliveryCalls.filter((call) => call.method === "create").length,
-        2
+        1
       );
       assert.ok(
         providerDeliveryCalls.some(
@@ -486,7 +658,7 @@ test("Redis replay has priority when durable PostgreSQL replay also exists", asy
       });
       const secondPayload = await second.json();
 
-      assert.equal(second.status, 200);
+      assert.equal(second.status, 202);
       assert.deepEqual(secondPayload, firstPayload);
       assert.equal(runtimeCalls, 1);
       assertNoProviderInternals(secondPayload);
@@ -972,15 +1144,397 @@ test("Meta payload without matching activation does not create a durable provide
     });
     const payload = await response.json();
 
-    assert.equal(response.status, 404);
-    assert.deepEqual(payload, {
-      ok: false,
-      error: "Event not found",
-      reason: "NO_MATCH",
-    });
+    assertProviderNoMatch(response, payload);
     assert.equal(providerDeliveryCalls.length, 0);
     assert.equal(providerDeliveries.size, 0);
-    assertNoProviderInternals(payload);
+  });
+});
+
+test("Meta strict binding rejects disabled binding without legacy fallback", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-disabled-binding-${Date.now()}`;
+    const keyword = `DISABLED-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword,
+      bindAccount: false,
+      legacyProviderAccountIds: true,
+    });
+    addMetaBinding({ eventCode: code, accountId, status: "disabled" });
+    const rawBody = metaBody({
+      messageId: `meta-disabled-binding-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+
+    assertProviderNoMatch(response, payload);
+    assert.equal(providerDeliveryCalls.length, 0);
+    assert.equal(providerDeliveries.size, 0);
+  });
+});
+
+test("Meta strict binding does not route to another episode by keyword", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-bound-a-${Date.now()}`;
+    const codeA = await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword: "BOUND-A",
+    });
+    await createCodeClipMetaEvent(baseUrl, {
+      accountId: `page-bound-b-${Date.now()}`,
+      keyword: "BOUND-B",
+    });
+    const rawBody = metaBody({
+      messageId: `meta-wrong-keyword-${Date.now()}`,
+      accountId,
+      text: "BOUND-B",
+    });
+    let runtimeCalled = false;
+
+    await withPatchedKeywordRuntime(async () => {
+      runtimeCalled = true;
+      return {
+        httpStatus: 200,
+        payload: { success: true },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const payload = await response.json();
+
+      assertProviderNoMatch(response, payload);
+      assert.equal(runtimeCalled, false);
+      assert.equal(providerDeliveryCalls.length, 0);
+      assert.equal(providerDeliveries.size, 0);
+      assert.equal(
+        providerBindings.find((row) => row.event_code === codeA)?.provider_account_id,
+        accountId
+      );
+    });
+  });
+});
+
+test("Meta strict binding rejects channel mismatch on bound episode", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-channel-mismatch-${Date.now()}`;
+    const keyword = `CHANNEL-${Date.now()}`;
+    await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword,
+      activationChannels: ["sms"],
+      bindingChannel: "messenger",
+    });
+    const rawBody = metaBody({
+      messageId: `meta-channel-mismatch-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+
+    assertProviderNoMatch(response, payload);
+    assert.equal(providerDeliveryCalls.length, 0);
+    assert.equal(providerDeliveries.size, 0);
+  });
+});
+
+test("Meta strict binding treats invalid binding event as public-safe unavailable", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-invalid-event-${Date.now()}`;
+    addMetaBinding({ eventCode: `CC-MISSING-${Date.now()}`, accountId });
+    const rawBody = metaBody({
+      messageId: `meta-invalid-event-${Date.now()}`,
+      accountId,
+      text: "INVALID",
+    });
+    let runtimeCalled = false;
+
+    await withConsoleWarnSpy(async (warnEntries) => {
+      await withPatchedKeywordRuntime(async () => {
+        runtimeCalled = true;
+        return {
+          httpStatus: 200,
+          payload: { success: true },
+          internal: committedPersistenceInternal(),
+        };
+      }, async () => {
+        const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+          method: "POST",
+          headers: metaHeaders(rawBody),
+          body: rawBody,
+        });
+        const payload = await response.json();
+
+        assertProviderUnavailable(response, payload);
+        assert.equal(runtimeCalled, false);
+        assert.equal(providerDeliveryCalls.length, 0);
+        assert.equal(providerDeliveries.size, 0);
+        assert.ok(warnEntries.some((entry) =>
+          entry[0] === "codeClip provider delivery signal" &&
+          entry[1]?.operationalEvent === "provider_account_binding_failure" &&
+          entry[1]?.reason === "PROVIDER_ACCOUNT_BINDING_EVENT_INVALID"
+        ));
+      });
+    });
+  });
+});
+
+test("Meta strict binding fails closed for ambiguous active binding rows", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-ambiguous-binding-${Date.now()}`;
+    const keyword = `AMBIG-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    providerBindings.push(createBindingRow({
+      eventCode: code,
+      providerAccountId: accountId,
+      channel: "messenger",
+    }));
+    const rawBody = metaBody({
+      messageId: `meta-ambiguous-binding-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+    let runtimeCalled = false;
+
+    await withConsoleWarnSpy(async (warnEntries) => {
+      await withPatchedKeywordRuntime(async () => {
+        runtimeCalled = true;
+        return {
+          httpStatus: 200,
+          payload: { success: true },
+          internal: committedPersistenceInternal(),
+        };
+      }, async () => {
+        const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+          method: "POST",
+          headers: metaHeaders(rawBody),
+          body: rawBody,
+        });
+        const payload = await response.json();
+
+        assertProviderUnavailable(response, payload);
+        assert.equal(runtimeCalled, false);
+        assert.equal(providerDeliveryCalls.length, 0);
+        assert.equal(providerDeliveries.size, 0);
+        assert.ok(warnEntries.some((entry) =>
+          entry[0] === "codeClip provider delivery signal" &&
+          entry[1]?.operationalEvent === "provider_account_binding_failure" &&
+          entry[1]?.reason === "PROVIDER_ACCOUNT_BINDING_AMBIGUOUS"
+        ));
+      });
+    });
+  });
+});
+
+test("Meta strict binding fails closed when binding lookup is unavailable", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-binding-fail-${Date.now()}`;
+    const keyword = `BINDFAIL-${Date.now()}`;
+    await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const rawBody = metaBody({
+      messageId: `meta-binding-fail-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+    let runtimeCalled = false;
+    providerBindingPool.failBindingLookup = true;
+
+    await withConsoleWarnSpy(async (warnEntries) => {
+      await withPatchedKeywordRuntime(async () => {
+        runtimeCalled = true;
+        return {
+          httpStatus: 200,
+          payload: { success: true },
+          internal: committedPersistenceInternal(),
+        };
+      }, async () => {
+        const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+          method: "POST",
+          headers: metaHeaders(rawBody),
+          body: rawBody,
+        });
+        const payload = await response.json();
+
+        assertProviderUnavailable(response, payload);
+        assert.equal(runtimeCalled, false);
+        assert.equal(providerDeliveryCalls.length, 0);
+        assert.equal(providerDeliveries.size, 0);
+        assert.ok(warnEntries.some((entry) =>
+          entry[0] === "codeClip provider delivery signal" &&
+          entry[1]?.operationalEvent === "provider_account_binding_failure" &&
+          entry[1]?.reason === "PROVIDER_ACCOUNT_BINDING_UNAVAILABLE"
+        ));
+      });
+    });
+  });
+});
+
+test("Meta delivery replay lookup unavailable fails closed before binding lookup", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-delivery-lookup-fail-${Date.now()}`;
+    const keyword = `DELIVERYFAIL-${Date.now()}`;
+    await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const rawBody = metaBody({
+      messageId: `meta-delivery-lookup-fail-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+    let runtimeCalled = false;
+    providerBindingPool.failDeliveryLookup = true;
+
+    await withConsoleWarnSpy(async (warnEntries) => {
+      await withPatchedKeywordRuntime(async () => {
+        runtimeCalled = true;
+        return {
+          httpStatus: 200,
+          payload: { success: true },
+          internal: committedPersistenceInternal(),
+        };
+      }, async () => {
+        const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+          method: "POST",
+          headers: metaHeaders(rawBody),
+          body: rawBody,
+        });
+        const payload = await response.json();
+
+        assertProviderUnavailable(response, payload);
+        assert.equal(runtimeCalled, false);
+        assert.equal(providerDeliveryCalls.length, 0);
+        assert.equal(providerDeliveries.size, 0);
+        assert.equal(
+          warnEntries.some((entry) =>
+            entry[0] === "codeClip provider delivery signal" &&
+            entry[1]?.operationalEvent === "provider_account_binding_failure"
+          ),
+          false
+        );
+      });
+    });
+  });
+});
+
+test("Meta payload eventCode cannot override provider account binding", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-payload-override-${Date.now()}`;
+    const keyword = `OVERRIDE-${Date.now()}`;
+    const boundCode = await createCodeClipMetaEvent(baseUrl, { accountId, keyword });
+    const payloadCode = await createCodeClipMetaEvent(baseUrl, {
+      accountId: `page-payload-other-${Date.now()}`,
+      keyword,
+    });
+    const body = JSON.parse(metaBody({
+      messageId: `meta-payload-override-${Date.now()}`,
+      accountId,
+      text: keyword,
+    }));
+    body.eventCode = payloadCode;
+    const requestBody = JSON.stringify(body);
+    let runtimeInput = null;
+
+    await withPatchedKeywordRuntime(async (input) => {
+      runtimeInput = input;
+      return {
+        httpStatus: 200,
+        payload: {
+          success: true,
+          eventCode: input.eventCode,
+          messageId: input.messageId,
+        },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(requestBody),
+        body: requestBody,
+      });
+      const payload = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(runtimeInput.eventCode, boundCode);
+      assert.notEqual(runtimeInput.eventCode, payloadCode);
+      assert.equal(payload.eventCode, boundCode);
+      assertNoProviderInternals(payload);
+    });
+  });
+});
+
+test("Meta replay after rebinding returns original committed response without runtime", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-rebinding-replay-${Date.now()}`;
+    const keywordA = `REPLAYA-${Date.now()}`;
+    const keywordB = `REPLAYB-${Date.now()}`;
+    const codeA = await createCodeClipMetaEvent(baseUrl, { accountId, keyword: keywordA });
+    const codeB = await createCodeClipMetaEvent(baseUrl, {
+      accountId: `page-rebinding-other-${Date.now()}`,
+      keyword: keywordB,
+    });
+    const messageId = `meta-rebinding-replay-${Date.now()}`;
+    const rawBody = metaBody({ messageId, accountId, text: keywordA });
+    let runtimeCalls = 0;
+
+    await withPatchedKeywordRuntime(async (input) => {
+      runtimeCalls += 1;
+      return {
+        httpStatus: 200,
+        payload: {
+          success: true,
+          eventCode: input.eventCode,
+          messageId: input.messageId,
+        },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const first = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const firstPayload = await first.json();
+      const bindingLookupsAfterFirst = providerBindingPool.bindingLookupCount;
+
+      assert.equal(first.status, 200);
+      assert.equal(firstPayload.eventCode, codeA);
+      assert.equal(runtimeCalls, 1);
+      assert.equal(bindingLookupsAfterFirst, 1);
+
+      for (const binding of providerBindings) {
+        if (binding.provider_account_id === accountId) {
+          binding.status = "disabled";
+        }
+      }
+      addMetaBinding({ eventCode: codeB, accountId });
+
+      const second = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const secondPayload = await second.json();
+
+      assert.equal(second.status, 200);
+      assert.deepEqual(secondPayload, firstPayload);
+      assert.equal(secondPayload.eventCode, codeA);
+      assert.equal(runtimeCalls, 1);
+      assert.equal(providerBindingPool.bindingLookupCount, bindingLookupsAfterFirst);
+    });
   });
 });
 
@@ -1077,13 +1631,10 @@ test("live Meta critical persistence failure returns public-safe 503 without com
       });
       const duplicatePayload = await duplicate.json();
 
-      assert.equal(duplicate.status, 202);
+      assert.equal(duplicate.status, 503);
       assert.deepEqual(duplicatePayload, {
         ok: false,
-        duplicate: true,
-        status: "processing",
-        eventCode: code,
-        messageId,
+        error: "Provider keyword processing unavailable",
       });
       assertNoProviderInternals(duplicatePayload);
       assert.equal(await redis.get(getProviderKeywordResponseKey(idempotencyKey)), null);

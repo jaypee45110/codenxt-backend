@@ -1370,6 +1370,51 @@ async function getCodeClipProviderDeliveryByIdentity(identity = {}, queryClient 
   return mapCodeClipProviderDeliveryRow(result.rows?.[0] || null);
 }
 
+async function findCodeClipProviderDeliveryForReplayIdentity({
+  provider,
+  providerAccountId,
+  externalMessageId,
+  queryClient,
+} = {}) {
+  if (!queryClient || typeof queryClient.query !== 'function') {
+    return { status: 'unavailable', row: null };
+  }
+
+  const normalized = {
+    provider: String(provider || '').trim().toLowerCase(),
+    providerAccountId: String(providerAccountId || '').trim(),
+    externalMessageId: String(externalMessageId || '').trim(),
+  };
+  if (!normalized.provider || !normalized.providerAccountId || !normalized.externalMessageId) {
+    return { status: 'not_found', row: null };
+  }
+
+  try {
+    const result = await queryClient.query(
+      `
+        SELECT *
+        FROM codeclip_provider_deliveries
+        WHERE provider = $1
+          AND provider_account_id = $2
+          AND external_message_id = $3
+        ORDER BY received_at DESC, id DESC
+        LIMIT 2
+      `,
+      [
+        normalized.provider,
+        normalized.providerAccountId,
+        normalized.externalMessageId,
+      ]
+    );
+    const rows = result.rows || [];
+    if (!rows.length) return { status: 'not_found', row: null };
+    if (rows.length > 1) return { status: 'ambiguous', row: null };
+    return { status: 'found', row: mapCodeClipProviderDeliveryRow(rows[0]) };
+  } catch (error) {
+    return { status: 'unavailable', row: null, error };
+  }
+}
+
 function optionalCodeClipProviderDeliveryString(value) {
   const normalized = String(value || "").trim();
   return normalized || null;
@@ -2776,6 +2821,7 @@ module.exports = {
   ensureCodeClipProviderDeliveriesTable,
   createCodeClipProviderDelivery,
   getCodeClipProviderDeliveryByIdentity,
+  findCodeClipProviderDeliveryForReplayIdentity,
   updateCodeClipProviderDeliveryState,
   hasCodeClipProviderDeliveryReplayInvariants,
   classifyCodeClipProviderDeliveryOperationalState,
