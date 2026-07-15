@@ -474,6 +474,23 @@ test("codeClip provider account binding repository requires explicit query clien
   );
 });
 
+test("codeClip provider account binding repository operations do not initialize schema", async () => {
+  const client = createBindingClient();
+
+  await createBinding(client);
+  await findActiveCodeClipProviderAccountBinding(
+    { provider: "meta", providerAccountId: "page-1" },
+    { queryClient: client }
+  );
+  await listCodeClipProviderAccountBindingsForEvent("CC-BIND-1", { queryClient: client });
+  await disableCodeClipProviderAccountBinding(1, { queryClient: client });
+
+  assert.equal(
+    client.calls.some((call) => /CREATE TABLE|CREATE INDEX/.test(call.sql)),
+    false
+  );
+});
+
 test("codeClip provider account binding mask handles short and long account IDs", () => {
   assert.equal(maskCodeClipProviderAccountId(""), "");
   assert.equal(maskCodeClipProviderAccountId("1"), "••");

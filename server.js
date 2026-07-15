@@ -71,6 +71,12 @@ database.ensureCodePodKeywordInteractionsTable().catch((error) => {
   console.error("CODEPOD KEYWORD INTERACTIONS TABLE INIT FAILED:", error.message);
 });
 
+async function initializeCodeClipStartup({
+  databaseClient = database,
+} = {}) {
+  await databaseClient.ensureCodeClipProviderAccountBindingsTable();
+}
+
 function parsePositiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value || ""), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -7463,9 +7469,14 @@ app.get("/reward-claims/:eventCode", requireCodePerksAdmin, limitRewardClaimsRea
 });
 
 
-if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Backend running on port ${PORT}`);
+async function startBackendServer({
+  port = PORT,
+  databaseClient = database,
+} = {}) {
+  await initializeCodeClipStartup({ databaseClient });
+
+  return app.listen(port, () => {
+    console.log(`Backend running on port ${port}`);
 
     if (process.env.REDIS_URL) {
       testRedisConnection().catch((err) => {
@@ -7479,4 +7490,15 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app };
+if (require.main === module) {
+  startBackendServer().catch((error) => {
+    console.error("BACKEND STARTUP FAILED:", error.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  app,
+  initializeCodeClipStartup,
+  startBackendServer,
+};
