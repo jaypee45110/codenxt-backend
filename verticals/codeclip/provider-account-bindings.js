@@ -18,11 +18,12 @@ const PROVIDER_CHANNELS = Object.freeze({
 const VALID_STATUSES = new Set([ACTIVE_STATUS, DISABLED_STATUS]);
 
 /**
- * codeClip provider account binding is the durable, authoritative mapping from
- * vertical + provider + providerAccountId to one active codeClip episode.
- * displayName is optional presentation data only; it is never part of binding
- * identity, uniqueness, or routing. This milestone establishes only the
- * store/repository contract; live provider routing does not read this store yet.
+ * Durable repository for codeClip Provider Account Bindings. Live Meta routing
+ * uses this store as the authoritative mapping from vertical + provider +
+ * providerAccountId to one active eventCode. Schema initialization is owned by
+ * backend startup/bootstrap; repository functions do not create schema.
+ * displayName is optional presentation data only and never affects identity,
+ * uniqueness, or routing.
  */
 
 class CodeClipProviderAccountBindingError extends Error {
