@@ -75,6 +75,7 @@ async function initializeCodeClipStartup({
   databaseClient = database,
 } = {}) {
   await databaseClient.ensureCodeClipProviderAccountBindingsTable();
+  await databaseClient.ensureCodeClipProviderAccountBindingAuditTable();
 }
 
 function parsePositiveInteger(value, fallback) {
@@ -6318,6 +6319,20 @@ function sendCodeClipBindingOperatorUnavailable(res) {
   });
 }
 
+function sendCodeClipBindingAuditUnavailable(res) {
+  return res.status(503).json({
+    ok: false,
+    error: "Provider binding audit unavailable",
+  });
+}
+
+function sendCodeClipBindingAuditInvalid(res) {
+  return res.status(400).json({
+    ok: false,
+    error: "Invalid provider binding audit request",
+  });
+}
+
 function sendCodeClipBindingOperatorInvalid(res) {
   return res.status(400).json({
     ok: false,
@@ -6351,6 +6366,25 @@ function isExplicitTrue(value) {
 
 function isProviderBindingError(error, code) {
   return error?.name === "CodeClipProviderAccountBindingError" && error.code === code;
+}
+
+function isProviderBindingAuditRequestError(error) {
+  return (
+    error?.name === "CodeClipProviderAccountBindingError" &&
+    [
+      "INVALID_PROVIDER_BINDING_AUDIT_LIMIT",
+      "INVALID_PROVIDER_BINDING_AUDIT_INPUT",
+      "INVALID_PROVIDER_BINDING_AUDIT_ACTION",
+      "INVALID_PROVIDER_BINDING_AUDIT_ACTOR",
+      "INVALID_PROVIDER_BINDING_AUDIT_QUERY",
+    ].includes(error.code)
+  );
+}
+
+function cloneCodeClipAuditState(state) {
+  if (state === undefined || state === null) return null;
+  if (typeof structuredClone === "function") return structuredClone(state);
+  return JSON.parse(JSON.stringify(state));
 }
 
 function hasForbiddenCodeClipBindingUpdateFields(body = {}) {
@@ -6406,6 +6440,10 @@ app.post("/internal/codeclip/events/:eventCode/provider-bindings", requireCodeCl
     createCodeClipProviderAccountBinding,
     toPublicCodeClipProviderBinding,
   } = require("./verticals/codeclip/provider-account-bindings");
+  const {
+    appendCodeClipProviderAccountBindingAuditEvent,
+    toAuditState,
+  } = require("./verticals/codeclip/provider-account-binding-audit");
 
   try {
     const event = await getCodeClipOperatorEventByCode(eventCode);
@@ -6413,20 +6451,39 @@ app.post("/internal/codeclip/events/:eventCode/provider-bindings", requireCodeCl
       return res.status(404).json({ ok: false, error: "Event not found" });
     }
 
-    const result = await createCodeClipProviderAccountBinding(
-      {
-        provider: req.body?.provider,
-        channel: req.body?.channel,
-        providerAccountId: req.body?.providerAccountId,
-        displayName: req.body?.displayName,
-        eventCode,
-        createdBy: "operator",
-      },
-      {
-        queryClient: database.pool,
-        getEventByCode: getCampaignByCode,
+    const result = await withCodeClipCorePersistenceTransaction(async ({ queryClient }) => {
+      const created = await createCodeClipProviderAccountBinding(
+        {
+          provider: req.body?.provider,
+          channel: req.body?.channel,
+          providerAccountId: req.body?.providerAccountId,
+          displayName: req.body?.displayName,
+          eventCode,
+          createdBy: "operator",
+        },
+        {
+          queryClient,
+          getEventByCode: async (candidateEventCode) =>
+            String(candidateEventCode || "").trim() === eventCode ? event : null,
+        }
+      );
+
+      if (created.created) {
+        await appendCodeClipProviderAccountBindingAuditEvent(
+          {
+            binding: created.row,
+            action: "created",
+            actorType: "operator",
+            actorId: "admin",
+            beforeState: null,
+            afterState: cloneCodeClipAuditState(toAuditState(created.row)),
+          },
+          { queryClient }
+        );
       }
-    );
+
+      return created;
+    });
 
     return res.status(result.created ? 201 : 200).json({
       ok: true,
@@ -6453,6 +6510,48 @@ app.post("/internal/codeclip/events/:eventCode/provider-bindings", requireCodeCl
       operationalEvent: "provider_binding_create_failed",
     });
     return sendCodeClipBindingOperatorUnavailable(res);
+  }
+});
+
+app.get("/internal/codeclip/provider-bindings/:bindingId/audit", requireCodeClipAdmin, async (req, res) => {
+  const bindingId = String(req.params.bindingId || "").trim();
+  const {
+    getCodeClipProviderAccountBindingById,
+  } = require("./verticals/codeclip/provider-account-bindings");
+  const {
+    listCodeClipProviderAccountBindingAuditEvents,
+    normalizeCodeClipProviderBindingAuditLimit,
+    toPublicCodeClipProviderBindingAuditEvent,
+  } = require("./verticals/codeclip/provider-account-binding-audit");
+
+  try {
+    const limit = normalizeCodeClipProviderBindingAuditLimit(req.query?.limit);
+    const binding = await getCodeClipProviderAccountBindingById(bindingId, {
+      queryClient: database.pool,
+    });
+
+    if (!binding) return sendCodeClipBindingOperatorNotFound(res);
+
+    const events = await listCodeClipProviderAccountBindingAuditEvents(
+      { bindingId, limit },
+      { queryClient: database.pool }
+    );
+
+    return res.json({
+      ok: true,
+      bindingId,
+      events: events.map(toPublicCodeClipProviderBindingAuditEvent).filter(Boolean),
+    });
+  } catch (error) {
+    if (isProviderBindingAuditRequestError(error)) {
+      return sendCodeClipBindingAuditInvalid(res);
+    }
+    console.warn("codeClip provider binding audit read failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/provider-bindings/:bindingId/audit",
+      operationalEvent: "provider_binding_audit_read_failed",
+    });
+    return sendCodeClipBindingAuditUnavailable(res);
   }
 });
 
@@ -6487,9 +6586,15 @@ app.get("/internal/codeclip/provider-bindings/:bindingId", requireCodeClipAdmin,
 app.patch("/internal/codeclip/provider-bindings/:bindingId", requireCodeClipAdmin, async (req, res) => {
   const bindingId = String(req.params.bindingId || "").trim();
   const {
+    getCodeClipProviderAccountBindingById,
+    normalizeCodeClipProviderBindingDisplayName,
     updateCodeClipProviderAccountBinding,
     toPublicCodeClipProviderBinding,
   } = require("./verticals/codeclip/provider-account-bindings");
+  const {
+    appendCodeClipProviderAccountBindingAuditEvent,
+    toAuditState,
+  } = require("./verticals/codeclip/provider-account-binding-audit");
 
   try {
     if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
@@ -6499,17 +6604,45 @@ app.patch("/internal/codeclip/provider-bindings/:bindingId", requireCodeClipAdmi
       return sendCodeClipBindingOperatorInvalid(res);
     }
 
-    const binding = await updateCodeClipProviderAccountBinding(
-      bindingId,
-      { displayName: req.body.displayName },
-      { queryClient: database.pool }
-    );
+    const result = await withCodeClipCorePersistenceTransaction(async ({ queryClient }) => {
+      const existing = await getCodeClipProviderAccountBindingById(bindingId, { queryClient });
+      if (!existing) return { updated: false, row: null };
 
-    if (!binding) return sendCodeClipBindingOperatorNotFound(res);
+      const normalizedDisplayName = normalizeCodeClipProviderBindingDisplayName(
+        req.body.displayName
+      );
+      const currentDisplayName = existing.displayName || null;
+      if (currentDisplayName === normalizedDisplayName) {
+        return { updated: false, row: existing };
+      }
+
+      const updated = await updateCodeClipProviderAccountBinding(
+        bindingId,
+        { displayName: req.body.displayName },
+        { queryClient }
+      );
+      if (!updated) return { updated: false, row: null };
+
+      await appendCodeClipProviderAccountBindingAuditEvent(
+        {
+          binding: updated,
+          action: "display_name_updated",
+          actorType: "operator",
+          actorId: "admin",
+          beforeState: cloneCodeClipAuditState(toAuditState(existing)),
+          afterState: cloneCodeClipAuditState(toAuditState(updated)),
+        },
+        { queryClient }
+      );
+
+      return { updated: true, row: updated };
+    });
+
+    if (!result.row) return sendCodeClipBindingOperatorNotFound(res);
 
     return res.json({
       ok: true,
-      binding: toPublicCodeClipProviderBinding(binding),
+      binding: toPublicCodeClipProviderBinding(result.row),
     });
   } catch (error) {
     if (isProviderBindingError(error, "INVALID_PROVIDER_BINDING")) {
@@ -6528,20 +6661,44 @@ app.patch("/internal/codeclip/provider-bindings/:bindingId", requireCodeClipAdmi
 app.post("/internal/codeclip/provider-bindings/:bindingId/disable", requireCodeClipAdmin, async (req, res) => {
   const bindingId = String(req.params.bindingId || "").trim();
   const {
+    getCodeClipProviderAccountBindingById,
     disableCodeClipProviderAccountBinding,
     toPublicCodeClipProviderBinding,
   } = require("./verticals/codeclip/provider-account-bindings");
+  const {
+    appendCodeClipProviderAccountBindingAuditEvent,
+    toAuditState,
+  } = require("./verticals/codeclip/provider-account-binding-audit");
 
   try {
-    const binding = await disableCodeClipProviderAccountBinding(bindingId, {
-      queryClient: database.pool,
+    const result = await withCodeClipCorePersistenceTransaction(async ({ queryClient }) => {
+      const existing = await getCodeClipProviderAccountBindingById(bindingId, { queryClient });
+      if (!existing) return { disabled: false, row: null };
+      if (existing.status === "disabled") return { disabled: false, row: existing };
+
+      const disabled = await disableCodeClipProviderAccountBinding(bindingId, { queryClient });
+      if (!disabled) return { disabled: false, row: null };
+
+      await appendCodeClipProviderAccountBindingAuditEvent(
+        {
+          binding: disabled,
+          action: "disabled",
+          actorType: "operator",
+          actorId: "admin",
+          beforeState: cloneCodeClipAuditState(toAuditState(existing)),
+          afterState: cloneCodeClipAuditState(toAuditState(disabled)),
+        },
+        { queryClient }
+      );
+
+      return { disabled: true, row: disabled };
     });
 
-    if (!binding) return sendCodeClipBindingOperatorNotFound(res);
+    if (!result.row) return sendCodeClipBindingOperatorNotFound(res);
 
     return res.json({
       ok: true,
-      binding: toPublicCodeClipProviderBinding(binding),
+      binding: toPublicCodeClipProviderBinding(result.row),
     });
   } catch (error) {
     console.warn("codeClip provider binding operator disable failed", {
@@ -6556,13 +6713,41 @@ app.post("/internal/codeclip/provider-bindings/:bindingId/disable", requireCodeC
 app.post("/internal/codeclip/provider-bindings/:bindingId/reactivate", requireCodeClipAdmin, async (req, res) => {
   const bindingId = String(req.params.bindingId || "").trim();
   const {
+    getCodeClipProviderAccountBindingById,
     reactivateCodeClipProviderAccountBinding,
     toPublicCodeClipProviderBinding,
   } = require("./verticals/codeclip/provider-account-bindings");
+  const {
+    appendCodeClipProviderAccountBindingAuditEvent,
+    toAuditState,
+  } = require("./verticals/codeclip/provider-account-binding-audit");
 
   try {
-    const result = await reactivateCodeClipProviderAccountBinding(bindingId, {
-      queryClient: database.pool,
+    const result = await withCodeClipCorePersistenceTransaction(async ({ queryClient }) => {
+      const existing = await getCodeClipProviderAccountBindingById(bindingId, { queryClient });
+      if (!existing) return { reactivated: false, row: null };
+      if (existing.status === "active") return { reactivated: false, row: existing };
+
+      const reactivated = await reactivateCodeClipProviderAccountBinding(bindingId, {
+        queryClient,
+      });
+      if (!reactivated.row) return reactivated;
+
+      if (reactivated.reactivated) {
+        await appendCodeClipProviderAccountBindingAuditEvent(
+          {
+            binding: reactivated.row,
+            action: "reactivated",
+            actorType: "operator",
+            actorId: "admin",
+            beforeState: cloneCodeClipAuditState(toAuditState(existing)),
+            afterState: cloneCodeClipAuditState(toAuditState(reactivated.row)),
+          },
+          { queryClient }
+        );
+      }
+
+      return reactivated;
     });
 
     if (!result.row) return sendCodeClipBindingOperatorNotFound(res);
@@ -6586,6 +6771,44 @@ app.post("/internal/codeclip/provider-bindings/:bindingId/reactivate", requireCo
       operationalEvent: "provider_binding_reactivate_failed",
     });
     return sendCodeClipBindingOperatorUnavailable(res);
+  }
+});
+
+app.get("/internal/codeclip/events/:eventCode/provider-binding-audit", requireCodeClipAdmin, async (req, res) => {
+  const eventCode = String(req.params.eventCode || "").trim();
+  const {
+    listCodeClipProviderAccountBindingAuditEvents,
+    normalizeCodeClipProviderBindingAuditLimit,
+    toPublicCodeClipProviderBindingAuditEvent,
+  } = require("./verticals/codeclip/provider-account-binding-audit");
+
+  try {
+    const limit = normalizeCodeClipProviderBindingAuditLimit(req.query?.limit);
+    const event = await getCodeClipOperatorEventByCode(eventCode);
+    if (!event) {
+      return res.status(404).json({ ok: false, error: "Event not found" });
+    }
+
+    const events = await listCodeClipProviderAccountBindingAuditEvents(
+      { eventCode, limit },
+      { queryClient: database.pool }
+    );
+
+    return res.json({
+      ok: true,
+      eventCode,
+      events: events.map(toPublicCodeClipProviderBindingAuditEvent).filter(Boolean),
+    });
+  } catch (error) {
+    if (isProviderBindingAuditRequestError(error)) {
+      return sendCodeClipBindingAuditInvalid(res);
+    }
+    console.warn("codeClip provider binding event audit read failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/events/:eventCode/provider-binding-audit",
+      operationalEvent: "provider_binding_event_audit_read_failed",
+    });
+    return sendCodeClipBindingAuditUnavailable(res);
   }
 });
 

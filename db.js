@@ -1285,6 +1285,50 @@ async function ensureCodeClipProviderAccountBindingsTable(queryClient = pool) {
   `);
 }
 
+async function ensureCodeClipProviderAccountBindingAuditTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_provider_account_binding_audit (
+      id BIGSERIAL PRIMARY KEY,
+      vertical TEXT NOT NULL,
+      binding_id TEXT NOT NULL,
+      event_code TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      action TEXT NOT NULL,
+      actor_type TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      before_state JSONB,
+      after_state JSONB,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (vertical = 'codeclip'),
+      CHECK (action IN ('created', 'display_name_updated', 'disabled', 'reactivated'))
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_account_binding_audit_binding_id_idx
+    ON codeclip_provider_account_binding_audit (binding_id)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_account_binding_audit_event_code_idx
+    ON codeclip_provider_account_binding_audit (event_code)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_account_binding_audit_created_at_idx
+    ON codeclip_provider_account_binding_audit (created_at)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_account_binding_audit_vertical_event_created_idx
+    ON codeclip_provider_account_binding_audit (vertical, event_code, created_at)
+  `);
+}
+
 async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
   if (!queryClient) return;
 
@@ -2818,6 +2862,7 @@ module.exports = {
   getCodePodKeywordInteraction,
   getCodePodKeywordInteractionSummary,
   ensureCodeClipProviderAccountBindingsTable,
+  ensureCodeClipProviderAccountBindingAuditTable,
   ensureCodeClipProviderDeliveriesTable,
   createCodeClipProviderDelivery,
   getCodeClipProviderDeliveryByIdentity,

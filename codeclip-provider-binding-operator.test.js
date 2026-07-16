@@ -9,19 +9,31 @@ const ADMIN_KEY = "codeclip-binding-admin-key";
 const state = {
   campaigns: new Map(),
   bindings: [],
+  auditRows: [],
   nextBindingId: 1,
+  nextAuditId: 1,
   fail: false,
+  failAudit: false,
   failReactivateUniqueViolation: false,
   reactivateReturnsNoRows: false,
+  transactionLog: [],
+  auditInsertUsedTransaction: false,
+  bindingMutationUsedTransaction: false,
 };
 
 function resetState() {
   state.campaigns.clear();
   state.bindings.length = 0;
+  state.auditRows.length = 0;
   state.nextBindingId = 1;
+  state.nextAuditId = 1;
   state.fail = false;
+  state.failAudit = false;
   state.failReactivateUniqueViolation = false;
   state.reactivateReturnsNoRows = false;
+  state.transactionLog.length = 0;
+  state.auditInsertUsedTransaction = false;
+  state.bindingMutationUsedTransaction = false;
 }
 
 function addEvent(eventCode, vertical = "codeclip") {
@@ -78,9 +90,50 @@ function activeRows(provider, providerAccountId) {
 }
 
 const pool = {
+  isTransactionClient: false,
   async query(sql, params = []) {
     if (state.fail) {
       throw new Error("forced provider binding database failure SELECT * FROM secrets");
+    }
+
+    if (/INSERT INTO codeclip_provider_account_binding_audit/.test(sql)) {
+      if (state.failAudit) {
+        throw new Error("forced provider binding audit failure INSERT secret token");
+      }
+      state.auditInsertUsedTransaction = Boolean(this.isTransactionClient);
+      const row = {
+        id: String(state.nextAuditId++),
+        vertical: params[0],
+        binding_id: params[1],
+        event_code: params[2],
+        provider: params[3],
+        channel: params[4],
+        action: params[5],
+        actor_type: params[6],
+        actor_id: params[7],
+        before_state: JSON.parse(params[8]),
+        after_state: JSON.parse(params[9]),
+        metadata: JSON.parse(params[10]),
+        created_at: `2026-07-15T00:20:0${state.nextAuditId}.000Z`,
+      };
+      state.auditRows.push(row);
+      return { rows: [row] };
+    }
+
+    if (/FROM codeclip_provider_account_binding_audit/.test(sql)) {
+      let rows = state.auditRows.filter((row) => row.vertical === "codeclip");
+      if (/binding_id =/.test(sql)) {
+        rows = rows.filter((row) => row.binding_id === String(params[1]));
+      }
+      if (/event_code =/.test(sql)) {
+        rows = rows.filter((row) => row.event_code === String(params[1]));
+      }
+      return {
+        rows: rows
+          .slice()
+          .sort((left, right) => Number(right.id) - Number(left.id))
+          .slice(0, Number(params[params.length - 1])),
+      };
     }
 
     if (
@@ -92,6 +145,7 @@ const pool = {
     }
 
     if (/INSERT INTO codeclip_provider_account_bindings/.test(sql)) {
+      state.bindingMutationUsedTransaction = Boolean(this.isTransactionClient);
       const existing = activeRows(params[2], params[4])[0];
       if (existing) {
         const error = new Error("duplicate active binding");
@@ -119,6 +173,7 @@ const pool = {
     }
 
     if (/UPDATE codeclip_provider_account_bindings/.test(sql) && /display_name = \$2/.test(sql)) {
+      state.bindingMutationUsedTransaction = Boolean(this.isTransactionClient);
       const row =
         state.bindings.find(
           (item) => String(item.id) === String(params[0]) && item.vertical === "codeclip"
@@ -130,6 +185,7 @@ const pool = {
     }
 
     if (/UPDATE codeclip_provider_account_bindings/.test(sql) && /status = 'active'/.test(sql)) {
+      state.bindingMutationUsedTransaction = Boolean(this.isTransactionClient);
       if (state.failReactivateUniqueViolation) {
         const error = new Error("duplicate active binding");
         error.code = "23505";
@@ -148,6 +204,7 @@ const pool = {
     }
 
     if (/UPDATE codeclip_provider_account_bindings/.test(sql)) {
+      state.bindingMutationUsedTransaction = Boolean(this.isTransactionClient);
       const row =
         state.bindings.find(
           (item) => String(item.id) === String(params[0]) && item.vertical === "codeclip"
@@ -176,6 +233,30 @@ const pool = {
   },
 };
 
+async function withCodeClipCorePersistenceTransaction(work) {
+  const snapshot = {
+    bindings: JSON.parse(JSON.stringify(state.bindings)),
+    auditRows: JSON.parse(JSON.stringify(state.auditRows)),
+    nextBindingId: state.nextBindingId,
+    nextAuditId: state.nextAuditId,
+  };
+  const queryClient = Object.create(pool);
+  queryClient.isTransactionClient = true;
+  try {
+    state.transactionLog.push("BEGIN");
+    const result = await work({ queryClient });
+    state.transactionLog.push("COMMIT");
+    return result;
+  } catch (error) {
+    state.transactionLog.push("ROLLBACK");
+    state.bindings.splice(0, state.bindings.length, ...snapshot.bindings);
+    state.auditRows.splice(0, state.auditRows.length, ...snapshot.auditRows);
+    state.nextBindingId = snapshot.nextBindingId;
+    state.nextAuditId = snapshot.nextAuditId;
+    throw error;
+  }
+}
+
 async function getCampaignByCode(eventCode) {
   if (state.fail) {
     throw new Error("forced campaign database failure SELECT * FROM campaigns");
@@ -195,6 +276,8 @@ require.cache[dbModulePath] = {
     ensureCodePodGoldXtraRedemptionsTable: async () => null,
     ensureCodePodKeywordInteractionsTable: async () => null,
     ensureCodeClipProviderAccountBindingsTable: async () => null,
+    ensureCodeClipProviderAccountBindingAuditTable: async () => null,
+    withCodeClipCorePersistenceTransaction,
   },
 };
 
@@ -326,6 +409,22 @@ async function reactivateBindingRequest(baseUrl, bindingId, headers = adminHeade
   );
 }
 
+async function bindingAuditRequest(baseUrl, bindingId, query = "", headers = adminHeaders()) {
+  return readJson(
+    await fetch(`${baseUrl}/internal/codeclip/provider-bindings/${bindingId}/audit${query}`, {
+      headers,
+    })
+  );
+}
+
+async function eventAuditRequest(baseUrl, eventCode, query = "", headers = adminHeaders()) {
+  return readJson(
+    await fetch(`${baseUrl}/internal/codeclip/events/${eventCode}/provider-binding-audit${query}`, {
+      headers,
+    })
+  );
+}
+
 function validBody(overrides = {}) {
   return {
     provider: "meta",
@@ -389,7 +488,39 @@ test("codeClip provider binding operator creates a safe Meta Instagram binding",
     assert.equal(response.body.binding.maskedAccountId.endsWith("3456"), true);
     assert.equal(response.body.binding.providerAccountId, undefined);
     assert.equal(state.bindings.length, 1);
+    assert.equal(state.auditRows.length, 1);
+    assert.equal(state.auditRows[0].action, "created");
+    assert.equal(state.auditRows[0].before_state, null);
+    assert.equal(state.auditRows[0].after_state.eventCode, "CC-CREATE");
+    assert.equal(state.auditRows[0].after_state.providerAccountId, undefined);
+    assert.equal(state.bindingMutationUsedTransaction, true);
+    assert.equal(state.auditInsertUsedTransaction, true);
+    assert.deepEqual(state.transactionLog, ["BEGIN", "COMMIT"]);
     assertNoLeaks(response.body);
+    assertNoLeaks(state.auditRows);
+  });
+});
+
+test("codeClip provider binding operator rolls back create when audit insert fails", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    addEvent("CC-CREATE-AUDIT-FAIL");
+    state.failAudit = true;
+
+    const response = await createBindingRequest(
+      baseUrl,
+      "CC-CREATE-AUDIT-FAIL",
+      validBody({ providerAccountId: "audit-create-fail-123456" })
+    );
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(response.body, {
+      ok: false,
+      error: "Provider binding operation unavailable",
+    });
+    assert.deepEqual(state.transactionLog, ["BEGIN", "ROLLBACK"]);
+    assert.equal(state.bindings.length, 0);
+    assert.equal(state.auditRows.length, 0);
+    assertNoLeaks(response.body, "audit-create-fail-123456");
   });
 });
 
@@ -453,6 +584,7 @@ test("codeClip provider binding operator create is idempotent only for exact act
     assert.equal(repeated.body.created, false);
     assert.equal(repeated.body.binding.id, created.body.binding.id);
     assert.equal(state.bindings.length, 1);
+    assert.equal(state.auditRows.length, 1);
     assert.equal(incompatible.status, 409);
     assert.deepEqual(incompatible.body, {
       ok: false,
@@ -528,13 +660,42 @@ test("codeClip provider binding operator disables bindings idempotently", async 
     assert.equal(disabled.body.binding.status, "disabled");
     assert.ok(disabled.body.binding.disabledAt);
     assert.equal(activeRows("meta", "disable-secret-123456").length, 0);
+    assert.equal(state.auditRows.length, 1);
+    assert.equal(state.auditRows[0].action, "disabled");
+    assert.equal(state.auditRows[0].before_state.status, "active");
+    assert.equal(state.auditRows[0].after_state.status, "disabled");
     assert.equal(repeated.status, 200);
     assert.equal(repeated.body.binding.status, "disabled");
+    assert.equal(state.auditRows.length, 1);
     assert.equal(missing.status, 404);
     assert.deepEqual(missing.body, { ok: false, error: "Provider binding not found" });
     assert.equal(foreignResponse.status, 404);
     assert.deepEqual(foreignResponse.body, { ok: false, error: "Provider binding not found" });
     assertNoLeaks(disabled.body, "disable-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator rolls back disable when audit insert fails", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const binding = addBinding({
+      eventCode: "CC-DISABLE-AUDIT-FAIL",
+      providerAccountId: "disable-audit-fail-123456",
+    });
+    const before = { ...binding };
+    state.failAudit = true;
+
+    const response = await disableBindingRequest(baseUrl, binding.id);
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(response.body, {
+      ok: false,
+      error: "Provider binding operation unavailable",
+    });
+    assert.deepEqual(state.transactionLog, ["BEGIN", "ROLLBACK"]);
+    assert.equal(state.bindings[0].status, before.status);
+    assert.equal(state.bindings[0].disabled_at, before.disabled_at);
+    assert.equal(state.auditRows.length, 0);
+    assertNoLeaks(response.body, "disable-audit-fail-123456");
   });
 });
 
@@ -588,22 +749,64 @@ test("codeClip provider binding operator update changes only displayName", async
     const before = { ...state.bindings[0] };
 
     const updated = await updateBindingRequest(baseUrl, active.id, { displayName: " Main Instagram " });
-    const clearedEmpty = await updateBindingRequest(baseUrl, active.id, { displayName: "" });
-    const clearedNull = await updateBindingRequest(baseUrl, disabled.id, { displayName: null });
+    const auditAfterUpdate = state.auditRows.length;
+    const updatedAtAfterUpdate = state.bindings[0].updated_at;
+    const repeated = await updateBindingRequest(baseUrl, active.id, { displayName: "Main Instagram" });
 
     assert.equal(updated.status, 200);
     assert.equal(updated.body.binding.displayName, "Main Instagram");
     assert.equal(updated.body.binding.updatedAt, "2026-07-15T00:10:00.000Z");
+    assert.equal(repeated.status, 200);
+    assert.equal(repeated.body.binding.displayName, "Main Instagram");
+    assert.equal(state.auditRows.length, auditAfterUpdate);
+    assert.equal(state.bindings[0].updated_at, updatedAtAfterUpdate);
+
+    const clearedEmpty = await updateBindingRequest(baseUrl, active.id, { displayName: "" });
+    const clearedNull = await updateBindingRequest(baseUrl, disabled.id, { displayName: null });
+
     assert.equal(clearedEmpty.status, 200);
     assert.equal(clearedEmpty.body.binding.displayName, null);
     assert.equal(clearedNull.status, 200);
     assert.equal(clearedNull.body.binding.displayName, null);
+    assert.equal(state.auditRows.length, 3);
+    assert.deepEqual(
+      state.auditRows.map((row) => row.action),
+      ["display_name_updated", "display_name_updated", "display_name_updated"]
+    );
+    assert.equal(state.auditRows[0].before_state.displayName, "Old active");
+    assert.equal(state.auditRows[0].after_state.displayName, "Main Instagram");
+    assert.equal(state.auditRows[0].after_state.providerAccountId, undefined);
     assert.equal(state.bindings[0].event_code, before.event_code);
     assert.equal(state.bindings[0].provider, before.provider);
     assert.equal(state.bindings[0].channel, before.channel);
     assert.equal(state.bindings[0].provider_account_id, before.provider_account_id);
     assert.equal(state.bindings[0].status, before.status);
     assertNoLeaks(updated.body, "update-active-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator rolls back update when audit insert fails", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const binding = addBinding({
+      eventCode: "CC-UPDATE-AUDIT-FAIL",
+      providerAccountId: "update-audit-fail-123456",
+      displayName: "Before",
+    });
+    const before = { ...binding };
+    state.failAudit = true;
+
+    const response = await updateBindingRequest(baseUrl, binding.id, { displayName: "After" });
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(response.body, {
+      ok: false,
+      error: "Provider binding operation unavailable",
+    });
+    assert.deepEqual(state.transactionLog, ["BEGIN", "ROLLBACK"]);
+    assert.equal(state.bindings[0].display_name, before.display_name);
+    assert.equal(state.bindings[0].updated_at, before.updated_at);
+    assert.equal(state.auditRows.length, 0);
+    assertNoLeaks(response.body, "update-audit-fail-123456");
   });
 });
 
@@ -681,6 +884,10 @@ test("codeClip provider binding operator reactivates disabled binding in place",
     assert.equal(state.bindings.length, 1);
     assert.equal(state.bindings[0].id, binding.id);
     assert.equal(state.bindings[0].disabled_at, null);
+    assert.equal(state.auditRows.length, 1);
+    assert.equal(state.auditRows[0].action, "reactivated");
+    assert.equal(state.auditRows[0].before_state.status, "disabled");
+    assert.equal(state.auditRows[0].after_state.status, "active");
     assertNoLeaks(response.body, "reactivate-secret-123456");
   });
 });
@@ -699,6 +906,7 @@ test("codeClip provider binding operator reactivation is idempotent for active b
     assert.equal(response.body.binding.id, binding.id);
     assert.equal(response.body.binding.status, "active");
     assert.equal(state.bindings.length, 1);
+    assert.equal(state.auditRows.length, 0);
     assertNoLeaks(response.body, "reactivate-idem-secret-123456");
   });
 });
@@ -730,7 +938,57 @@ test("codeClip provider binding operator reactivation conflicts with another act
     assert.equal(state.bindings[0].provider_account_id, beforeDisabled.provider_account_id);
     assert.equal(state.bindings[1].status, beforeCompeting.status);
     assert.equal(state.bindings[1].event_code, beforeCompeting.event_code);
+    assert.equal(state.auditRows.length, 0);
     assertNoLeaks(response.body, "reactivate-conflict-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator reactivation writes no audit on unique conflict", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const disabled = addBinding({
+      eventCode: "CC-REACTIVATE-23505",
+      providerAccountId: "reactivate-23505-secret-123456",
+      status: "disabled",
+    });
+    const before = { ...disabled };
+    state.failReactivateUniqueViolation = true;
+
+    const response = await reactivateBindingRequest(baseUrl, disabled.id);
+
+    assert.equal(response.status, 409);
+    assert.deepEqual(response.body, {
+      ok: false,
+      error: "Provider account binding conflict",
+    });
+    assert.equal(state.bindings[0].status, before.status);
+    assert.equal(state.bindings[0].disabled_at, before.disabled_at);
+    assert.equal(state.auditRows.length, 0);
+    assertNoLeaks(response.body, "reactivate-23505-secret-123456");
+  });
+});
+
+test("codeClip provider binding operator rolls back reactivation when audit insert fails", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    const binding = addBinding({
+      eventCode: "CC-REACTIVATE-AUDIT-FAIL",
+      providerAccountId: "reactivate-audit-fail-123456",
+      status: "disabled",
+    });
+    const before = { ...binding };
+    state.failAudit = true;
+
+    const response = await reactivateBindingRequest(baseUrl, binding.id);
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(response.body, {
+      ok: false,
+      error: "Provider binding operation unavailable",
+    });
+    assert.deepEqual(state.transactionLog, ["BEGIN", "ROLLBACK"]);
+    assert.equal(state.bindings[0].status, before.status);
+    assert.equal(state.bindings[0].disabled_at, before.disabled_at);
+    assert.equal(state.auditRows.length, 0);
+    assertNoLeaks(response.body, "reactivate-audit-fail-123456");
   });
 });
 
@@ -761,6 +1019,116 @@ test("codeClip provider binding operator reactivation hides unavailable bindings
     assert.deepEqual(noRowsResponse.body, { ok: false, error: "Provider binding not found" });
     assertNoLeaks(foreignResponse.body, "reactivate-foreign-secret-123456");
     assertNoLeaks(noRowsResponse.body, "reactivate-norow-secret-123456");
+  });
+});
+
+test("codeClip provider binding audit routes list binding and Episode history safely", async () => {
+  await withAuthorizedServer(async (baseUrl) => {
+    addEvent("CC-AUDIT-ROUTE");
+    addEvent("CC-AUDIT-EMPTY");
+    addEvent("CP-AUDIT", "codepod");
+    const created = await createBindingRequest(
+      baseUrl,
+      "CC-AUDIT-ROUTE",
+      validBody({ providerAccountId: "audit-route-secret-123456" })
+    );
+    await updateBindingRequest(baseUrl, created.body.binding.id, { displayName: "Updated" });
+
+    const byBinding = await bindingAuditRequest(baseUrl, created.body.binding.id);
+    const byEpisode = await eventAuditRequest(baseUrl, "CC-AUDIT-ROUTE", "?limit=1");
+    const empty = await eventAuditRequest(baseUrl, "CC-AUDIT-EMPTY");
+    const missingBinding = await bindingAuditRequest(baseUrl, "missing-binding");
+    const missingEvent = await eventAuditRequest(baseUrl, "CC-MISSING");
+    const foreignEvent = await eventAuditRequest(baseUrl, "CP-AUDIT");
+
+    assert.equal(byBinding.status, 200);
+    assert.deepEqual(
+      byBinding.body.events.map((event) => event.action),
+      ["display_name_updated", "created"]
+    );
+    assert.equal(byBinding.body.events[0].actorType, "operator");
+    assert.equal(byBinding.body.events[0].actorId, "admin");
+    assert.equal(byBinding.body.events[0].afterState.providerAccountId, undefined);
+    assert.equal(byEpisode.status, 200);
+    assert.equal(byEpisode.body.events.length, 1);
+    assert.equal(byEpisode.body.events[0].action, "display_name_updated");
+    assert.deepEqual(empty.body, { ok: true, eventCode: "CC-AUDIT-EMPTY", events: [] });
+    assert.equal(missingBinding.status, 404);
+    assert.equal(missingEvent.status, 404);
+    assert.equal(foreignEvent.status, 404);
+    assertNoLeaks(byBinding.body, "audit-route-secret-123456");
+    assertNoLeaks(byEpisode.body, "audit-route-secret-123456");
+  });
+});
+
+test("codeClip provider binding audit route fails closed when admin key is not configured", async () => {
+  await withEnv({ CODECLIP_ADMIN_KEY: undefined }, async () => {
+    await withServer(async (baseUrl) => {
+      const binding = addBinding({
+        eventCode: "CC-AUDIT-NO-CONFIG",
+        providerAccountId: "audit-no-config-secret-123456",
+      });
+
+      const response = await bindingAuditRequest(baseUrl, binding.id, "", {});
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(response.body, {
+        ok: false,
+        error: "Operator inspection unavailable",
+      });
+      assertNoLeaks(response.body, "audit-no-config-secret-123456");
+    });
+  });
+});
+
+test("codeClip provider binding audit routes enforce auth, limits, and public-safe failures", async () => {
+  await withEnv({ CODECLIP_ADMIN_KEY: ADMIN_KEY }, async () => {
+    await withServer(async (baseUrl) => {
+      addEvent("CC-AUDIT-LIMIT");
+      const binding = addBinding({
+        eventCode: "CC-AUDIT-LIMIT",
+        providerAccountId: "audit-limit-secret-123456",
+      });
+      state.auditRows.push({
+        id: "1",
+        vertical: "codeclip",
+        binding_id: binding.id,
+        event_code: "CC-AUDIT-LIMIT",
+        provider: "meta",
+        channel: "instagram",
+        action: "created",
+        actor_type: "operator",
+        actor_id: "admin",
+        before_state: null,
+        after_state: { maskedAccountId: "••••3456" },
+        metadata: {},
+        created_at: "2026-07-15T00:20:00.000Z",
+      });
+
+      const missingKey = await bindingAuditRequest(baseUrl, binding.id, "", {});
+      const wrongKey = await bindingAuditRequest(baseUrl, binding.id, "", { "x-admin-key": "wrong-key" });
+      const invalidLimit = await bindingAuditRequest(baseUrl, binding.id, "?limit=10abc");
+      const cappedLimit = await eventAuditRequest(baseUrl, "CC-AUDIT-LIMIT", "?limit=250");
+      state.fail = true;
+      const unavailable = await bindingAuditRequest(baseUrl, binding.id);
+
+      assert.equal(missingKey.status, 401);
+      assert.equal(wrongKey.status, 401);
+      assert.equal(invalidLimit.status, 400);
+      assert.deepEqual(invalidLimit.body, {
+        ok: false,
+        error: "Invalid provider binding audit request",
+      });
+      assert.equal(cappedLimit.status, 200);
+      assert.equal(cappedLimit.body.events.length, 1);
+      assert.equal(unavailable.status, 503);
+      assert.deepEqual(unavailable.body, {
+        ok: false,
+        error: "Provider binding audit unavailable",
+      });
+      assertNoLeaks(invalidLimit.body, "audit-limit-secret-123456");
+      assertNoLeaks(unavailable.body, "audit-limit-secret-123456");
+    });
   });
 });
 

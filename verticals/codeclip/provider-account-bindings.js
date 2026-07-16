@@ -97,6 +97,13 @@ function normalizeOptionalString(value, fieldName, maxLength) {
   return normalized;
 }
 
+function normalizeCodeClipProviderBindingDisplayName(value) {
+  if (value === undefined) {
+    throw invalidBinding("displayName is required", { fieldName: "displayName" });
+  }
+  return normalizeOptionalString(value, "displayName", 160);
+}
+
 function normalizeRequiredString(value, fieldName, maxLength) {
   if (typeof value !== "string") {
     throw invalidBinding(`${fieldName} must be a non-empty string`, { fieldName });
@@ -433,7 +440,7 @@ async function updateCodeClipProviderAccountBinding(
     throw invalidBinding("displayName is required", { fieldName: "displayName" });
   }
 
-  const normalizedDisplayName = normalizeOptionalString(value.displayName, "displayName", 160);
+  const normalizedDisplayName = normalizeCodeClipProviderBindingDisplayName(value.displayName);
   const result = await client.query(
     `
       UPDATE codeclip_provider_account_bindings
@@ -509,6 +516,7 @@ module.exports = {
   CODECLIP_VERTICAL,
   CodeClipProviderAccountBindingError,
   normalizeCodeClipProviderAccountBindingInput,
+  normalizeCodeClipProviderBindingDisplayName,
   createCodeClipProviderAccountBinding,
   getCodeClipProviderAccountBindingById,
   findActiveCodeClipProviderAccountBinding,
