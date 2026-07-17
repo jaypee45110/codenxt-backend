@@ -9,6 +9,10 @@ const ACTIVE_STATUS = "active";
 const DISABLED_STATUS = "disabled";
 const PROVIDER_ACCOUNT_ID_MAX_LENGTH = 256;
 const CREATED_BY_MAX_LENGTH = 80;
+const DEFAULT_LIST_LIMIT = 25;
+const MAX_LIST_LIMIT = 100;
+const LIST_CURSOR_VERSION = 1;
+const MAX_BIGINT_ID = 9223372036854775807n;
 
 const PROVIDER_CHANNELS = Object.freeze({
   meta: new Set(["instagram", "messenger", "whatsapp"]),
@@ -49,6 +53,10 @@ function bindingConflict(message, details = {}) {
     message,
     details
   );
+}
+
+function providerBindingError(code, message, details = {}) {
+  return new CodeClipProviderAccountBindingError(code, message, details);
 }
 
 function eventNotFound(message, details = {}) {
@@ -104,6 +112,12 @@ function normalizeCodeClipProviderBindingDisplayName(value) {
   return normalizeOptionalString(value, "displayName", 160);
 }
 
+function assertNoControlCharacters(value, fieldName) {
+  if (/[\u0000-\u001f\u007f]/.test(String(value || ""))) {
+    throw invalidBinding(`${fieldName} contains invalid characters`, { fieldName });
+  }
+}
+
 function normalizeRequiredString(value, fieldName, maxLength) {
   if (typeof value !== "string") {
     throw invalidBinding(`${fieldName} must be a non-empty string`, { fieldName });
@@ -112,6 +126,25 @@ function normalizeRequiredString(value, fieldName, maxLength) {
   if (!normalized) {
     throw invalidBinding(`${fieldName} must be a non-empty string`, { fieldName });
   }
+  assertNoControlCharacters(normalized, fieldName);
+  if (normalized.length > maxLength) {
+    throw invalidBinding(`${fieldName} is too long`, { fieldName, maxLength });
+  }
+  return normalized;
+}
+
+function normalizeCodeClipProviderBindingEventCode(value) {
+  return normalizeRequiredString(value, "eventCode", 120);
+}
+
+function normalizeOptionalFilterString(value, fieldName, maxLength) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") {
+    throw invalidBinding(`${fieldName} must be a string`, { fieldName });
+  }
+  const normalized = value.trim();
+  if (!normalized) return null;
+  assertNoControlCharacters(normalized, fieldName);
   if (normalized.length > maxLength) {
     throw invalidBinding(`${fieldName} is too long`, { fieldName, maxLength });
   }
@@ -152,6 +185,110 @@ function normalizeCodeClipBindingStatus(status = ACTIVE_STATUS) {
   return normalized;
 }
 
+function normalizeCodeClipProviderBindingListLimit(limit) {
+  if (limit === undefined || limit === null || limit === "") return DEFAULT_LIST_LIMIT;
+  let parsed;
+  if (typeof limit === "number") {
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw invalidBinding("limit must be a positive integer", { fieldName: "limit" });
+    }
+    parsed = limit;
+  } else if (typeof limit === "string") {
+    const value = limit.trim();
+    if (!/^[0-9]+$/.test(value) || value.length > 6) {
+      throw invalidBinding("limit must be a positive integer", { fieldName: "limit" });
+    }
+    parsed = Number.parseInt(value, 10);
+    if (!parsed) {
+      throw invalidBinding("limit must be a positive integer", { fieldName: "limit" });
+    }
+  } else {
+    throw invalidBinding("limit must be a positive integer", { fieldName: "limit" });
+  }
+  return Math.min(parsed, MAX_LIST_LIMIT);
+}
+
+function normalizePositiveBigIntId(value, fieldName) {
+  const normalized = String(value || "").trim();
+  if (!/^[0-9]+$/.test(normalized)) {
+    throw invalidBinding(`${fieldName} is invalid`, { fieldName, reason: "INVALID_CURSOR" });
+  }
+  const parsed = BigInt(normalized);
+  if (parsed <= 0n || parsed > MAX_BIGINT_ID) {
+    throw invalidBinding(`${fieldName} is invalid`, { fieldName, reason: "INVALID_CURSOR" });
+  }
+  return normalized;
+}
+
+function normalizeCodeClipProviderBindingId(value) {
+  let normalized;
+  if (typeof value === "string") {
+    normalized = value.trim();
+    assertNoControlCharacters(normalized, "bindingId");
+  } else if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) {
+      throw invalidBinding("bindingId is invalid", { fieldName: "bindingId" });
+    }
+    normalized = String(value);
+  } else if (typeof value === "bigint") {
+    normalized = value.toString();
+  } else {
+    throw invalidBinding("bindingId is invalid", { fieldName: "bindingId" });
+  }
+
+  if (!/^[0-9]+$/.test(normalized)) {
+    throw invalidBinding("bindingId is invalid", { fieldName: "bindingId" });
+  }
+  const parsed = BigInt(normalized);
+  if (parsed <= 0n || parsed > MAX_BIGINT_ID) {
+    throw invalidBinding("bindingId is invalid", { fieldName: "bindingId" });
+  }
+  return normalized;
+}
+
+function normalizeCursorTimestamp(value, fieldName) {
+  const normalized = normalizeRequiredString(value, fieldName, 80);
+  if (!Number.isFinite(Date.parse(normalized))) {
+    throw invalidBinding(`${fieldName} is invalid`, { fieldName, reason: "INVALID_CURSOR" });
+  }
+  return normalized;
+}
+
+function encodeCodeClipProviderBindingCursor(binding) {
+  if (!binding) return null;
+  return Buffer.from(
+    JSON.stringify({
+      v: LIST_CURSOR_VERSION,
+      updatedAt: binding.updatedAt,
+      id: String(binding.id),
+    })
+  ).toString("base64url");
+}
+
+function decodeCodeClipProviderBindingCursor(cursor) {
+  if (cursor === undefined || cursor === null || cursor === "") return null;
+  if (typeof cursor !== "string" || cursor.length > 512) {
+    throw invalidBinding("cursor is invalid", { fieldName: "cursor", reason: "INVALID_CURSOR" });
+  }
+  try {
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    const keys = Object.keys(decoded || {}).sort().join(",");
+    if (!decoded || decoded.v !== LIST_CURSOR_VERSION || keys !== "id,updatedAt,v") {
+      throw new Error("invalid cursor shape");
+    }
+    return {
+      updatedAt: normalizeCursorTimestamp(decoded.updatedAt, "cursor.updatedAt"),
+      id: normalizePositiveBigIntId(decoded.id, "cursor.id"),
+    };
+  } catch {
+    throw invalidBinding("cursor is invalid", { fieldName: "cursor", reason: "INVALID_CURSOR" });
+  }
+}
+
+function escapeLikePattern(value) {
+  return String(value || "").replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
 function normalizeCodeClipProviderAccountBindingInput(input = {}) {
   const value = requirePlainObject(input, "binding");
   const vertical = String(value.vertical || CODECLIP_VERTICAL).trim().toLowerCase();
@@ -168,7 +305,7 @@ function normalizeCodeClipProviderAccountBindingInput(input = {}) {
 
   return {
     vertical: CODECLIP_VERTICAL,
-    eventCode: normalizeRequiredString(value.eventCode || value.event_code, "eventCode", 120),
+    eventCode: normalizeCodeClipProviderBindingEventCode(value.eventCode || value.event_code),
     provider,
     providerAccountId: normalizeRequiredString(
       value.providerAccountId || value.provider_account_id,
@@ -185,6 +322,27 @@ function normalizeCodeClipProviderAccountBindingInput(input = {}) {
         CREATED_BY_MAX_LENGTH
       ) || "operator",
     metadata,
+  };
+}
+
+function normalizeCodeClipProviderAccountBindingListFilters(filters = {}) {
+  const vertical = normalizeOptionalFilterString(filters.vertical, "vertical", 64) || CODECLIP_VERTICAL;
+  if (vertical.toLowerCase() !== CODECLIP_VERTICAL) {
+    throw invalidBinding("vertical must be codeclip", { fieldName: "vertical" });
+  }
+  const status = normalizeOptionalFilterString(filters.status, "status", 32);
+  if (status && !VALID_STATUSES.has(status.toLowerCase())) {
+    throw invalidBinding("status is not valid", { fieldName: "status" });
+  }
+  return {
+    vertical: CODECLIP_VERTICAL,
+    eventCode: normalizeOptionalFilterString(filters.eventCode || filters.event_code, "eventCode", 120),
+    provider: normalizeOptionalFilterString(filters.provider, "provider", 64)?.toLowerCase() || null,
+    channel: normalizeOptionalFilterString(filters.channel, "channel", 64)?.toLowerCase() || null,
+    status: status?.toLowerCase() || null,
+    search: normalizeOptionalFilterString(filters.search, "search", 120),
+    limit: normalizeCodeClipProviderBindingListLimit(filters.limit),
+    cursor: decodeCodeClipProviderBindingCursor(filters.cursor),
   };
 }
 
@@ -223,6 +381,7 @@ function toPublicCodeClipProviderBinding(binding = null) {
 
   return {
     id: mapped.id,
+    vertical: mapped.vertical,
     eventCode: mapped.eventCode,
     provider: mapped.provider,
     channel: mapped.channel,
@@ -270,6 +429,22 @@ async function getActiveBindingByIdentity(normalized, queryClient) {
   return mapCodeClipProviderAccountBindingRow(rows[0]);
 }
 
+async function listBindingsByIdentity(normalized, queryClient) {
+  const result = await queryClient.query(
+    `
+      SELECT *
+      FROM codeclip_provider_account_bindings
+      WHERE vertical = $1
+        AND provider = $2
+        AND provider_account_id = $3
+      ORDER BY status = 'active' DESC, updated_at DESC, id DESC
+      LIMIT 3
+    `,
+    [CODECLIP_VERTICAL, normalized.provider, normalized.providerAccountId]
+  );
+  return (result.rows || []).map(mapCodeClipProviderAccountBindingRow);
+}
+
 async function createCodeClipProviderAccountBinding(
   binding = {},
   { queryClient, getEventByCode = getCampaignByCode } = {}
@@ -295,8 +470,24 @@ async function createCodeClipProviderAccountBinding(
       };
     }
     throw bindingConflict("provider account is already bound to another episode or channel", {
-      provider: normalized.provider,
+      bindingId: existing.id,
+      provider: existing.provider,
       eventCode: existing.eventCode,
+      channel: existing.channel,
+      status: existing.status,
+    });
+  }
+
+  const disabledMatches = (await listBindingsByIdentity(normalized, client)).filter(
+    (binding) => binding.status === DISABLED_STATUS
+  );
+  if (disabledMatches.length) {
+    throw bindingConflict("provider account has a disabled binding that must be reactivated", {
+      provider: normalized.provider,
+      eventCode: disabledMatches[0].eventCode,
+      bindingId: disabledMatches[0].id,
+      status: disabledMatches[0].status,
+      reactivationRequired: true,
     });
   }
 
@@ -342,15 +533,97 @@ async function createCodeClipProviderAccountBinding(
       throw bindingConflict("provider account is already bound to another episode", {
         provider: normalized.provider,
         eventCode: conflict?.eventCode,
+        bindingId: conflict?.id,
+        channel: conflict?.channel,
+        status: conflict?.status,
       });
     }
     throw error;
   }
 }
 
+async function listCodeClipProviderAccountBindings(
+  filters = {},
+  { queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  const normalized = normalizeCodeClipProviderAccountBindingListFilters(filters);
+  const predicates = ["vertical = $1"];
+  const params = [normalized.vertical];
+
+  if (normalized.eventCode) {
+    params.push(normalized.eventCode);
+    predicates.push(`event_code = $${params.length}`);
+  }
+  if (normalized.provider) {
+    params.push(normalized.provider);
+    predicates.push(`provider = $${params.length}`);
+  }
+  if (normalized.channel) {
+    params.push(normalized.channel);
+    predicates.push(`channel = $${params.length}`);
+  }
+  if (normalized.status) {
+    params.push(normalized.status);
+    predicates.push(`status = $${params.length}`);
+  }
+  if (normalized.search) {
+    params.push(`%${escapeLikePattern(normalized.search.toLowerCase())}%`);
+    predicates.push(`(
+      LOWER(event_code) LIKE $${params.length} ESCAPE '\\'
+      OR LOWER(provider) LIKE $${params.length} ESCAPE '\\'
+      OR LOWER(channel) LIKE $${params.length} ESCAPE '\\'
+      OR LOWER(COALESCE(display_name, '')) LIKE $${params.length} ESCAPE '\\'
+    )`);
+  }
+  if (normalized.cursor) {
+    params.push(normalized.cursor.updatedAt);
+    const updatedAtParam = params.length;
+    params.push(normalized.cursor.id);
+    const idParam = params.length;
+    predicates.push(`(
+      updated_at < $${updatedAtParam}::timestamptz
+      OR (updated_at = $${updatedAtParam}::timestamptz AND id < $${idParam}::bigint)
+    )`);
+  }
+
+  params.push(normalized.limit + 1);
+  const result = await client.query(
+    `
+      SELECT *
+      FROM codeclip_provider_account_bindings
+      WHERE ${predicates.join(" AND ")}
+      ORDER BY updated_at DESC, id DESC
+      LIMIT $${params.length}
+    `,
+    params
+  );
+
+  const rows = (result.rows || []).map(mapCodeClipProviderAccountBindingRow);
+  const hasMore = rows.length > normalized.limit;
+  const items = hasMore ? rows.slice(0, normalized.limit) : rows;
+
+  return {
+    items,
+    page: {
+      limit: normalized.limit,
+      nextCursor: hasMore ? encodeCodeClipProviderBindingCursor(items[items.length - 1]) : null,
+      hasMore,
+    },
+    filters: {
+      vertical: normalized.vertical,
+      eventCode: normalized.eventCode,
+      provider: normalized.provider,
+      channel: normalized.channel,
+      status: normalized.status,
+      search: normalized.search,
+    },
+  };
+}
+
 async function getCodeClipProviderAccountBindingById(id, { queryClient } = {}) {
   const client = requireQueryClient(queryClient);
-  if (!id) return null;
+  const normalizedId = normalizeCodeClipProviderBindingId(id);
   const result = await client.query(
     `
       SELECT *
@@ -359,7 +632,7 @@ async function getCodeClipProviderAccountBindingById(id, { queryClient } = {}) {
         AND vertical = 'codeclip'
       LIMIT 1
     `,
-    [id]
+    [normalizedId]
   );
   return mapCodeClipProviderAccountBindingRow(result.rows?.[0] || null);
 }
@@ -403,9 +676,9 @@ async function listCodeClipProviderAccountBindingsForEvent(
 
 async function disableCodeClipProviderAccountBinding(id, { queryClient } = {}) {
   const client = requireQueryClient(queryClient);
-  if (!id) return null;
+  const normalizedId = normalizeCodeClipProviderBindingId(id);
 
-  const existing = await getCodeClipProviderAccountBindingById(id, { queryClient: client });
+  const existing = await getCodeClipProviderAccountBindingById(normalizedId, { queryClient: client });
   if (!existing) return null;
   if (existing.status === DISABLED_STATUS) return existing;
 
@@ -420,7 +693,7 @@ async function disableCodeClipProviderAccountBinding(id, { queryClient } = {}) {
         AND vertical = 'codeclip'
       RETURNING *
     `,
-    [id]
+    [normalizedId]
   );
   return mapCodeClipProviderAccountBindingRow(result.rows?.[0] || null);
 }
@@ -431,7 +704,7 @@ async function updateCodeClipProviderAccountBinding(
   { queryClient } = {}
 ) {
   const client = requireQueryClient(queryClient);
-  if (!id) return null;
+  const normalizedId = normalizeCodeClipProviderBindingId(id);
   const value = requirePlainObject(input, "binding update");
   if (!Object.hasOwn(value, "displayName")) {
     throw invalidBinding("displayName is required", { fieldName: "displayName" });
@@ -451,16 +724,16 @@ async function updateCodeClipProviderAccountBinding(
         AND vertical = 'codeclip'
       RETURNING *
     `,
-    [id, normalizedDisplayName]
+    [normalizedId, normalizedDisplayName]
   );
   return mapCodeClipProviderAccountBindingRow(result.rows?.[0] || null);
 }
 
 async function reactivateCodeClipProviderAccountBinding(id, { queryClient } = {}) {
   const client = requireQueryClient(queryClient);
-  if (!id) return { reactivated: false, row: null };
+  const normalizedId = normalizeCodeClipProviderBindingId(id);
 
-  const existing = await getCodeClipProviderAccountBindingById(id, { queryClient: client });
+  const existing = await getCodeClipProviderAccountBindingById(normalizedId, { queryClient: client });
   if (!existing) return { reactivated: false, row: null };
   if (existing.status === ACTIVE_STATUS) {
     return { reactivated: false, row: existing };
@@ -475,11 +748,15 @@ async function reactivateCodeClipProviderAccountBinding(id, { queryClient } = {}
   );
   if (active && String(active.id) !== String(existing.id)) {
     throw bindingConflict("provider account is already bound to another active binding", {
-      provider: existing.provider,
+      bindingId: active.id,
+      provider: active.provider,
       eventCode: active.eventCode,
+      channel: active.channel,
+      status: active.status,
     });
   }
 
+  await client.query("SAVEPOINT codeclip_provider_binding_reactivate");
   try {
     const result = await client.query(
       `
@@ -492,9 +769,10 @@ async function reactivateCodeClipProviderAccountBinding(id, { queryClient } = {}
           AND vertical = 'codeclip'
         RETURNING *
       `,
-      [id]
+      [normalizedId]
     );
     const row = mapCodeClipProviderAccountBindingRow(result.rows?.[0] || null);
+    await client.query("RELEASE SAVEPOINT codeclip_provider_binding_reactivate");
     if (!row) return { reactivated: false, row: null };
 
     return {
@@ -503,11 +781,31 @@ async function reactivateCodeClipProviderAccountBinding(id, { queryClient } = {}
     };
   } catch (error) {
     if (error?.code === "23505") {
+      await client.query("ROLLBACK TO SAVEPOINT codeclip_provider_binding_reactivate");
+      const conflict = await getActiveBindingByIdentity(
+        {
+          provider: existing.provider,
+          providerAccountId: existing.providerAccountId,
+        },
+        client
+      );
+      await client.query("RELEASE SAVEPOINT codeclip_provider_binding_reactivate");
+      if (!conflict) {
+        throw providerBindingError(
+          "PROVIDER_BINDING_CONFLICT_LOOKUP_FAILED",
+          "Unable to resolve the active provider binding after a uniqueness conflict."
+        );
+      }
       throw bindingConflict("provider account is already bound to another active binding", {
-        provider: existing.provider,
-        eventCode: existing.eventCode,
+        bindingId: conflict.id,
+        provider: conflict.provider,
+        eventCode: conflict.eventCode,
+        channel: conflict.channel,
+        status: conflict.status,
       });
     }
+    await client.query("ROLLBACK TO SAVEPOINT codeclip_provider_binding_reactivate");
+    await client.query("RELEASE SAVEPOINT codeclip_provider_binding_reactivate");
     throw error;
   }
 }
@@ -517,9 +815,14 @@ module.exports = {
   CodeClipProviderAccountBindingError,
   normalizeCodeClipProviderAccountBindingInput,
   normalizeCodeClipProviderBindingDisplayName,
+  normalizeCodeClipProviderBindingEventCode,
+  normalizeCodeClipProviderBindingId,
+  normalizeCodeClipProviderAccountBindingListFilters,
+  normalizeCodeClipProviderBindingListLimit,
   createCodeClipProviderAccountBinding,
   getCodeClipProviderAccountBindingById,
   findActiveCodeClipProviderAccountBinding,
+  listCodeClipProviderAccountBindings,
   listCodeClipProviderAccountBindingsForEvent,
   disableCodeClipProviderAccountBinding,
   updateCodeClipProviderAccountBinding,

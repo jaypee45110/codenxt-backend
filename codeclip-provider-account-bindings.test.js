@@ -7,6 +7,7 @@ const {
   createCodeClipProviderAccountBinding,
   disableCodeClipProviderAccountBinding,
   findActiveCodeClipProviderAccountBinding,
+  listCodeClipProviderAccountBindings,
   listCodeClipProviderAccountBindingsForEvent,
   maskCodeClipProviderAccountId,
   normalizeCodeClipProviderAccountBindingInput,
@@ -56,6 +57,25 @@ function createBindingClient() {
     return rows.find((row) => String(row.id) === String(id) && row.vertical === "codeclip") || null;
   }
 
+  function sortByUpdatedAndIdDesc(left, right) {
+    if (left.updated_at === right.updated_at) {
+      const leftId = BigInt(left.id);
+      const rightId = BigInt(right.id);
+
+      if (rightId > leftId) return 1;
+      if (rightId < leftId) return -1;
+      return 0;
+    }
+
+    return String(right.updated_at).localeCompare(String(left.updated_at));
+  }
+
+  function unescapeLikeLiteral(value) {
+    return String(value || "")
+      .replace(/^%|%$/g, "")
+      .replace(/\\([\\%_])/g, "$1");
+  }
+
   return {
     calls,
     rows,
@@ -63,6 +83,10 @@ function createBindingClient() {
     reactivateReturnsNoRows: false,
     async query(sql, params = []) {
       calls.push({ sql, params });
+
+      if (/SAVEPOINT|ROLLBACK TO SAVEPOINT|RELEASE SAVEPOINT/.test(sql)) {
+        return { rows: [] };
+      }
 
       if (/INSERT INTO codeclip_provider_account_bindings/.test(sql)) {
         const existing = findActive(params[2], params[4]);
@@ -89,9 +113,31 @@ function createBindingClient() {
       if (
         /FROM codeclip_provider_account_bindings/.test(sql) &&
         /provider_account_id = \$3/.test(sql) &&
-        /status = 'active'/.test(sql)
+        /AND status = 'active'/.test(sql)
       ) {
         return { rows: findActiveRows(params[1], params[2]).slice(0, 2) };
+      }
+
+      if (
+        /FROM codeclip_provider_account_bindings/.test(sql) &&
+        /provider_account_id = \$3/.test(sql) &&
+        /ORDER BY status = 'active' DESC/.test(sql)
+      ) {
+        const result = rows
+          .filter(
+            (row) =>
+              row.vertical === params[0] &&
+              row.provider === params[1] &&
+              row.provider_account_id === params[2]
+          )
+          .slice()
+          .sort((left, right) => {
+            if (left.status !== right.status) {
+              return left.status === "active" ? -1 : 1;
+            }
+            return sortByUpdatedAndIdDesc(left, right);
+          });
+        return { rows: result.slice(0, 3) };
       }
 
       if (/WHERE id = \$1/.test(sql) && /FROM codeclip_provider_account_bindings/.test(sql)) {
@@ -108,14 +154,24 @@ function createBindingClient() {
       }
 
       if (/UPDATE codeclip_provider_account_bindings/.test(sql) && /status = 'active'/.test(sql)) {
+        if (this.reactivateReturnsNoRows) return { rows: [] };
+        const row = findById(params[0]);
+        if (!row) return { rows: [] };
         if (this.failReactivateUniqueViolation) {
+          rows.push(
+            createBindingRow({
+              id: nextId++,
+              event_code: "CC-BIND-WINNER",
+              provider: row.provider,
+              channel: row.channel,
+              provider_account_id: row.provider_account_id,
+              status: "active",
+            })
+          );
           const error = new Error("duplicate active binding");
           error.code = "23505";
           throw error;
         }
-        if (this.reactivateReturnsNoRows) return { rows: [] };
-        const row = findById(params[0]);
-        if (!row) return { rows: [] };
         row.status = "active";
         row.disabled_at = null;
         row.updated_at = "2026-07-14T02:00:00.000Z";
@@ -129,6 +185,50 @@ function createBindingClient() {
         row.disabled_at = row.disabled_at || "2026-07-14T01:00:00.000Z";
         row.updated_at = "2026-07-14T01:00:00.000Z";
         return { rows: [row] };
+      }
+
+      if (
+        /FROM codeclip_provider_account_bindings/.test(sql) &&
+        /ORDER BY updated_at DESC, id DESC/.test(sql)
+      ) {
+        let paramIndex = 0;
+        const verticalParam = params[paramIndex++];
+        let result = rows.filter((row) => row.vertical === verticalParam);
+        if (/event_code =/.test(sql)) {
+          const eventCodeParam = params[paramIndex++];
+          result = result.filter((row) => row.event_code === eventCodeParam);
+        }
+        if (/provider =/.test(sql)) {
+          const providerParam = params[paramIndex++];
+          result = result.filter((row) => row.provider === providerParam);
+        }
+        if (/channel =/.test(sql)) {
+          const channelParam = params[paramIndex++];
+          result = result.filter((row) => row.channel === channelParam);
+        }
+        if (/status =/.test(sql)) {
+          const statusParam = params[paramIndex++];
+          result = result.filter((row) => row.status === statusParam);
+        }
+        if (/LOWER\(event_code\) LIKE/.test(sql)) {
+          const search = unescapeLikeLiteral(params[paramIndex++]);
+          result = result.filter((row) =>
+            [row.event_code, row.provider, row.channel, row.display_name || ""]
+              .map((value) => String(value).toLowerCase())
+              .some((value) => value.includes(search))
+          );
+        }
+        if (/updated_at </.test(sql)) {
+          const cursorUpdatedAt = params[paramIndex++];
+          const cursorId = params[paramIndex++];
+          result = result.filter(
+            (row) =>
+              row.updated_at < cursorUpdatedAt ||
+              (row.updated_at === cursorUpdatedAt && BigInt(row.id) < BigInt(cursorId))
+          );
+        }
+        const limit = params[params.length - 1];
+        return { rows: result.slice().sort(sortByUpdatedAndIdDesc).slice(0, limit) };
       }
 
       if (
@@ -339,6 +439,9 @@ test("codeClip provider account binding create throws conflict for another activ
     (error) => {
       assert.ok(error instanceof CodeClipProviderAccountBindingError);
       assert.equal(error.code, "PROVIDER_ACCOUNT_BINDING_CONFLICT");
+      assert.equal(error.details.eventCode, "CC-BIND-1");
+      assert.equal(error.details.channel, "instagram");
+      assert.equal(error.details.status, "active");
       return true;
     }
   );
@@ -444,22 +547,105 @@ test("codeClip provider account binding active lookup detects ambiguous active r
   );
 });
 
-test("codeClip provider account binding can rebind after deactivation", async () => {
+test("codeClip provider account binding requires reactivation for disabled identity", async () => {
   const client = createBindingClient();
   const first = await createBinding(client);
   await disableCodeClipProviderAccountBinding(first.row.id, { queryClient: client });
 
-  const second = await createBinding(client, { eventCode: "CC-BIND-2" });
+  await assert.rejects(
+    () => createBinding(client, { eventCode: "CC-BIND-2" }),
+    (error) => {
+      assert.equal(error.code, "PROVIDER_ACCOUNT_BINDING_CONFLICT");
+      assert.equal(error.details.reactivationRequired, true);
+      assert.equal(error.details.bindingId, first.row.id);
+      return true;
+    }
+  );
   const active = await findActiveCodeClipProviderAccountBinding(
     { provider: "meta", providerAccountId: "page-1" },
     { queryClient: client }
   );
 
-  assert.equal(second.status, "created");
-  assert.equal(second.row.eventCode, "CC-BIND-2");
-  assert.equal(active.id, second.row.id);
-  assert.equal(client.rows.filter((row) => row.status === "active").length, 1);
+  assert.equal(active, null);
+  assert.equal(client.rows.filter((row) => row.status === "active").length, 0);
   assert.equal(client.rows.filter((row) => row.status === "disabled").length, 1);
+});
+
+test("codeClip provider account binding global list filters searches and paginates safely", async () => {
+  const client = createBindingClient();
+  client.rows.push(
+    createBindingRow({
+      id: "9007199254740992",
+      event_code: "CC-LIST-A",
+      provider_account_id: "raw-account-a",
+      display_name: "Literal 100% match",
+      updated_at: "2026-07-16T00:00:00.000Z",
+    }),
+    createBindingRow({
+      id: "9007199254740993",
+      event_code: "CC-LIST-B",
+      provider: "legacy_provider",
+      channel: "legacy_channel",
+      provider_account_id: "raw-account-b",
+      display_name: "Historical value",
+      updated_at: "2026-07-16T00:00:00.000Z",
+    }),
+    createBindingRow({
+      id: "9007199254740994",
+      event_code: "CC-LIST-A",
+      provider: "sms",
+      channel: "sms",
+      provider_account_id: "raw-account-c",
+      status: "disabled",
+      display_name: "Disabled SMS",
+      updated_at: "2026-07-15T00:00:00.000Z",
+    })
+  );
+
+  const firstPage = await listCodeClipProviderAccountBindings(
+    { limit: 1 },
+    { queryClient: client }
+  );
+  assert.equal(firstPage.items.length, 1);
+  assert.equal(firstPage.items[0].id, "9007199254740993");
+  assert.equal(firstPage.page.hasMore, true);
+  assert.ok(firstPage.page.nextCursor);
+
+  const secondPage = await listCodeClipProviderAccountBindings(
+    { limit: 1, cursor: firstPage.page.nextCursor },
+    { queryClient: client }
+  );
+  assert.equal(secondPage.items.length, 1);
+  assert.equal(secondPage.items[0].id, "9007199254740992");
+  assert.equal(secondPage.page.hasMore, true);
+  assert.notEqual(secondPage.items[0].id, firstPage.items[0].id);
+
+  const providerFilter = await listCodeClipProviderAccountBindings(
+    { provider: "legacy_provider" },
+    { queryClient: client }
+  );
+  assert.equal(providerFilter.items.length, 1);
+  assert.equal(providerFilter.items[0].provider, "legacy_provider");
+  assert.equal(providerFilter.items[0].channel, "legacy_channel");
+
+  const eventStatusFilter = await listCodeClipProviderAccountBindings(
+    { eventCode: "CC-LIST-A", status: "disabled" },
+    { queryClient: client }
+  );
+  assert.equal(eventStatusFilter.items.length, 1);
+  assert.equal(eventStatusFilter.items[0].status, "disabled");
+
+  const literalSearch = await listCodeClipProviderAccountBindings(
+    { search: "100%" },
+    { queryClient: client }
+  );
+  assert.equal(literalSearch.items.length, 1);
+  assert.equal(literalSearch.items[0].displayName, "Literal 100% match");
+
+  const publicBinding = toPublicCodeClipProviderBinding(firstPage.items[0]);
+  assert.equal(publicBinding.providerAccountId, undefined);
+  assert.equal(publicBinding.vertical, "codeclip");
+  assert.equal(JSON.stringify(publicBinding).includes("raw-account-b"), false);
 });
 
 test("codeClip provider account binding update only changes display name", async () => {
@@ -560,13 +746,25 @@ test("codeClip provider account binding reactivation conflict leaves disabled ro
   const client = createBindingClient();
   const first = await createBinding(client);
   const disabled = await disableCodeClipProviderAccountBinding(first.row.id, { queryClient: client });
-  await createBinding(client, { eventCode: "CC-BIND-2" });
+  client.rows.push(
+    createBindingRow({
+      id: 2,
+      event_code: "CC-BIND-2",
+      provider: "meta",
+      channel: "instagram",
+      provider_account_id: "page-1",
+      status: "active",
+    })
+  );
 
   await assert.rejects(
     () => reactivateCodeClipProviderAccountBinding(first.row.id, { queryClient: client }),
     (error) => {
       assert.ok(error instanceof CodeClipProviderAccountBindingError);
       assert.equal(error.code, "PROVIDER_ACCOUNT_BINDING_CONFLICT");
+      assert.equal(error.details.eventCode, "CC-BIND-2");
+      assert.equal(error.details.channel, "instagram");
+      assert.equal(error.details.status, "active");
       return true;
     }
   );
@@ -591,6 +789,9 @@ test("codeClip provider account binding reactivation maps unique violation to co
     (error) => {
       assert.ok(error instanceof CodeClipProviderAccountBindingError);
       assert.equal(error.code, "PROVIDER_ACCOUNT_BINDING_CONFLICT");
+      assert.equal(error.details.eventCode, "CC-BIND-WINNER");
+      assert.equal(error.details.channel, "instagram");
+      assert.equal(error.details.status, "active");
       return true;
     }
   );

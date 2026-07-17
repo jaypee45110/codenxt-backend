@@ -1309,6 +1309,11 @@ async function ensureCodeClipProviderAccountBindingAuditTable(queryClient = pool
   `);
 
   await queryClient.query(`
+    ALTER TABLE codeclip_provider_account_binding_audit
+    ALTER COLUMN actor_id DROP NOT NULL
+  `);
+
+  await queryClient.query(`
     CREATE INDEX IF NOT EXISTS codeclip_provider_account_binding_audit_binding_id_idx
     ON codeclip_provider_account_binding_audit (binding_id)
   `);

@@ -13,6 +13,8 @@ const AUDIT_ACTIONS = new Set([
 
 const DEFAULT_AUDIT_LIMIT = 50;
 const MAX_AUDIT_LIMIT = 100;
+const AUDIT_CURSOR_VERSION = 1;
+const MAX_BIGINT_ID = 9223372036854775807n;
 
 const SENSITIVE_KEYS = new Set([
   "provideraccountid",
@@ -84,7 +86,7 @@ function normalizeAction(action) {
 
 function normalizeActorType(actorType) {
   const normalized = String(actorType || "operator").trim().toLowerCase();
-  if (normalized !== "operator") {
+  if (!["operator", "operator_key"].includes(normalized)) {
     throw auditError(
       "INVALID_PROVIDER_BINDING_AUDIT_ACTOR",
       "audit actor type is not supported"
@@ -93,7 +95,17 @@ function normalizeActorType(actorType) {
   return normalized;
 }
 
-function normalizeActorId(actorId) {
+function normalizeActorId(actorId, actorType = "operator") {
+  if (actorType === "operator_key") {
+    if (actorId === undefined || actorId === null || String(actorId).trim() === "") {
+      return null;
+    }
+    throw auditError(
+      "INVALID_PROVIDER_BINDING_AUDIT_ACTOR",
+      "audit actor id is not supported"
+    );
+  }
+
   const normalized = String(actorId || "admin").trim().toLowerCase();
   if (normalized !== "admin") {
     throw auditError(
@@ -138,6 +150,71 @@ function normalizeCodeClipProviderBindingAuditLimit(limit) {
   }
 
   return Math.min(parsed, MAX_AUDIT_LIMIT);
+}
+
+function normalizePositiveBigIntId(value, fieldName, code) {
+  const normalized = String(value || "").trim();
+  if (!/^[0-9]+$/.test(normalized)) {
+    throw auditError(code, `${fieldName} is invalid`, { fieldName });
+  }
+  const parsed = BigInt(normalized);
+  if (parsed <= 0n || parsed > MAX_BIGINT_ID) {
+    throw auditError(code, `${fieldName} is invalid`, { fieldName });
+  }
+  return normalized;
+}
+
+function normalizeAuditBindingId(bindingId) {
+  return normalizePositiveBigIntId(
+    bindingId,
+    "bindingId",
+    "INVALID_PROVIDER_BINDING_AUDIT_INPUT"
+  );
+}
+
+function normalizeCursorTimestamp(value, fieldName) {
+  const normalized = normalizeRequiredString(value, fieldName, 80);
+  if (!Number.isFinite(Date.parse(normalized))) {
+    throw auditError("INVALID_PROVIDER_BINDING_AUDIT_CURSOR", `${fieldName} is invalid`, {
+      fieldName,
+    });
+  }
+  return normalized;
+}
+
+function encodeCodeClipProviderBindingAuditCursor(event) {
+  if (!event) return null;
+  return Buffer.from(
+    JSON.stringify({
+      v: AUDIT_CURSOR_VERSION,
+      createdAt: event.createdAt,
+      id: String(event.id),
+    })
+  ).toString("base64url");
+}
+
+function decodeCodeClipProviderBindingAuditCursor(cursor) {
+  if (cursor === undefined || cursor === null || cursor === "") return null;
+  if (typeof cursor !== "string" || cursor.length > 512) {
+    throw auditError("INVALID_PROVIDER_BINDING_AUDIT_CURSOR", "audit cursor is invalid");
+  }
+  try {
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    const keys = Object.keys(decoded || {}).sort().join(",");
+    if (!decoded || decoded.v !== AUDIT_CURSOR_VERSION || keys !== "createdAt,id,v") {
+      throw new Error("invalid cursor shape");
+    }
+    return {
+      createdAt: normalizeCursorTimestamp(decoded.createdAt, "cursor.createdAt"),
+      id: normalizePositiveBigIntId(
+        decoded.id,
+        "cursor.id",
+        "INVALID_PROVIDER_BINDING_AUDIT_CURSOR"
+      ),
+    };
+  } catch {
+    throw auditError("INVALID_PROVIDER_BINDING_AUDIT_CURSOR", "audit cursor is invalid");
+  }
 }
 
 function isSensitiveKey(key) {
@@ -244,7 +321,7 @@ async function appendCodeClipProviderAccountBindingAuditEvent(
   const normalizedBinding = requireCodeClipBinding(binding);
   const normalizedAction = normalizeAction(action);
   const normalizedActorType = normalizeActorType(actorType);
-  const normalizedActorId = normalizeActorId(actorId);
+  const normalizedActorId = normalizeActorId(actorId, normalizedActorType);
   const sanitizedBeforeState = sanitizeCodeClipProviderBindingAuditState(beforeState);
   const sanitizedAfterState = sanitizeCodeClipProviderBindingAuditState(afterState);
   const sanitizedMetadata = sanitizeCodeClipProviderBindingAuditState(metadata) || {};
@@ -324,9 +401,70 @@ async function listCodeClipProviderAccountBindingAuditEvents(
   return (result.rows || []).map(mapAuditRow);
 }
 
+async function listCodeClipProviderAccountBindingAuditEventsPage(
+  { bindingId, eventCode, limit, cursor } = {},
+  { queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  const normalizedLimit = normalizeCodeClipProviderBindingAuditLimit(limit);
+  const normalizedCursor = decodeCodeClipProviderBindingAuditCursor(cursor);
+  const predicates = ["vertical = $1"];
+  const params = [CODECLIP_VERTICAL];
+
+  if (bindingId !== undefined && bindingId !== null) {
+    params.push(normalizeAuditBindingId(bindingId));
+    predicates.push(`binding_id = $${params.length}`);
+  }
+  if (eventCode !== undefined && eventCode !== null) {
+    params.push(normalizeRequiredString(String(eventCode), "eventCode", 120));
+    predicates.push(`event_code = $${params.length}`);
+  }
+  if (params.length === 1) {
+    throw auditError(
+      "INVALID_PROVIDER_BINDING_AUDIT_INPUT",
+      "audit list requires bindingId or eventCode"
+    );
+  }
+  if (normalizedCursor) {
+    params.push(normalizedCursor.createdAt);
+    const createdAtParam = params.length;
+    params.push(normalizedCursor.id);
+    const idParam = params.length;
+    predicates.push(`(
+      created_at < $${createdAtParam}::timestamptz
+      OR (created_at = $${createdAtParam}::timestamptz AND id < $${idParam}::bigint)
+    )`);
+  }
+
+  params.push(normalizedLimit + 1);
+  const result = await client.query(
+    `
+      SELECT *
+      FROM codeclip_provider_account_binding_audit
+      WHERE ${predicates.join(" AND ")}
+      ORDER BY created_at DESC, id DESC
+      LIMIT $${params.length}
+    `,
+    params
+  );
+  const rows = (result.rows || []).map(mapAuditRow);
+  const hasMore = rows.length > normalizedLimit;
+  const items = hasMore ? rows.slice(0, normalizedLimit) : rows;
+
+  return {
+    items,
+    page: {
+      limit: normalizedLimit,
+      nextCursor: hasMore ? encodeCodeClipProviderBindingAuditCursor(items[items.length - 1]) : null,
+      hasMore,
+    },
+  };
+}
+
 module.exports = {
   appendCodeClipProviderAccountBindingAuditEvent,
   listCodeClipProviderAccountBindingAuditEvents,
+  listCodeClipProviderAccountBindingAuditEventsPage,
   normalizeCodeClipProviderBindingAuditLimit,
   sanitizeCodeClipProviderBindingAuditState,
   toAuditState,

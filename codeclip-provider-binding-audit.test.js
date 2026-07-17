@@ -6,6 +6,7 @@ const { toPublicCodeClipProviderBinding } = require("./verticals/codeclip/provid
 const {
   appendCodeClipProviderAccountBindingAuditEvent,
   listCodeClipProviderAccountBindingAuditEvents,
+  listCodeClipProviderAccountBindingAuditEventsPage,
   normalizeCodeClipProviderBindingAuditLimit,
   sanitizeCodeClipProviderBindingAuditState,
   toAuditState,
@@ -67,18 +68,41 @@ function createAuditClient() {
       if (/FROM codeclip_provider_account_binding_audit/.test(sql)) {
         let result = rows.filter((row) => row.vertical === "codeclip");
         if (/binding_id =/.test(sql)) {
-          const bindingIdParam = params.find((value) => value === "bind-1" || value === "bind-2");
-          result = result.filter((row) => row.binding_id === bindingIdParam);
+          const bindingIdParam = params[1];
+          result = result.filter((row) => row.binding_id === String(bindingIdParam));
         }
         if (/event_code =/.test(sql)) {
           const eventCodeParam = params.find((value) => /^CC-AUDIT-/.test(String(value)));
           result = result.filter((row) => row.event_code === eventCodeParam);
         }
+        if (/created_at </.test(sql)) {
+          const createdAtParamIndex = params.findIndex((value) =>
+            /^\d{4}-\d{2}-\d{2}T/.test(String(value))
+          );
+          const cursorCreatedAt = params[createdAtParamIndex];
+          const cursorId = params[createdAtParamIndex + 1];
+          result = result.filter(
+            (row) =>
+              row.created_at < cursorCreatedAt ||
+              (row.created_at === cursorCreatedAt && BigInt(row.id) < BigInt(cursorId))
+          );
+        }
         const limit = params[params.length - 1];
         return {
           rows: result
             .slice()
-            .sort((left, right) => Number(right.id) - Number(left.id))
+            .sort((left, right) => {
+              if (left.created_at === right.created_at) {
+                const leftId = BigInt(left.id);
+                const rightId = BigInt(right.id);
+
+                if (rightId > leftId) return 1;
+                if (rightId < leftId) return -1;
+                return 0;
+              }
+
+              return right.created_at.localeCompare(left.created_at);
+            })
             .slice(0, limit),
         };
       }
@@ -99,14 +123,15 @@ test("codeClip provider binding audit schema defines append-only table and index
 
   await ensureCodeClipProviderAccountBindingAuditTable(client);
 
-  assert.equal(client.calls.length, 5);
+  assert.equal(client.calls.length, 6);
   assert.match(client.calls[0].sql, /CREATE TABLE IF NOT EXISTS codeclip_provider_account_binding_audit/);
   assert.match(client.calls[0].sql, /CHECK \(vertical = 'codeclip'\)/);
   assert.match(client.calls[0].sql, /CHECK \(action IN \('created', 'display_name_updated', 'disabled', 'reactivated'\)\)/);
-  assert.match(client.calls[1].sql, /codeclip_provider_account_binding_audit_binding_id_idx/);
-  assert.match(client.calls[2].sql, /codeclip_provider_account_binding_audit_event_code_idx/);
-  assert.match(client.calls[3].sql, /codeclip_provider_account_binding_audit_created_at_idx/);
-  assert.match(client.calls[4].sql, /codeclip_provider_account_binding_audit_vertical_event_created_idx/);
+  assert.match(client.calls[1].sql, /ALTER COLUMN actor_id DROP NOT NULL/);
+  assert.match(client.calls[2].sql, /codeclip_provider_account_binding_audit_binding_id_idx/);
+  assert.match(client.calls[3].sql, /codeclip_provider_account_binding_audit_event_code_idx/);
+  assert.match(client.calls[4].sql, /codeclip_provider_account_binding_audit_created_at_idx/);
+  assert.match(client.calls[5].sql, /codeclip_provider_account_binding_audit_vertical_event_created_idx/);
 });
 
 test("codeClip provider binding audit appends public-safe binding state", async () => {
@@ -346,4 +371,97 @@ test("codeClip provider binding audit lists per binding and per episode newest f
     perEpisode.map((event) => event.bindingId),
     ["bind-2", "bind-1"]
   );
+});
+
+test("codeClip provider binding audit paginates and validates bindingId and cursor", async () => {
+  const client = createAuditClient();
+  const binding = createBinding({ id: "1", eventCode: "CC-AUDIT-PAGE" });
+
+  await appendCodeClipProviderAccountBindingAuditEvent(
+    { binding, action: "created", afterState: toAuditState(binding) },
+    { queryClient: client }
+  );
+  await appendCodeClipProviderAccountBindingAuditEvent(
+    { binding, action: "disabled", beforeState: toAuditState(binding) },
+    { queryClient: client }
+  );
+
+  const firstPage = await listCodeClipProviderAccountBindingAuditEventsPage(
+    { bindingId: "1", limit: 1 },
+    { queryClient: client }
+  );
+  assert.equal(firstPage.items.length, 1);
+  assert.equal(firstPage.page.limit, 1);
+  assert.equal(firstPage.page.hasMore, true);
+  assert.ok(firstPage.page.nextCursor);
+
+  const secondPage = await listCodeClipProviderAccountBindingAuditEventsPage(
+    { bindingId: "1", limit: 1, cursor: firstPage.page.nextCursor },
+    { queryClient: client }
+  );
+  assert.equal(secondPage.items.length, 1);
+  assert.notEqual(secondPage.items[0].id, firstPage.items[0].id);
+  assert.equal(secondPage.page.hasMore, false);
+  assert.equal(secondPage.page.nextCursor, null);
+
+  for (const bindingId of ["", "0", "-1", "1.5", "abc", "9223372036854775808"]) {
+    await assert.rejects(
+      () =>
+        listCodeClipProviderAccountBindingAuditEventsPage(
+          { bindingId },
+          { queryClient: client }
+        ),
+      (error) => error.code === "INVALID_PROVIDER_BINDING_AUDIT_INPUT"
+    );
+  }
+
+  const invalidCursor = Buffer.from(
+    JSON.stringify({ v: 1, createdAt: "not-a-date", id: "1" })
+  ).toString("base64url");
+  await assert.rejects(
+    () =>
+      listCodeClipProviderAccountBindingAuditEventsPage(
+        { bindingId: "1", cursor: invalidCursor },
+        { queryClient: client }
+      ),
+    (error) => error.code === "INVALID_PROVIDER_BINDING_AUDIT_CURSOR"
+  );
+});
+
+test("codeClip provider binding audit pagination sorts large bigint IDs deterministically", async () => {
+  const client = createAuditClient();
+  const binding = createBinding({ id: "1", eventCode: "CC-AUDIT-BIGINT" });
+
+  await appendCodeClipProviderAccountBindingAuditEvent(
+    { binding, action: "created", afterState: toAuditState(binding) },
+    { queryClient: client }
+  );
+  await appendCodeClipProviderAccountBindingAuditEvent(
+    { binding, action: "disabled", beforeState: toAuditState(binding) },
+    { queryClient: client }
+  );
+
+  const matchingRows = client.rows.filter((row) => row.binding_id === "1");
+  matchingRows[0].id = "9007199254740992";
+  matchingRows[1].id = "9007199254740993";
+  matchingRows[0].created_at = "2026-07-15T02:00:00.000Z";
+  matchingRows[1].created_at = "2026-07-15T02:00:00.000Z";
+
+  const firstPage = await listCodeClipProviderAccountBindingAuditEventsPage(
+    { bindingId: "1", limit: 1 },
+    { queryClient: client }
+  );
+  assert.equal(firstPage.items.length, 1);
+  assert.equal(firstPage.items[0].id, "9007199254740993");
+  assert.equal(firstPage.page.hasMore, true);
+  assert.ok(firstPage.page.nextCursor);
+
+  const secondPage = await listCodeClipProviderAccountBindingAuditEventsPage(
+    { bindingId: "1", limit: 1, cursor: firstPage.page.nextCursor },
+    { queryClient: client }
+  );
+  assert.equal(secondPage.items.length, 1);
+  assert.equal(secondPage.items[0].id, "9007199254740992");
+  assert.equal(secondPage.page.hasMore, false);
+  assert.equal(secondPage.page.nextCursor, null);
 });
