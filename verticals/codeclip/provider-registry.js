@@ -1,4 +1,4 @@
-const CODECLIP_PROVIDER_NAMES = ["meta", "sms", "test"];
+const CODECLIP_PROVIDER_NAMES = ["meta", "sms", "test", "youtube"];
 
 function normalizeCodeClipProviderName(provider) {
   return String(provider || "").trim().toLowerCase();

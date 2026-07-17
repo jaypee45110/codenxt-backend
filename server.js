@@ -4392,7 +4392,51 @@ function handleCodeClipMetaProviderChallengeRoute(req, res) {
   }
 }
 
+async function handleCodeClipYouTubeWebSubVerificationRoute(req, res) {
+  try {
+    const {
+      verifyCodeClipYouTubeWebSubCallback,
+    } = require("./verticals/codeclip/youtube-websub-callback");
+    const result = await verifyCodeClipYouTubeWebSubCallback(
+      {
+        callbackId: req.params.callbackId,
+        query: req.query || {},
+      },
+      { queryClient: database.pool }
+    );
+
+    res.set("Cache-Control", "no-store");
+
+    if (result.accepted) {
+      return res.status(result.httpStatus).type("text/plain").send(result.challenge);
+    }
+
+    return res.status(result.httpStatus).json({
+      ok: false,
+      error: "YouTube WebSub verification rejected",
+      code: result.reasonCode,
+    });
+  } catch (err) {
+    console.error("codeClip YouTube WebSub verification failed", {
+      route: "/api/codeclip/providers/youtube/websub/:callbackId",
+      error: err?.name || "Error",
+    });
+    return res
+      .status(500)
+      .set("Cache-Control", "no-store")
+      .json({
+        ok: false,
+        error: "YouTube WebSub verification unavailable",
+        code: "INTERNAL_ERROR",
+      });
+  }
+}
+
 app.get("/codeclip/provider/meta/keyword", handleCodeClipMetaProviderChallengeRoute);
+app.get(
+  "/api/codeclip/providers/youtube/websub/:callbackId",
+  handleCodeClipYouTubeWebSubVerificationRoute
+);
 app.post("/codeclip/provider/:provider/keyword", handleCodeClipProviderKeywordRoute);
 
 app.get("/report/:eventCode", requireCodePerksAdmin, async (req, res) => {
@@ -8308,6 +8352,7 @@ if (require.main === module) {
 
 module.exports = {
   app,
+  handleCodeClipYouTubeWebSubVerificationRoute,
   initializeCodeClipStartup,
   startBackendServer,
 };

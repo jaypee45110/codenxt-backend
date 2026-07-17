@@ -15,6 +15,8 @@ function buildCapabilities({
   hmacVerification = false,
   rawBodyRequired = false,
   liveProvider = false,
+  providerAccountIdRequired = false,
+  durableDeliveryRequired = false,
 }) {
   return {
     route: true,
@@ -29,6 +31,8 @@ function buildCapabilities({
     hmacVerification,
     rawBodyRequired,
     liveProvider,
+    providerAccountIdRequired,
+    durableDeliveryRequired,
   };
 }
 
@@ -70,6 +74,29 @@ const PROVIDER_POLICIES = {
       enabled: true,
       claimTtlSeconds: 300,
       responseTtlSeconds: 86400,
+    },
+  },
+  youtube: {
+    provider: "youtube",
+    routeEnabled: true,
+    adapter: "youtube",
+    envelopeType: "youtube-websub",
+    verificationMode: "websub-hmac",
+    secretEnvName: "CODECLIP_YOUTUBE_WEBSUB_SECRET",
+    signatureHeader: "X-Hub-Signature",
+    capabilities: buildCapabilities({
+      verificationMode: "websub-hmac",
+      hmacVerification: true,
+      rawBodyRequired: true,
+      liveProvider: true,
+      providerAccountIdRequired: true,
+      durableDeliveryRequired: true,
+    }),
+    idempotency: {
+      enabled: true,
+      claimTtlSeconds: 300,
+      responseTtlSeconds: 86400,
+      requireStoreForLiveProvider: true,
     },
   },
   test: {

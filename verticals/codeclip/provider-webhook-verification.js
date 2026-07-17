@@ -35,6 +35,9 @@ function signatureForProvider(provider, headers) {
   if (provider === "meta") {
     return headerValue(headers, "x-hub-signature-256");
   }
+  if (provider === "youtube") {
+    return headerValue(headers, "x-hub-signature");
+  }
   if (provider === "sms") {
     return headerValue(headers, "x-provider-signature");
   }
@@ -45,7 +48,7 @@ function normalizeSignature(provider, value) {
   const signature = String(value || "").trim();
   const normalizedProvider = normalizeCodeClipProviderName(provider);
 
-  if (normalizedProvider === "meta") {
+  if (normalizedProvider === "meta" || normalizedProvider === "youtube") {
     return signature.toLowerCase().startsWith("sha256=")
       ? signature.slice("sha256=".length)
       : "";
@@ -131,6 +134,27 @@ function verifyCodeClipProviderWebhook({
 
   if (normalizedMode === "hmac-sha256") {
     if (!["meta", "sms"].includes(normalizedProvider)) {
+      return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
+    }
+
+    if (secretResolution?.required && secretResolution.ok === false) {
+      return {
+        ok: false,
+        reason: secretResolution.reason || "SECRET_NOT_CONFIGURED",
+      };
+    }
+
+    return verifyHmacSha256({
+      provider: normalizedProvider,
+      headers,
+      rawBody,
+      secret,
+      mode: normalizedMode,
+    });
+  }
+
+  if (normalizedMode === "websub-hmac") {
+    if (normalizedProvider !== "youtube") {
       return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
     }
 

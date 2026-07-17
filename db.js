@@ -1269,6 +1269,37 @@ async function ensureCodeClipProviderAccountBindingsTable(queryClient = pool) {
   `);
 
   await queryClient.query(`
+    ALTER TABLE codeclip_provider_account_bindings
+    DROP CONSTRAINT IF EXISTS codeclip_provider_account_bindings_provider_check
+  `);
+
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_account_bindings
+    DROP CONSTRAINT IF EXISTS codeclip_provider_account_bindings_check
+  `);
+
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_account_bindings
+    DROP CONSTRAINT IF EXISTS codeclip_provider_account_bindings_provider_channel_check
+  `);
+
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_account_bindings
+    ADD CONSTRAINT codeclip_provider_account_bindings_provider_check
+    CHECK (provider IN ('meta', 'sms', 'youtube'))
+  `);
+
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_account_bindings
+    ADD CONSTRAINT codeclip_provider_account_bindings_provider_channel_check
+    CHECK (
+      (provider = 'meta' AND channel IN ('instagram', 'messenger', 'whatsapp'))
+      OR (provider = 'sms' AND channel = 'sms')
+      OR (provider = 'youtube' AND channel = 'youtube')
+    )
+  `);
+
+  await queryClient.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS codeclip_provider_account_bindings_active_identity_idx
     ON codeclip_provider_account_bindings (vertical, provider, provider_account_id)
     WHERE status = 'active'
@@ -1282,6 +1313,74 @@ async function ensureCodeClipProviderAccountBindingsTable(queryClient = pool) {
   await queryClient.query(`
     CREATE INDEX IF NOT EXISTS codeclip_provider_account_bindings_status_idx
     ON codeclip_provider_account_bindings (status)
+  `);
+}
+
+async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_youtube_websub_subscriptions (
+      id BIGSERIAL PRIMARY KEY,
+      vertical TEXT NOT NULL DEFAULT 'codeclip',
+      callback_id TEXT NOT NULL UNIQUE,
+      provider TEXT NOT NULL DEFAULT 'youtube',
+      channel TEXT NOT NULL DEFAULT 'youtube',
+      provider_account_id TEXT NOT NULL,
+      topic TEXT NOT NULL,
+      status TEXT NOT NULL,
+      pending_mode TEXT,
+      secret_version TEXT NOT NULL DEFAULT 'v1',
+      activation_boundary_at TIMESTAMPTZ,
+      activation_boundary_video_id TEXT,
+      activated_at TIMESTAMPTZ,
+      first_activated_video_id TEXT,
+      first_activated_at TIMESTAMPTZ,
+      lease_started_at TIMESTAMPTZ,
+      lease_expires_at TIMESTAMPTZ,
+      last_verified_at TIMESTAMPTZ,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (vertical = 'codeclip'),
+      CHECK (provider = 'youtube'),
+      CHECK (channel = 'youtube'),
+      CHECK (status IN (
+        'pending_subscribe',
+        'active',
+        'pending_renewal',
+        'expired',
+        'pending_unsubscribe',
+        'unsubscribed',
+        'disabled'
+      )),
+      CHECK (pending_mode IS NULL OR pending_mode IN ('subscribe', 'unsubscribe'))
+    )
+  `);
+
+  await queryClient.query(`
+    ALTER TABLE codeclip_youtube_websub_subscriptions
+    ADD COLUMN IF NOT EXISTS first_activated_video_id TEXT
+  `);
+
+  await queryClient.query(`
+    ALTER TABLE codeclip_youtube_websub_subscriptions
+    ADD COLUMN IF NOT EXISTS first_activated_at TIMESTAMPTZ
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_subscriptions_account_idx
+    ON codeclip_youtube_websub_subscriptions (provider_account_id)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_subscriptions_topic_idx
+    ON codeclip_youtube_websub_subscriptions (topic)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_subscriptions_status_lease_idx
+    ON codeclip_youtube_websub_subscriptions (status, lease_expires_at)
   `);
 }
 
@@ -2868,6 +2967,7 @@ module.exports = {
   getCodePodKeywordInteractionSummary,
   ensureCodeClipProviderAccountBindingsTable,
   ensureCodeClipProviderAccountBindingAuditTable,
+  ensureCodeClipYouTubeWebSubSubscriptionsTable,
   ensureCodeClipProviderDeliveriesTable,
   createCodeClipProviderDelivery,
   getCodeClipProviderDeliveryByIdentity,

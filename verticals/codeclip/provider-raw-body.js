@@ -10,7 +10,26 @@ function isCodeClipProviderWebhookPath(pathOrReq) {
     .split("?")[0]
     .replace(/\/+$/, "");
 
+  return (
+    /^\/codeclip\/provider\/[^/]+\/keyword$/.test(path) ||
+    isCodeClipYouTubeProviderWebhookPath(path)
+  );
+}
+
+function isCodeClipProviderKeywordWebhookPath(pathOrReq) {
+  const path = normalizeCodeClipProviderWebhookPathInput(pathOrReq)
+    .split("?")[0]
+    .replace(/\/+$/, "");
+
   return /^\/codeclip\/provider\/[^/]+\/keyword$/.test(path);
+}
+
+function isCodeClipYouTubeProviderWebhookPath(pathOrReq) {
+  const path = normalizeCodeClipProviderWebhookPathInput(pathOrReq)
+    .split("?")[0]
+    .replace(/\/+$/, "");
+
+  return /^\/codeclip\/provider\/youtube\/[^/]+$/.test(path);
 }
 
 function captureCodeClipProviderRawBody(req, buf) {
@@ -33,5 +52,7 @@ function captureCodeClipProviderRawBody(req, buf) {
 
 module.exports = {
   captureCodeClipProviderRawBody,
+  isCodeClipProviderKeywordWebhookPath,
   isCodeClipProviderWebhookPath,
+  isCodeClipYouTubeProviderWebhookPath,
 };

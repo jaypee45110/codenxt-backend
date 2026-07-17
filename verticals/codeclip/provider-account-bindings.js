@@ -17,6 +17,7 @@ const MAX_BIGINT_ID = 9223372036854775807n;
 const PROVIDER_CHANNELS = Object.freeze({
   meta: new Set(["instagram", "messenger", "whatsapp"]),
   sms: new Set(["sms"]),
+  youtube: new Set(["youtube"]),
 });
 
 const VALID_STATUSES = new Set([ACTIVE_STATUS, DISABLED_STATUS]);
@@ -177,6 +178,29 @@ function normalizeCodeClipBindingChannel(provider, channel) {
   return normalized;
 }
 
+function normalizeCodeClipProviderAccountId(provider, providerAccountId) {
+  const normalized = normalizeRequiredString(
+    providerAccountId,
+    "providerAccountId",
+    PROVIDER_ACCOUNT_ID_MAX_LENGTH
+  );
+
+  if (provider === "youtube") {
+    if (/^https?:\/\//i.test(normalized) || normalized.startsWith("@")) {
+      throw invalidBinding("YouTube providerAccountId must be a channel ID", {
+        fieldName: "providerAccountId",
+      });
+    }
+    if (!/^UC[A-Za-z0-9_-]{20,32}$/.test(normalized)) {
+      throw invalidBinding("YouTube providerAccountId must be a channel ID", {
+        fieldName: "providerAccountId",
+      });
+    }
+  }
+
+  return normalized;
+}
+
 function normalizeCodeClipBindingStatus(status = ACTIVE_STATUS) {
   const normalized = String(status || "").trim().toLowerCase();
   if (!VALID_STATUSES.has(normalized)) {
@@ -307,10 +331,9 @@ function normalizeCodeClipProviderAccountBindingInput(input = {}) {
     vertical: CODECLIP_VERTICAL,
     eventCode: normalizeCodeClipProviderBindingEventCode(value.eventCode || value.event_code),
     provider,
-    providerAccountId: normalizeRequiredString(
-      value.providerAccountId || value.provider_account_id,
-      "providerAccountId",
-      PROVIDER_ACCOUNT_ID_MAX_LENGTH
+    providerAccountId: normalizeCodeClipProviderAccountId(
+      provider,
+      value.providerAccountId || value.provider_account_id
     ),
     channel,
     status: normalizeCodeClipBindingStatus(value.status || ACTIVE_STATUS),
@@ -644,12 +667,11 @@ async function findActiveCodeClipProviderAccountBinding(
   const client = requireQueryClient(queryClient);
   const normalized = {
     provider: normalizeCodeClipBindingProvider(provider),
-    providerAccountId: normalizeRequiredString(
-      providerAccountId,
-      "providerAccountId",
-      PROVIDER_ACCOUNT_ID_MAX_LENGTH
-    ),
   };
+  normalized.providerAccountId = normalizeCodeClipProviderAccountId(
+    normalized.provider,
+    providerAccountId
+  );
   return getActiveBindingByIdentity(normalized, client);
 }
 
@@ -817,6 +839,7 @@ module.exports = {
   normalizeCodeClipProviderBindingDisplayName,
   normalizeCodeClipProviderBindingEventCode,
   normalizeCodeClipProviderBindingId,
+  normalizeCodeClipProviderAccountId,
   normalizeCodeClipProviderAccountBindingListFilters,
   normalizeCodeClipProviderBindingListLimit,
   createCodeClipProviderAccountBinding,
