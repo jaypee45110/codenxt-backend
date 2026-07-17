@@ -24,6 +24,9 @@ test("codeClip startup initializes provider account binding schema before listen
         async ensureCodeClipProviderAccountBindingsTable() {
           events.push("ensure-bindings");
         },
+        async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
+          events.push("ensure-youtube-websub-subscriptions");
+        },
         async ensureCodeClipProviderAccountBindingAuditTable() {
           events.push("ensure-binding-audit");
         },
@@ -31,7 +34,12 @@ test("codeClip startup initializes provider account binding schema before listen
     });
 
     assert.equal(server, fakeServer);
-    assert.deepEqual(events, ["ensure-bindings", "ensure-binding-audit", "listen:0"]);
+    assert.deepEqual(events, [
+      "ensure-bindings",
+      "ensure-youtube-websub-subscriptions",
+      "ensure-binding-audit",
+      "listen:0",
+    ]);
   } finally {
     app.listen = originalListen;
   }
@@ -56,6 +64,9 @@ test("codeClip startup binding init failure prevents listen", async () => {
               events.push("ensure-bindings");
               throw new Error("binding schema unavailable");
             },
+            async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
+              events.push("ensure-youtube-websub-subscriptions");
+            },
             async ensureCodeClipProviderAccountBindingAuditTable() {
               events.push("ensure-binding-audit");
             },
@@ -65,6 +76,42 @@ test("codeClip startup binding init failure prevents listen", async () => {
     );
 
     assert.deepEqual(events, ["ensure-bindings"]);
+  } finally {
+    app.listen = originalListen;
+  }
+});
+
+test("codeClip startup YouTube WebSub init failure prevents audit init and listen", async () => {
+  const events = [];
+  const originalListen = app.listen;
+
+  app.listen = () => {
+    events.push("listen");
+    throw new Error("listen should not be called");
+  };
+
+  try {
+    await assert.rejects(
+      () =>
+        startBackendServer({
+          port: 0,
+          databaseClient: {
+            async ensureCodeClipProviderAccountBindingsTable() {
+              events.push("ensure-bindings");
+            },
+            async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
+              events.push("ensure-youtube-websub-subscriptions");
+              throw new Error("youtube websub subscription schema unavailable");
+            },
+            async ensureCodeClipProviderAccountBindingAuditTable() {
+              events.push("ensure-binding-audit");
+            },
+          },
+        }),
+      /youtube websub subscription schema unavailable/
+    );
+
+    assert.deepEqual(events, ["ensure-bindings", "ensure-youtube-websub-subscriptions"]);
   } finally {
     app.listen = originalListen;
   }
@@ -88,6 +135,9 @@ test("codeClip startup audit init failure prevents listen", async () => {
             async ensureCodeClipProviderAccountBindingsTable() {
               events.push("ensure-bindings");
             },
+            async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
+              events.push("ensure-youtube-websub-subscriptions");
+            },
             async ensureCodeClipProviderAccountBindingAuditTable() {
               events.push("ensure-binding-audit");
               throw new Error("binding audit schema unavailable");
@@ -97,7 +147,11 @@ test("codeClip startup audit init failure prevents listen", async () => {
       /binding audit schema unavailable/
     );
 
-    assert.deepEqual(events, ["ensure-bindings", "ensure-binding-audit"]);
+    assert.deepEqual(events, [
+      "ensure-bindings",
+      "ensure-youtube-websub-subscriptions",
+      "ensure-binding-audit",
+    ]);
   } finally {
     app.listen = originalListen;
   }
@@ -108,6 +162,9 @@ test("codeClip startup binding init is repeatable and does not run unrelated sta
   const databaseClient = {
     async ensureCodeClipProviderAccountBindingsTable() {
       calls.push("ensure-bindings");
+    },
+    async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
+      calls.push("ensure-youtube-websub-subscriptions");
     },
     async ensureCodeClipProviderAccountBindingAuditTable() {
       calls.push("ensure-binding-audit");
@@ -131,8 +188,10 @@ test("codeClip startup binding init is repeatable and does not run unrelated sta
 
   assert.deepEqual(calls, [
     "ensure-bindings",
+    "ensure-youtube-websub-subscriptions",
     "ensure-binding-audit",
     "ensure-bindings",
+    "ensure-youtube-websub-subscriptions",
     "ensure-binding-audit",
   ]);
 });

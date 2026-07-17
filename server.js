@@ -75,6 +75,7 @@ async function initializeCodeClipStartup({
   databaseClient = database,
 } = {}) {
   await databaseClient.ensureCodeClipProviderAccountBindingsTable();
+  await databaseClient.ensureCodeClipYouTubeWebSubSubscriptionsTable();
   await databaseClient.ensureCodeClipProviderAccountBindingAuditTable();
 }
 
@@ -4432,11 +4433,104 @@ async function handleCodeClipYouTubeWebSubVerificationRoute(req, res) {
   }
 }
 
+const codeClipYouTubeWebSubRawParser = express.raw({
+  type: ["application/atom+xml", "application/xml", "text/xml"],
+  limit: "256kb",
+  verify: captureCodeClipProviderWebhookRawBody,
+});
+
+function isCodeClipYouTubeWebSubRoute(req) {
+  return (
+    req?.method === "POST" &&
+    /^\/api\/codeclip\/providers\/youtube\/websub\/[^/]+$/.test(
+      String(req.path || "").replace(/\/+$/, "")
+    )
+  );
+}
+
+const CODECLIP_YOUTUBE_WEBSUB_PUBLIC_RESPONSE_FIELDS = new Set([
+  "ok",
+  "accepted",
+  "status",
+  "processed",
+  "duplicate",
+  "error",
+  "code",
+]);
+
+function sanitizeCodeClipYouTubeWebSubNotificationPayload(payload = {}) {
+  const sanitized = {};
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (CODECLIP_YOUTUBE_WEBSUB_PUBLIC_RESPONSE_FIELDS.has(key)) {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
+}
+
+async function handleCodeClipYouTubeWebSubNotificationRoute(req, res) {
+  try {
+    const {
+      processCodeClipYouTubeWebSubNotification,
+    } = require("./verticals/codeclip/youtube-websub-notification");
+    const rawBody = req.codeClipRawBody || (Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0));
+    const result = await processCodeClipYouTubeWebSubNotification(
+      {
+        callbackId: req.params.callbackId,
+        headers: req.headers || {},
+        rawBody,
+      },
+      {
+        queryClient: database.pool,
+      }
+    );
+
+    return res
+      .status(result.httpStatus)
+      .set("Cache-Control", "no-store")
+      .json(sanitizeCodeClipYouTubeWebSubNotificationPayload(result.payload));
+  } catch (err) {
+    console.error("codeClip YouTube WebSub notification failed", {
+      route: "/api/codeclip/providers/youtube/websub/:callbackId",
+      error: err?.name || "Error",
+    });
+    return res
+      .status(500)
+      .set("Cache-Control", "no-store")
+      .json({
+        ok: false,
+        error: "YouTube WebSub notification unavailable",
+        code: "INTERNAL_ERROR",
+      });
+  }
+}
+
+function handleCodeClipYouTubeWebSubParserError(error, req, res, next) {
+  if (!isCodeClipYouTubeWebSubRoute(req)) return next(error);
+
+  const code = error?.type === "entity.too.large" ? "body_too_large" : "malformed_xml";
+  const status = error?.type === "entity.too.large" ? 413 : 400;
+  return res
+    .status(status)
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      error: "YouTube WebSub notification rejected",
+      code,
+    });
+}
+
 app.get("/codeclip/provider/meta/keyword", handleCodeClipMetaProviderChallengeRoute);
 app.get(
   "/api/codeclip/providers/youtube/websub/:callbackId",
   handleCodeClipYouTubeWebSubVerificationRoute
 );
+app.post(
+  "/api/codeclip/providers/youtube/websub/:callbackId",
+  codeClipYouTubeWebSubRawParser,
+  handleCodeClipYouTubeWebSubNotificationRoute
+);
+app.use(handleCodeClipYouTubeWebSubParserError);
 app.post("/codeclip/provider/:provider/keyword", handleCodeClipProviderKeywordRoute);
 
 app.get("/report/:eventCode", requireCodePerksAdmin, async (req, res) => {
@@ -8352,6 +8446,7 @@ if (require.main === module) {
 
 module.exports = {
   app,
+  handleCodeClipYouTubeWebSubNotificationRoute,
   handleCodeClipYouTubeWebSubVerificationRoute,
   initializeCodeClipStartup,
   startBackendServer,

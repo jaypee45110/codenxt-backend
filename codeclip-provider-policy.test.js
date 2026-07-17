@@ -28,6 +28,8 @@ function assertDefaultCapabilities(policy, {
   hmacVerification = false,
   rawBodyRequired = false,
   liveProvider = false,
+  providerAccountIdRequired = false,
+  durableDeliveryRequired = false,
 }) {
   assert.deepEqual(policy.capabilities, {
     route: true,
@@ -42,6 +44,8 @@ function assertDefaultCapabilities(policy, {
     hmacVerification,
     rawBodyRequired,
     liveProvider,
+    providerAccountIdRequired,
+    durableDeliveryRequired,
   });
 }
 
@@ -112,6 +116,29 @@ test("codeClip provider policy returns meta provider policy", () => {
     hmacVerification: true,
     rawBodyRequired: true,
     liveProvider: true,
+  });
+  assertRuntimeVerificationInvariant(result.policy);
+  assertLiveIdempotency(result.policy);
+});
+
+test("codeClip provider policy returns youtube WebSub policy", () => {
+  const result = resolveCodeClipProviderPolicy("youtube");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.policy.provider, "youtube");
+  assert.equal(result.policy.routeEnabled, true);
+  assert.equal(result.policy.adapter, "youtube");
+  assert.equal(result.policy.envelopeType, "youtube-websub");
+  assert.equal(result.policy.verificationMode, "websub-hmac");
+  assert.equal(result.policy.secretEnvName, "CODECLIP_YOUTUBE_WEBSUB_SECRET");
+  assert.equal(result.policy.signatureHeader, "X-Hub-Signature");
+  assertDefaultCapabilities(result.policy, {
+    runtimeVerification: true,
+    hmacVerification: true,
+    rawBodyRequired: true,
+    liveProvider: true,
+    providerAccountIdRequired: true,
+    durableDeliveryRequired: true,
   });
   assertRuntimeVerificationInvariant(result.policy);
   assertLiveIdempotency(result.policy);

@@ -29,7 +29,10 @@ function isCodeClipYouTubeProviderWebhookPath(pathOrReq) {
     .split("?")[0]
     .replace(/\/+$/, "");
 
-  return /^\/codeclip\/provider\/youtube\/[^/]+$/.test(path);
+  return (
+    /^\/codeclip\/provider\/youtube\/[^/]+$/.test(path) ||
+    /^\/api\/codeclip\/providers\/youtube\/websub\/[^/]+$/.test(path)
+  );
 }
 
 function captureCodeClipProviderRawBody(req, buf) {

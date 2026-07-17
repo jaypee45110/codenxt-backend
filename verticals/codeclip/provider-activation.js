@@ -2,6 +2,7 @@ const PROVIDER_CHANNEL_ALIASES = {
   meta: ["meta", "facebook", "instagram", "messenger", "whatsapp"],
   sms: ["sms"],
   test: ["test"],
+  youtube: ["youtube"],
 };
 
 function normalizeToken(value) {
@@ -121,6 +122,25 @@ function eventMatchesBoundProviderActivation(event, { provider, channel, keyword
   return !!eventKeyword && eventKeyword === normalizeToken(keyword);
 }
 
+function eventMatchesBoundProviderEventActivation(event, {
+  provider,
+  channel,
+  activationEvent,
+} = {}) {
+  if (normalizeToken(event?.vertical) !== "codeclip") return false;
+
+  const status = normalizeToken(event?.status || event?.metadata?.status || event?.config?.status);
+  if (status && status !== "active") return false;
+
+  const activationMethod = normalizeToken(readActivationValue(event, "activationMethod"));
+  if (activationMethod && !["provider", "both"].includes(activationMethod)) return false;
+
+  if (!providerMatchesActivationChannels(channel || provider, event)) return false;
+
+  const eventActivation = normalizeToken(readActivationValue(event, "activationEvent"));
+  return !!eventActivation && eventActivation === normalizeToken(activationEvent);
+}
+
 function resolveCodeClipProviderActivationEvent({
   provider,
   keyword,
@@ -153,5 +173,6 @@ function resolveCodeClipProviderActivationEvent({
 
 module.exports = {
   eventMatchesBoundProviderActivation,
+  eventMatchesBoundProviderEventActivation,
   resolveCodeClipProviderActivationEvent,
 };
