@@ -7400,6 +7400,36 @@ app.get("/internal/codeclip/provider-deliveries/summary", requireCodeClipAdmin, 
   }
 });
 
+app.get("/internal/codeclip/smoothoperator/provider-operations", requireCodeClipAdmin, async (_req, res) => {
+  const route = "/internal/codeclip/smoothoperator/provider-operations";
+  const {
+    buildCodeClipSmoothOperatorProviderOperationsOverview,
+  } = require("./verticals/codeclip/smoothoperator-provider-operations");
+
+  try {
+    const overview = await buildCodeClipSmoothOperatorProviderOperationsOverview({
+      queryClient: database.pool,
+    });
+    return res
+      .set("Cache-Control", "no-store")
+      .json(overview);
+  } catch (error) {
+    console.warn("codeClip SmoothOperator provider operations overview failed", {
+      vertical: "codeclip",
+      route,
+      operationalEvent: "smoothoperator_provider_operations_overview_failed",
+      error: error?.name || "Error",
+    });
+    return res
+      .status(503)
+      .set("Cache-Control", "no-store")
+      .json({
+        ok: false,
+        error: "SmoothOperator provider operations unavailable",
+      });
+  }
+});
+
 function mapCodeClipYouTubeWebSubOperationStatus(code) {
   if (code === "subscription_already_exists") return 200;
   if (code === "validation_error") return 400;

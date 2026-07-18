@@ -417,6 +417,15 @@ function toPublicCodeClipProviderBinding(binding = null) {
   };
 }
 
+function getCodeClipProviderBindingSupportedChannels() {
+  return Object.fromEntries(
+    Object.entries(PROVIDER_CHANNELS).map(([provider, channels]) => [
+      provider,
+      [...channels],
+    ])
+  );
+}
+
 async function assertCodeClipEventExists(eventCode, { getEventByCode = getCampaignByCode } = {}) {
   if (typeof getEventByCode !== "function") {
     throw eventNotFound("codeClip event lookup is unavailable", { eventCode });
@@ -696,6 +705,83 @@ async function listCodeClipProviderAccountBindingsForEvent(
   return (result.rows || []).map(mapCodeClipProviderAccountBindingRow);
 }
 
+async function getCodeClipProviderAccountBindingOperationsSummary(
+  { latestLimit = 10 } = {},
+  { queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  const parsedLimit = normalizeCodeClipProviderBindingListLimit(latestLimit);
+
+  const [providerCounts, channelCounts, statusCounts, latestResult] = await Promise.all([
+    client.query(
+      `
+        SELECT provider, COUNT(*)::int AS count
+        FROM codeclip_provider_account_bindings
+        WHERE vertical = 'codeclip'
+        GROUP BY provider
+        ORDER BY provider ASC
+      `
+    ),
+    client.query(
+      `
+        SELECT provider, channel, COUNT(*)::int AS count
+        FROM codeclip_provider_account_bindings
+        WHERE vertical = 'codeclip'
+        GROUP BY provider, channel
+        ORDER BY provider ASC, channel ASC
+      `
+    ),
+    client.query(
+      `
+        SELECT status, COUNT(*)::int AS count
+        FROM codeclip_provider_account_bindings
+        WHERE vertical = 'codeclip'
+        GROUP BY status
+        ORDER BY status ASC
+      `
+    ),
+    client.query(
+      `
+        SELECT *
+        FROM codeclip_provider_account_bindings
+        WHERE vertical = 'codeclip'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT $1
+      `,
+      [parsedLimit]
+    ),
+  ]);
+
+  const byProvider = {};
+  const byChannel = {};
+  const byStatus = {};
+  let total = 0;
+
+  for (const row of providerCounts.rows || []) {
+    const count = Number(row.count) || 0;
+    byProvider[row.provider] = count;
+    total += count;
+  }
+  for (const row of channelCounts.rows || []) {
+    const key = `${row.provider}:${row.channel}`;
+    byChannel[key] = Number(row.count) || 0;
+  }
+  for (const row of statusCounts.rows || []) {
+    byStatus[row.status] = Number(row.count) || 0;
+  }
+
+  return {
+    counts: {
+      total,
+      byProvider,
+      byChannel,
+      byStatus,
+    },
+    latest: (latestResult.rows || []).map(mapCodeClipProviderAccountBindingRow),
+    latestLimit: parsedLimit,
+  };
+}
+
 async function disableCodeClipProviderAccountBinding(id, { queryClient } = {}) {
   const client = requireQueryClient(queryClient);
   const normalizedId = normalizeCodeClipProviderBindingId(id);
@@ -845,6 +931,8 @@ module.exports = {
   createCodeClipProviderAccountBinding,
   getCodeClipProviderAccountBindingById,
   findActiveCodeClipProviderAccountBinding,
+  getCodeClipProviderAccountBindingOperationsSummary,
+  getCodeClipProviderBindingSupportedChannels,
   listCodeClipProviderAccountBindings,
   listCodeClipProviderAccountBindingsForEvent,
   disableCodeClipProviderAccountBinding,
