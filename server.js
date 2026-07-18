@@ -7430,6 +7430,94 @@ app.get("/internal/codeclip/smoothoperator/provider-operations", requireCodeClip
   }
 });
 
+function mapCodeClipSmoothOperatorProviderDeliveryStatus(code) {
+  if (code === "invalid_filter" || code === "invalid_delivery_id") return 400;
+  if (code === "delivery_not_found") return 404;
+  return 503;
+}
+
+function sendCodeClipSmoothOperatorProviderDeliveryError(res, error) {
+  const code = error?.code || "delivery_unavailable";
+  return res
+    .status(mapCodeClipSmoothOperatorProviderDeliveryStatus(code))
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      error: "SmoothOperator provider delivery inspection unavailable",
+      code,
+    });
+}
+
+app.get("/internal/codeclip/smoothoperator/provider-deliveries", requireCodeClipAdmin, async (req, res) => {
+  const route = "/internal/codeclip/smoothoperator/provider-deliveries";
+  const {
+    CodeClipSmoothOperatorProviderDeliveryError,
+    listCodeClipSmoothOperatorProviderDeliveries,
+  } = require("./verticals/codeclip/smoothoperator-provider-deliveries");
+
+  try {
+    const result = await listCodeClipSmoothOperatorProviderDeliveries(
+      {
+        provider: req.query?.provider,
+        providerAccountId: req.query?.providerAccountId,
+        eventCode: req.query?.eventCode,
+        category: req.query?.category,
+        terminal: req.query?.terminal,
+        retryEligible: req.query?.retryEligible,
+        limit: req.query?.limit,
+      },
+      { queryClient: database.pool }
+    );
+    return res
+      .set("Cache-Control", "no-store")
+      .json(result);
+  } catch (error) {
+    if (error instanceof CodeClipSmoothOperatorProviderDeliveryError) {
+      return sendCodeClipSmoothOperatorProviderDeliveryError(res, error);
+    }
+    console.warn("codeClip SmoothOperator provider delivery list failed", {
+      vertical: "codeclip",
+      route,
+      operationalEvent: "smoothoperator_provider_delivery_list_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipSmoothOperatorProviderDeliveryError(res, {
+      code: "delivery_unavailable",
+    });
+  }
+});
+
+app.get("/internal/codeclip/smoothoperator/provider-deliveries/:deliveryId", requireCodeClipAdmin, async (req, res) => {
+  const route = "/internal/codeclip/smoothoperator/provider-deliveries/:deliveryId";
+  const {
+    CodeClipSmoothOperatorProviderDeliveryError,
+    getCodeClipSmoothOperatorProviderDelivery,
+  } = require("./verticals/codeclip/smoothoperator-provider-deliveries");
+
+  try {
+    const result = await getCodeClipSmoothOperatorProviderDelivery(
+      req.params.deliveryId,
+      { queryClient: database.pool }
+    );
+    return res
+      .set("Cache-Control", "no-store")
+      .json(result);
+  } catch (error) {
+    if (error instanceof CodeClipSmoothOperatorProviderDeliveryError) {
+      return sendCodeClipSmoothOperatorProviderDeliveryError(res, error);
+    }
+    console.warn("codeClip SmoothOperator provider delivery detail failed", {
+      vertical: "codeclip",
+      route,
+      operationalEvent: "smoothoperator_provider_delivery_detail_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipSmoothOperatorProviderDeliveryError(res, {
+      code: "delivery_unavailable",
+    });
+  }
+});
+
 function mapCodeClipSmoothOperatorYouTubeWebSubAuditStatus(code) {
   if (code === "subscription_not_found") return 404;
   if (code === "invalid_callback_id") return 400;

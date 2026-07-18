@@ -1240,6 +1240,201 @@ async function getCodeClipProviderDeliveryOperationalSummary(queryClient = pool)
   return normalizeCodeClipProviderDeliveryOperationalSummaryRow(result.rows?.[0] || {});
 }
 
+const CODECLIP_PROVIDER_DELIVERY_READ_CATEGORIES = new Set([
+  'completed',
+  'committed_incomplete',
+  'processing',
+  'failed_precommit',
+  'unknown',
+]);
+
+function codeClipProviderDeliveryReadError(message) {
+  const error = new Error(message);
+  error.code = 'CODECLIP_PROVIDER_DELIVERY_INVALID_REQUEST';
+  return error;
+}
+
+function normalizeCodeClipProviderDeliveryPositiveInteger(value, fieldName, defaultValue = null) {
+  if (value === undefined || value === null || value === '') return defaultValue;
+  const normalized = String(value).trim();
+  if (!/^[0-9]+$/.test(normalized)) {
+    throw codeClipProviderDeliveryReadError(`codeClip provider delivery ${fieldName} is invalid`);
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw codeClipProviderDeliveryReadError(`codeClip provider delivery ${fieldName} is invalid`);
+  }
+  return parsed;
+}
+
+function normalizeCodeClipProviderDeliveryReadLimit(value) {
+  const parsed = normalizeCodeClipProviderDeliveryPositiveInteger(value, 'limit', 50);
+  return Math.min(parsed, 200);
+}
+
+function normalizeCodeClipProviderDeliveryReadBoolean(value, fieldName) {
+  if (value === undefined || value === null || value === '') return null;
+  if (value === true || value === false) return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  throw codeClipProviderDeliveryReadError(`codeClip provider delivery ${fieldName} filter is invalid`);
+}
+
+function normalizeCodeClipProviderDeliveryReadString(value, fieldName) {
+  if (value === undefined || value === null || value === '') return null;
+  const normalized = String(value).trim();
+  if (!normalized || /[\u0000-\u001f\u007f]/.test(normalized) || normalized.length > 180) {
+    throw codeClipProviderDeliveryReadError(`codeClip provider delivery ${fieldName} filter is invalid`);
+  }
+  return normalized;
+}
+
+function readCodeClipProviderDeliveryFilterValue(filters, camelName, snakeName) {
+  if (Object.prototype.hasOwnProperty.call(filters, camelName)) return filters[camelName];
+  if (Object.prototype.hasOwnProperty.call(filters, snakeName)) return filters[snakeName];
+  return undefined;
+}
+
+function buildCodeClipProviderDeliveryReadPredicates(filters = {}) {
+  const predicates = [];
+  const params = [];
+
+  const provider = normalizeCodeClipProviderDeliveryReadString(filters.provider, 'provider');
+  if (provider) {
+    params.push(provider.toLowerCase());
+    predicates.push(`provider = $${params.length}`);
+  }
+
+  const providerAccountId = normalizeCodeClipProviderDeliveryReadString(
+    readCodeClipProviderDeliveryFilterValue(filters, 'providerAccountId', 'provider_account_id'),
+    'providerAccountId'
+  );
+  if (providerAccountId) {
+    params.push(providerAccountId);
+    predicates.push(`provider_account_id = $${params.length}`);
+  }
+
+  const eventCode = normalizeCodeClipProviderDeliveryReadString(
+    readCodeClipProviderDeliveryFilterValue(filters, 'eventCode', 'event_code'),
+    'eventCode'
+  );
+  if (eventCode) {
+    params.push(eventCode);
+    predicates.push(`event_code = $${params.length}`);
+  }
+
+  const terminal = normalizeCodeClipProviderDeliveryReadBoolean(filters.terminal, 'terminal');
+  if (terminal !== null) {
+    params.push(terminal);
+    predicates.push(`terminal_state = $${params.length}`);
+  }
+
+  const retryEligible = normalizeCodeClipProviderDeliveryReadBoolean(
+    readCodeClipProviderDeliveryFilterValue(filters, 'retryEligible', 'retry_eligible'),
+    'retryEligible'
+  );
+  if (retryEligible !== null) {
+    params.push(retryEligible);
+    predicates.push(`retry_eligible = $${params.length}`);
+  }
+
+  return { predicates, params };
+}
+
+function buildCodeClipProviderDeliveryCategoryPredicate(category) {
+  if (category === undefined || category === null || category === '') return null;
+  const normalized = String(category).trim().toLowerCase();
+  if (!CODECLIP_PROVIDER_DELIVERY_READ_CATEGORIES.has(normalized)) {
+    throw codeClipProviderDeliveryReadError('codeClip provider delivery category filter is invalid');
+  }
+
+  const completedPredicate = `
+    core_persistence_state = 'committed'
+    AND completion_state = 'completed'
+    AND processing_state = 'completed'
+    AND terminal_state IS TRUE
+    AND retry_eligible IS FALSE
+    AND public_response_json IS NOT NULL
+    AND jsonb_typeof(public_response_json) = 'object'
+    AND response_status BETWEEN 200 AND 299
+  `;
+  const committedIncompletePredicate = `
+    core_persistence_state = 'committed'
+    AND NOT COALESCE((${completedPredicate}), FALSE)
+  `;
+  const processingPredicate = `
+    processing_state = 'processing'
+    AND core_persistence_state IS DISTINCT FROM 'committed'
+  `;
+  const failedPrecommitPredicate = `
+    processing_state = 'failed'
+    AND core_persistence_state IS DISTINCT FROM 'committed'
+    AND completion_state IS DISTINCT FROM 'completed'
+  `;
+
+  if (normalized === 'completed') return `(${completedPredicate})`;
+  if (normalized === 'committed_incomplete') return `(${committedIncompletePredicate})`;
+  if (normalized === 'processing') return `(${processingPredicate})`;
+  if (normalized === 'failed_precommit') return `(${failedPrecommitPredicate})`;
+  return `
+    NOT COALESCE((${completedPredicate}), FALSE)
+    AND NOT COALESCE((${committedIncompletePredicate}), FALSE)
+    AND NOT COALESCE((${processingPredicate}), FALSE)
+    AND NOT COALESCE((${failedPrecommitPredicate}), FALSE)
+  `;
+}
+
+async function listCodeClipProviderDeliveries(filters = {}, queryClient = pool) {
+  if (!queryClient) return [];
+  if (queryClient === pool) {
+    await ensureCodeClipProviderDeliveriesTable(queryClient);
+  }
+
+  const { predicates, params } = buildCodeClipProviderDeliveryReadPredicates(filters);
+  const categoryPredicate = buildCodeClipProviderDeliveryCategoryPredicate(filters.category);
+  if (categoryPredicate) predicates.push(categoryPredicate);
+  const limit = normalizeCodeClipProviderDeliveryReadLimit(filters.limit);
+  params.push(limit);
+  const whereClause = predicates.length ? `WHERE ${predicates.join(' AND ')}` : '';
+
+  const result = await queryClient.query(
+    `
+      SELECT *
+      FROM codeclip_provider_deliveries
+      ${whereClause}
+      ORDER BY created_at DESC, id DESC
+      LIMIT $${params.length}
+    `,
+    params
+  );
+
+  return (result.rows || []).map(mapCodeClipProviderDeliveryRow);
+}
+
+async function getCodeClipProviderDeliveryById(deliveryId, queryClient = pool) {
+  if (!queryClient) return null;
+  const normalizedDeliveryId = normalizeCodeClipProviderDeliveryPositiveInteger(
+    deliveryId,
+    'deliveryId'
+  );
+  if (queryClient === pool) {
+    await ensureCodeClipProviderDeliveriesTable(queryClient);
+  }
+
+  const result = await queryClient.query(
+    `
+      SELECT *
+      FROM codeclip_provider_deliveries
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [normalizedDeliveryId]
+  );
+
+  return mapCodeClipProviderDeliveryRow(result.rows?.[0] || null);
+}
+
 async function ensureCodeClipProviderAccountBindingsTable(queryClient = pool) {
   if (!queryClient) return;
 
@@ -3021,9 +3216,12 @@ module.exports = {
   createCodeClipProviderDelivery,
   getCodeClipProviderDeliveryByIdentity,
   findCodeClipProviderDeliveryForReplayIdentity,
+  getCodeClipProviderDeliveryById,
+  listCodeClipProviderDeliveries,
   updateCodeClipProviderDeliveryState,
   hasCodeClipProviderDeliveryReplayInvariants,
   classifyCodeClipProviderDeliveryOperationalState,
+  buildCodeClipProviderDeliveryCategoryPredicate,
   getCodeClipProviderDeliveryOperationalSummary,
   ensureCodeClipXtraRedemptionsTable,
   saveCodeClipXtraRedemption,
