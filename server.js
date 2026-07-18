@@ -7430,6 +7430,55 @@ app.get("/internal/codeclip/smoothoperator/provider-operations", requireCodeClip
   }
 });
 
+function mapCodeClipSmoothOperatorYouTubeWebSubAuditStatus(code) {
+  if (code === "subscription_not_found") return 404;
+  if (code === "invalid_callback_id") return 400;
+  return 503;
+}
+
+function sendCodeClipSmoothOperatorYouTubeWebSubAuditError(res, error) {
+  const code = error?.code || "audit_unavailable";
+  return res
+    .status(mapCodeClipSmoothOperatorYouTubeWebSubAuditStatus(code))
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      error: "YouTube WebSub audit unavailable",
+      code,
+    });
+}
+
+app.get("/internal/codeclip/smoothoperator/youtube-websub/subscriptions/:callbackId/audit", requireCodeClipAdmin, async (req, res) => {
+  const route = "/internal/codeclip/smoothoperator/youtube-websub/subscriptions/:callbackId/audit";
+  const {
+    CodeClipSmoothOperatorYouTubeWebSubAuditError,
+    getCodeClipSmoothOperatorYouTubeWebSubSubscriptionAudit,
+  } = require("./verticals/codeclip/smoothoperator-youtube-websub-audit");
+
+  try {
+    const overview = await getCodeClipSmoothOperatorYouTubeWebSubSubscriptionAudit(
+      req.params.callbackId,
+      { queryClient: database.pool }
+    );
+    return res
+      .set("Cache-Control", "no-store")
+      .json(overview);
+  } catch (error) {
+    if (error instanceof CodeClipSmoothOperatorYouTubeWebSubAuditError) {
+      return sendCodeClipSmoothOperatorYouTubeWebSubAuditError(res, error);
+    }
+    console.warn("codeClip SmoothOperator YouTube WebSub audit read failed", {
+      vertical: "codeclip",
+      route,
+      operationalEvent: "smoothoperator_youtube_websub_audit_read_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipSmoothOperatorYouTubeWebSubAuditError(res, {
+      code: "audit_unavailable",
+    });
+  }
+});
+
 function mapCodeClipYouTubeWebSubOperationStatus(code) {
   if (code === "subscription_already_exists") return 200;
   if (code === "validation_error") return 400;

@@ -588,6 +588,43 @@ async function listCodeClipYouTubeWebSubSubscriptions(filters = {}, { queryClien
   return (result.rows || []).map(mapSubscriptionRow);
 }
 
+async function listCodeClipYouTubeWebSubSubscriptionAudit(filters = {}, { queryClient } = {}) {
+  const client = requireQueryClient(queryClient);
+  const predicates = [
+    "vertical = 'codeclip'",
+    "provider = 'youtube'",
+  ];
+  const params = [];
+
+  if (filters.callbackId || filters.callback_id) {
+    params.push(normalizeCallbackId(filters.callbackId || filters.callback_id));
+    predicates.push(`callback_id = $${params.length}`);
+  }
+
+  if (filters.providerAccountId || filters.provider_account_id) {
+    params.push(normalizeYouTubeProviderAccountId(
+      filters.providerAccountId || filters.provider_account_id
+    ));
+    predicates.push(`provider_account_id = $${params.length}`);
+  }
+
+  const limit = Number.parseInt(String(filters.limit || 100), 10);
+  const normalizedLimit = Number.isSafeInteger(limit) && limit > 0 && limit <= 200 ? limit : 100;
+  params.push(normalizedLimit);
+
+  const result = await client.query(
+    `
+      SELECT *
+      FROM codeclip_youtube_websub_subscription_audit
+      WHERE ${predicates.join(" AND ")}
+      ORDER BY created_at DESC, id DESC
+      LIMIT $${params.length}
+    `,
+    params
+  );
+  return (result.rows || []).map(mapSubscriptionAuditRow);
+}
+
 async function updateStatusByCallbackId(callbackId, fields = {}, { queryClient } = {}) {
   const client = requireQueryClient(queryClient);
   const normalizedCallbackId = normalizeCallbackId(callbackId);
@@ -776,6 +813,7 @@ module.exports = {
   getCodeClipYouTubeWebSubSubscriptionByCallbackId,
   getCodeClipYouTubeWebSubSubscriptionByProviderAccountId,
   getOpenCodeClipYouTubeWebSubSubscriptionByProviderAccountId,
+  listCodeClipYouTubeWebSubSubscriptionAudit,
   listCodeClipYouTubeWebSubSubscriptions,
   markCodeClipYouTubeWebSubSubscriptionExpired,
   markCodeClipYouTubeWebSubSubscriptionRenewalPending,
