@@ -230,7 +230,7 @@ function eventMatchesVertical(event = {}, vertical = "") {
 
 function normalizeActivationMethod(value) {
   const method = String(value || "").trim().toLowerCase();
-  return ["keyword", "qr", "both"].includes(method) ? method : "keyword";
+  return ["keyword", "qr", "both", "provider"].includes(method) ? method : "keyword";
 }
 
 function normalizeActivationChannels(value) {
@@ -250,6 +250,96 @@ function normalizeActivationChannels(value) {
     }
   }
   return raw.split(",").map((channel) => channel.trim()).filter(Boolean);
+}
+
+class EventActivationConfigError extends Error {
+  constructor(code) {
+    super("Invalid activation configuration");
+    this.name = "EventActivationConfigError";
+    this.code = code;
+  }
+}
+
+function normalizeEventActivationConfig({
+  isCodeClipEvent,
+  activationMethod,
+  activationChannels,
+  activationEvent,
+} = {}) {
+  const methodProvided = activationMethod !== undefined && activationMethod !== null;
+  const rawMethod = String(activationMethod || "").trim().toLowerCase();
+  const allowedMethods = new Set(["keyword", "qr", "both", "provider"]);
+
+  if (isCodeClipEvent && methodProvided && !allowedMethods.has(rawMethod)) {
+    throw new EventActivationConfigError("INVALID_ACTIVATION_METHOD");
+  }
+
+  const normalizedMethod = allowedMethods.has(rawMethod) ? rawMethod : "keyword";
+  const channelsProvided = activationChannels !== undefined && activationChannels !== null;
+  const channelsAreArray = Array.isArray(activationChannels);
+  const seen = new Set();
+  const normalizedChannels = channelsAreArray
+    ? activationChannels
+        .map((channel) => String(channel || "").trim().toLowerCase())
+        .filter((channel) => {
+          if (!channel || seen.has(channel)) return false;
+          seen.add(channel);
+          return true;
+        })
+    : [];
+
+  if (!isCodeClipEvent) {
+    return {
+      activationMethod: ["keyword", "qr", "both"].includes(normalizedMethod)
+        ? normalizedMethod
+        : "keyword",
+      activationChannels: channelsAreArray
+        ? activationChannels.map((channel) => String(channel || "").trim()).filter(Boolean)
+        : [],
+      activationEvent: "",
+    };
+  }
+
+  const normalizedEvent = String(activationEvent || "").trim().toLowerCase();
+  const providerEventMode = normalizedMethod === "provider" || Boolean(normalizedEvent);
+
+  if (channelsProvided && !channelsAreArray) {
+    throw new EventActivationConfigError("INVALID_ACTIVATION_CHANNELS");
+  }
+
+  if (providerEventMode && !channelsProvided) {
+    throw new EventActivationConfigError("INVALID_ACTIVATION_CHANNELS");
+  }
+
+  if (normalizedMethod === "provider" && normalizedChannels.length === 0) {
+    throw new EventActivationConfigError("PROVIDER_ACTIVATION_CHANNELS_REQUIRED");
+  }
+
+  if (providerEventMode && normalizedChannels.some((channel) => channel !== "youtube")) {
+    throw new EventActivationConfigError("UNSUPPORTED_PROVIDER_ACTIVATION_CHANNEL");
+  }
+
+  if (normalizedMethod === "provider" && !normalizedEvent) {
+    throw new EventActivationConfigError("PROVIDER_ACTIVATION_EVENT_REQUIRED");
+  }
+
+  if (normalizedEvent && normalizedEvent !== "published_video") {
+    throw new EventActivationConfigError("UNSUPPORTED_PROVIDER_ACTIVATION_EVENT");
+  }
+
+  if (normalizedEvent === "published_video" && !normalizedChannels.includes("youtube")) {
+    throw new EventActivationConfigError("PUBLISHED_VIDEO_REQUIRES_YOUTUBE");
+  }
+
+  if (normalizedEvent && !["provider", "both"].includes(normalizedMethod)) {
+    throw new EventActivationConfigError("PROVIDER_EVENT_REQUIRES_PROVIDER_METHOD");
+  }
+
+  return {
+    activationMethod: normalizedMethod,
+    activationChannels: normalizedChannels,
+    activationEvent: normalizedEvent,
+  };
 }
 
 function findInMemoryEventByCode(eventCode, vertical = "") {
@@ -891,14 +981,27 @@ const normalizedCodeClipRewards = isCodeClipEvent
   : null;
 const dashboardAccessKey = String(req.body.dashboardAccessKey || generateDashboardAccessKey()).trim();
 const normalizedDefaultLang = String(defaultLang || lang || language || "en").trim().toLowerCase();
-const rawActivationMethod = String(activationMethod || "").trim().toLowerCase();
-const normalizedActivationMethod = ["keyword", "qr", "both"].includes(rawActivationMethod)
-  ? rawActivationMethod
-  : "keyword";
+let normalizedActivationConfig;
+try {
+  normalizedActivationConfig = normalizeEventActivationConfig({
+    isCodeClipEvent,
+    activationMethod,
+    activationChannels,
+    activationEvent: req.body.activationEvent,
+  });
+} catch (error) {
+  if (error instanceof EventActivationConfigError) {
+    return res.status(400).json({
+      error: "Invalid activation configuration",
+      code: error.code,
+    });
+  }
+  throw error;
+}
+const normalizedActivationMethod = normalizedActivationConfig.activationMethod;
+const normalizedActivationChannels = normalizedActivationConfig.activationChannels;
+const normalizedActivationEvent = normalizedActivationConfig.activationEvent;
 const normalizedActivationKeyword = String(activationKeyword || "").trim();
-const normalizedActivationChannels = Array.isArray(activationChannels)
-  ? activationChannels.map((channel) => String(channel || "").trim()).filter(Boolean)
-  : [];
 
     if (!name || !startAt || !unlockAt || !endAt) {
       return res.status(400).json({
@@ -952,6 +1055,9 @@ maxClaims,
   activationKeyword: normalizedActivationKeyword,
   activationChannels: normalizedActivationChannels,
 };
+if (normalizedActivationEvent) {
+  event.activationEvent = normalizedActivationEvent;
+}
 if (normalizedPartnerReward) {
   event.partnerReward = normalizedPartnerReward;
 }
@@ -1010,6 +1116,9 @@ artistLogo: artistLogo || "",
   activationKeyword: normalizedActivationKeyword,
   activationChannels: JSON.stringify(normalizedActivationChannels),
 };
+if (normalizedActivationEvent) {
+  eventMeta.activationEvent = normalizedActivationEvent;
+}
 if (normalizedPartnerReward) {
   eventMeta.partnerReward = JSON.stringify(normalizedPartnerReward);
 }
@@ -1266,6 +1375,7 @@ if (process.env.REDIS_URL) {
 const normalizedMeta = {
   id: meta?.id,
   code: meta?.code,
+  vertical: meta?.vertical || vertical,
   name: meta?.name,
   companyName: meta?.companyName || "",
   artistLogo: meta?.artistLogo || "",
@@ -1286,6 +1396,7 @@ const normalizedMeta = {
   activationMethod: normalizeActivationMethod(meta?.activationMethod),
   activationKeyword: String(meta?.activationKeyword || "").trim(),
   activationChannels: normalizeActivationChannels(meta?.activationChannels),
+  activationEvent: String(meta?.activationEvent || "").trim().toLowerCase(),
   maxClaims: Number(meta?.maxClaims || 0),
   status: meta?.status,
   defaultLang: meta?.defaultLang || meta?.lang || meta?.language || "en",

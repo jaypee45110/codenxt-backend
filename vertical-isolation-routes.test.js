@@ -4,6 +4,9 @@ const crypto = require('node:crypto');
 
 const database = require('./db');
 const { app } = require('./server');
+const {
+  eventMatchesBoundProviderEventActivation,
+} = require('./verticals/codeclip/provider-activation');
 
 const CODECLIP_SMS_TEST_SECRET = 'codeclip-sms-test-secret';
 const CODECLIP_META_TEST_VERIFY_TOKEN = 'codeclip-meta-test-verify-token';
@@ -438,6 +441,257 @@ test('POST /event defaults missing vertical to codeTone', async () => {
     assert.equal(body.success, true);
     assert.ok(body.event);
     assert.equal(body.event.vertical, 'codetone');
+  });
+});
+
+test('POST /event creates a codeClip YouTube provider-event Episode', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CC-YOUTUBE-PROVIDER-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code,
+        name: 'codeClip YouTube provider Episode route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        status: 'active',
+        activationMethod: ' provider ',
+        activationChannels: [' YouTube ', 'youtube'],
+        activationEvent: ' Published_Video ',
+      }),
+    });
+    const created = await createResponse.json();
+
+    assert.equal(createResponse.ok, true);
+    assert.equal(created.success, true);
+    assert.equal(created.event.vertical, 'codeclip');
+    assert.equal(created.event.activationMethod, 'provider');
+    assert.deepEqual(created.event.activationChannels, ['youtube']);
+    assert.equal(created.event.activationEvent, 'published_video');
+    assert.equal(
+      eventMatchesBoundProviderEventActivation(created.event, {
+        provider: 'youtube',
+        channel: 'youtube',
+        activationEvent: 'published_video',
+      }),
+      true
+    );
+
+    const readResponse = await fetch(`${baseUrl}/event/${code}?vertical=codeclip`);
+    const readBack = await readResponse.json();
+
+    assert.equal(readResponse.ok, true);
+    assert.equal(readBack.code, code);
+    assert.equal(readBack.activationMethod, 'provider');
+    assert.deepEqual(readBack.activationChannels, ['youtube']);
+    assert.equal(readBack.activationEvent, 'published_video');
+    assert.equal(
+      eventMatchesBoundProviderEventActivation(readBack, {
+        provider: 'youtube',
+        channel: 'youtube',
+        activationEvent: 'published_video',
+      }),
+      true
+    );
+  });
+});
+
+test('POST /event rejects invalid codeClip provider-event activation configs safely', async () => {
+  await withTestServer(async (baseUrl) => {
+    const invalidCases = [
+      {
+        code: 'PROVIDER-MISSING-CHANNELS',
+        body: { activationMethod: 'provider', activationEvent: 'published_video' },
+        expectedCode: 'INVALID_ACTIVATION_CHANNELS',
+      },
+      {
+        code: 'PROVIDER-STRING-CHANNELS',
+        body: {
+          activationMethod: 'provider',
+          activationChannels: 'youtube',
+          activationEvent: 'published_video',
+        },
+        expectedCode: 'INVALID_ACTIVATION_CHANNELS',
+      },
+      {
+        code: 'PROVIDER-UNKNOWN-CHANNEL',
+        body: {
+          activationMethod: 'provider',
+          activationChannels: ['youtube', 'unknown'],
+          activationEvent: 'published_video',
+        },
+        expectedCode: 'UNSUPPORTED_PROVIDER_ACTIVATION_CHANNEL',
+      },
+      {
+        code: 'BOTH-UNKNOWN-CHANNEL',
+        body: {
+          activationMethod: 'both',
+          activationChannels: ['youtube', 'instagram'],
+          activationEvent: 'published_video',
+        },
+        expectedCode: 'UNSUPPORTED_PROVIDER_ACTIVATION_CHANNEL',
+      },
+      {
+        code: 'PROVIDER-MISSING-EVENT',
+        body: { activationMethod: 'provider', activationChannels: ['youtube'] },
+        expectedCode: 'PROVIDER_ACTIVATION_EVENT_REQUIRED',
+      },
+      {
+        code: 'PROVIDER-UNKNOWN-EVENT',
+        body: {
+          activationMethod: 'provider',
+          activationChannels: ['youtube'],
+          activationEvent: 'video_updated',
+        },
+        expectedCode: 'UNSUPPORTED_PROVIDER_ACTIVATION_EVENT',
+      },
+      {
+        code: 'PUBLISHED-NO-YOUTUBE',
+        body: {
+          activationMethod: 'both',
+          activationChannels: ['sms'],
+          activationEvent: 'published_video',
+        },
+        expectedCode: 'UNSUPPORTED_PROVIDER_ACTIVATION_CHANNEL',
+      },
+      {
+        code: 'KEYWORD-PUBLISHED',
+        body: {
+          activationMethod: 'keyword',
+          activationChannels: ['youtube'],
+          activationEvent: 'published_video',
+        },
+        expectedCode: 'PROVIDER_EVENT_REQUIRES_PROVIDER_METHOD',
+      },
+      {
+        code: 'KEYWORD-STRING-CHANNELS',
+        body: {
+          activationMethod: 'keyword',
+          activationChannels: 'Instagram',
+          activationKeyword: 'CLIP',
+        },
+        expectedCode: 'INVALID_ACTIVATION_CHANNELS',
+      },
+      {
+        code: 'UNKNOWN-METHOD',
+        body: { activationMethod: 'providerish', activationChannels: ['youtube'] },
+        expectedCode: 'INVALID_ACTIVATION_METHOD',
+      },
+    ];
+
+    for (const invalidCase of invalidCases) {
+      const response = await fetch(`${baseUrl}/event`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          vertical: 'codeclip',
+          code: `CC-${invalidCase.code}-${Date.now()}`,
+          name: `codeClip invalid ${invalidCase.code}`,
+          startAt: '2099-01-01T10:00:00.000Z',
+          unlockAt: '2099-01-01T10:00:00.000Z',
+          endAt: '2099-01-01T11:00:00.000Z',
+          ...invalidCase.body,
+        }),
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 400, invalidCase.code);
+      assert.equal(body.error, 'Invalid activation configuration');
+      assert.equal(body.code, invalidCase.expectedCode);
+      assert.equal(Object.hasOwn(body, 'stack'), false);
+    }
+  });
+});
+
+test('POST /event keeps non-provider codeClip and other vertical activation compatibility', async () => {
+  await withTestServer(async (baseUrl) => {
+    const keywordResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code: `CC-KEYWORD-COMPAT-${Date.now()}`,
+        name: 'codeClip keyword compatibility route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'keyword',
+        activationKeyword: 'CLIP',
+      }),
+    });
+    const keyword = await keywordResponse.json();
+
+    assert.equal(keywordResponse.ok, true);
+    assert.equal(keyword.event.activationMethod, 'keyword');
+    assert.deepEqual(keyword.event.activationChannels, []);
+    assert.equal(Object.hasOwn(keyword.event, 'activationEvent'), false);
+
+    const qrResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code: `CC-QR-COMPAT-${Date.now()}`,
+        name: 'codeClip QR compatibility route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'qr',
+        activationChannels: ['Instagram'],
+      }),
+    });
+    const qr = await qrResponse.json();
+
+    assert.equal(qrResponse.ok, true);
+    assert.equal(qr.event.activationMethod, 'qr');
+    assert.deepEqual(qr.event.activationChannels, ['instagram']);
+
+    const bothResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codeclip',
+        code: `CC-BOTH-COMPAT-${Date.now()}`,
+        name: 'codeClip both compatibility route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'both',
+        activationKeyword: 'CLIP',
+        activationChannels: ['Instagram', 'Messenger'],
+      }),
+    });
+    const both = await bothResponse.json();
+
+    assert.equal(bothResponse.ok, true);
+    assert.equal(both.event.activationMethod, 'both');
+    assert.deepEqual(both.event.activationChannels, ['instagram', 'messenger']);
+
+    const codePodResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code: `CP-TOLERANT-${Date.now()}`,
+        name: 'codePod tolerant activation route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        activationMethod: 'provider',
+        activationChannels: 'youtube',
+        activationEvent: 'published_video',
+      }),
+    });
+    const codePod = await codePodResponse.json();
+
+    assert.equal(codePodResponse.ok, true);
+    assert.equal(codePod.event.vertical, 'codepod');
+    assert.equal(codePod.event.activationMethod, 'keyword');
+    assert.deepEqual(codePod.event.activationChannels, []);
+    assert.equal(Object.hasOwn(codePod.event, 'activationEvent'), false);
   });
 });
 

@@ -74,6 +74,8 @@ function assertProviderCapabilitiesShape(capabilities) {
     "hmacVerification",
     "rawBodyRequired",
     "liveProvider",
+    "providerAccountIdRequired",
+    "durableDeliveryRequired",
   ]) {
     assert.equal(typeof capabilities[key], "boolean", `missing boolean capability ${key}`);
   }
@@ -85,7 +87,6 @@ test("registered codeClip providers have onboarding support", () => {
 
   for (const provider of providers) {
     assert.equal(isCodeClipProviderRegistered(provider), true);
-    assert.ok(PROVIDER_FIXTURES[provider], `missing onboarding fixture for ${provider}`);
 
     const policyResult = resolveCodeClipProviderPolicy(provider);
     assert.equal(policyResult.ok, true, `missing policy for ${provider}`);
@@ -94,7 +95,6 @@ test("registered codeClip providers have onboarding support", () => {
     assert.equal(policy.provider, provider);
     assert.equal(policy.routeEnabled, true);
     assert.equal(policy.adapter, provider);
-    assert.equal(policy.envelopeType, provider);
     assert.equal(typeof policy.verificationMode, "string");
     assert.notEqual(policy.verificationMode.trim(), "");
     assertProviderCapabilitiesShape(policy.capabilities);
@@ -106,25 +106,42 @@ test("registered codeClip providers have onboarding support", () => {
       Boolean(policy.capabilities.liveProvider)
     );
 
-    assert.equal(adapters.includes(provider), true, `missing keyword adapter for ${provider}`);
-    const adapterResult = normalizeProviderKeywordIngress(
-      provider,
-      PROVIDER_FIXTURES[provider].adapterInput
-    );
-    assert.equal(adapterResult.ok, true, `adapter fixture failed for ${provider}`);
-    assert.notEqual(adapterResult.eventCode, "");
-    assert.notEqual(adapterResult.keyword, "");
-    assert.notEqual(adapterResult.messageId, "");
+    if (provider === "youtube") {
+      assert.equal(policy.adapter, "youtube");
+      assert.equal(policy.envelopeType, "youtube-websub");
+      assert.equal(policy.verificationMode, "websub-hmac");
+      assert.equal(policy.secretEnvName, "CODECLIP_YOUTUBE_WEBSUB_SECRET");
+      assert.equal(policy.signatureHeader, "X-Hub-Signature");
+      assert.equal(policy.capabilities.hmacVerification, true);
+      assert.equal(policy.capabilities.rawBodyRequired, true);
+      assert.equal(policy.capabilities.liveProvider, true);
+      assert.equal(policy.capabilities.providerAccountIdRequired, true);
+      assert.equal(policy.capabilities.durableDeliveryRequired, true);
+      assert.equal(adapters.includes(provider), false);
+    } else {
+      assert.ok(PROVIDER_FIXTURES[provider], `missing onboarding fixture for ${provider}`);
+      assert.equal(policy.envelopeType, provider);
+      assert.equal(adapters.includes(provider), true, `missing keyword adapter for ${provider}`);
 
-    const envelopeResult = normalizeCodeClipProviderEnvelope({
-      provider,
-      body: PROVIDER_FIXTURES[provider].body,
-      receivedAt: RECEIVED_AT,
-    });
-    assert.equal(envelopeResult.ok, true, `envelope fixture failed for ${provider}`);
-    assert.equal(envelopeResult.envelope.provider, provider);
-    assert.notEqual(envelopeResult.envelope.messageId, "");
-    assert.notEqual(envelopeResult.envelope.text, "");
+      const adapterResult = normalizeProviderKeywordIngress(
+        provider,
+        PROVIDER_FIXTURES[provider].adapterInput
+      );
+      assert.equal(adapterResult.ok, true, `adapter fixture failed for ${provider}`);
+      assert.notEqual(adapterResult.eventCode, "");
+      assert.notEqual(adapterResult.keyword, "");
+      assert.notEqual(adapterResult.messageId, "");
+
+      const envelopeResult = normalizeCodeClipProviderEnvelope({
+        provider,
+        body: PROVIDER_FIXTURES[provider].body,
+        receivedAt: RECEIVED_AT,
+      });
+      assert.equal(envelopeResult.ok, true, `envelope fixture failed for ${provider}`);
+      assert.equal(envelopeResult.envelope.provider, provider);
+      assert.notEqual(envelopeResult.envelope.messageId, "");
+      assert.notEqual(envelopeResult.envelope.text, "");
+    }
 
     const verificationRequest = buildCodeClipProviderVerificationRequest({
       policy,
