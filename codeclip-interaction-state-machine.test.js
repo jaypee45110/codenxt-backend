@@ -209,6 +209,49 @@ function createRecordingTransactionRunner({ failPhase = null } = {}) {
   };
 }
 
+function createProviderEventFixture(overrides = {}) {
+  return codeClipService.createProviderEventInteraction({
+    event: {
+      id: 'event-provider-runtime',
+      code: 'CC-PROVIDER-RUNTIME',
+      vertical: 'codeclip',
+      venue: 'Provider Venue',
+      city: 'Oslo',
+      startAt: '2026-07-18T09:00:00.000Z',
+      endAt: '2026-07-18T12:00:00.000Z',
+      config: {
+        activationMethod: 'provider',
+        activationChannels: '["youtube"]',
+        activationEvent: 'published_video',
+      },
+      ...overrides.event,
+    },
+    eventCode: 'CC-PROVIDER-RUNTIME',
+    eventId: 'event-provider-runtime',
+    providerEvent: {
+      provider: ' YouTube ',
+      channel: ' YouTube ',
+      activationEvent: ' Published_Video ',
+      providerEventId: 'youtube:UCproviderEvent:video123:published',
+      videoId: 'video123',
+      externalMessageId: 'youtube:UCproviderEvent:video123:published',
+      publishedAt: '2026-07-18T10:00:00.000Z',
+      updatedAt: '2026-07-18T10:01:00.000Z',
+      title: ' Published provider video ',
+      canonicalUrl: 'https://www.youtube.com/watch?v=video123',
+      hmacSignature: 'sha256-secret',
+      secret: 'must-not-persist',
+      rawXml: '<feed/>',
+      userId: 'fake-user',
+      phone: '+15551234567',
+      email: 'viewer@example.test',
+      metaUserId: 'meta-user',
+      ...overrides.providerEvent,
+    },
+    occurredAt: '2026-07-18T10:00:00.000Z',
+  });
+}
+
 test('withCodeClipCorePersistenceTransaction commits successful work and releases client', async () => {
   const { pool, client, calls } = createFakeTransactionPool();
   let workClient = null;
@@ -1644,6 +1687,268 @@ test('codeClip persistence skips reward assignments when no writes are required'
     reason: 'clipxtra_not_assigned',
   });
   assert.deepEqual(outboxEvents, []);
+});
+
+test('codeClip provider-event interaction has native processed state without audience identity', () => {
+  const interaction = createProviderEventFixture();
+
+  assert.equal(interaction.interactionType, 'provider_event');
+  assert.equal(interaction.eventCode, 'CC-PROVIDER-RUNTIME');
+  assert.equal(interaction.eventId, 'event-provider-runtime');
+  assert.equal(interaction.vertical, 'codeclip');
+  assert.equal(interaction.scanId, 'youtube:UCproviderEvent:video123:published');
+  assert.equal(interaction.routingOutcome, 'MATCH');
+  assert.equal(interaction.state, 'processed');
+  assert.deepEqual(
+    interaction.stateTransitions.map((transition) => [
+      transition.from,
+      transition.to,
+      transition.transition,
+      transition.reason || null,
+    ]),
+    [
+      [null, 'received', 'receive', null],
+      ['received', 'routed', 'route_match', null],
+      ['routed', 'processed', 'complete', 'provider_event_has_no_individual_recipient'],
+    ]
+  );
+  assert.equal(interaction.audienceEntry, null);
+  assert.equal(interaction.audienceIntent.type, 'provider_event');
+  assert.equal(interaction.audienceIntent.userId, undefined);
+  assert.equal(interaction.audienceIntent.phone, undefined);
+  assert.equal(interaction.audienceIntent.email, undefined);
+  assert.equal(interaction.audienceIntent.metaUserId, undefined);
+});
+
+test('codeClip provider-event interaction normalizes safe metadata and excludes secrets', () => {
+  const interaction = createProviderEventFixture();
+
+  assert.deepEqual(interaction.providerEvent, {
+    provider: 'youtube',
+    channel: 'youtube',
+    activationEvent: 'published_video',
+    providerEventId: 'youtube:UCproviderEvent:video123:published',
+    videoId: 'video123',
+    externalMessageId: 'youtube:UCproviderEvent:video123:published',
+    publishedAt: '2026-07-18T10:00:00.000Z',
+    updatedAt: '2026-07-18T10:01:00.000Z',
+    title: 'Published provider video',
+    canonicalUrl: 'https://www.youtube.com/watch?v=video123',
+  });
+  assert.equal(interaction.providerEvent.hmacSignature, undefined);
+  assert.equal(interaction.providerEvent.secret, undefined);
+  assert.equal(interaction.providerEvent.rawXml, undefined);
+  assert.equal(interaction.providerEvent.userId, undefined);
+  assert.equal(interaction.providerEvent.phone, undefined);
+  assert.equal(interaction.providerEvent.email, undefined);
+  assert.equal(interaction.providerEvent.metaUserId, undefined);
+  assert.equal(interaction.audienceContext.providerEvent.secret, undefined);
+  assert.equal(interaction.audienceContext.providerEvent.rawXml, undefined);
+});
+
+test('codeClip provider-event interaction snapshots activation from existing config containers', () => {
+  const interaction = createProviderEventFixture({
+    event: {
+      activationMethod: undefined,
+      activationChannels: undefined,
+      activationEvent: undefined,
+      config: {
+        activationMethod: 'provider',
+        activationChannels: 'youtube,instagram',
+        activationEvent: 'published_video',
+      },
+    },
+  });
+
+  assert.equal(interaction.audienceContext.activation.method, 'provider');
+  assert.deepEqual(interaction.audienceContext.activation.channels, ['youtube', 'instagram']);
+  assert.equal(interaction.audienceContext.activation.event, 'published_video');
+});
+
+test('codeClip provider-event interaction rejects blank provider event identity', () => {
+  assert.throws(
+    () => createProviderEventFixture({
+      providerEvent: {
+        providerEventId: ' ',
+        externalMessageId: '',
+      },
+    }),
+    (error) =>
+      error.code === 'INVALID_PROVIDER_EVENT' &&
+      error.fieldName === 'providerEventId'
+  );
+});
+
+test('codeClip provider-event reward snapshot has no individual reward recipient', () => {
+  const interaction = createProviderEventFixture();
+
+  assert.deepEqual(interaction.rewardAssignments, {});
+  assert.deepEqual(interaction.rewardAssignmentSnapshot.assignments, []);
+  assert.equal(interaction.audienceContext.rewardContext.supported, false);
+  assert.equal(
+    interaction.audienceContext.rewardContext.reason,
+    'provider_event_has_no_individual_recipient'
+  );
+  assert.equal(
+    interaction.persistenceSkipReasons.rewardAssignments,
+    'provider_event_has_no_individual_recipient'
+  );
+  assert.equal(
+    interaction.persistenceSkipReasons.clipXtraRedemption,
+    'provider_event_has_no_individual_recipient'
+  );
+});
+
+test('codeClip provider-event persistence uses core pipeline with provider skip reasons', async () => {
+  const interaction = createProviderEventFixture();
+  const transaction = createRecordingTransactionRunner();
+  let savedInteraction = null;
+  let rewardAssignmentsAttempted = false;
+  let clipXtraAttempted = false;
+
+  await codeClipService.persistCodeClipCoreInteraction({
+    interaction,
+    runCodeClipCorePersistenceTransaction: transaction.run,
+    saveCodeClipInteraction: async (record, queryClient) => {
+      savedInteraction = { record, queryClient };
+      return { id: 'provider-event-row' };
+    },
+    saveCodeClipRewardAssignments: async () => {
+      rewardAssignmentsAttempted = true;
+      return [];
+    },
+    saveCodeClipXtraRedemption: async () => {
+      clipXtraAttempted = true;
+      return { id: 'clipxtra-row' };
+    },
+  });
+
+  assert.deepEqual(transaction.calls, ['BEGIN', 'COMMIT']);
+  assert.equal(savedInteraction.record, interaction);
+  assert.equal(savedInteraction.queryClient, transaction.queryClient);
+  assert.equal(rewardAssignmentsAttempted, false);
+  assert.equal(clipXtraAttempted, false);
+  assert.deepEqual(interaction.persistenceStatus.interaction, {
+    attempted: true,
+    ok: true,
+    error: null,
+    committed: true,
+  });
+  assert.deepEqual(interaction.persistenceStatus.rewardAssignments, {
+    attempted: false,
+    ok: null,
+    error: null,
+    skipped: true,
+    reason: 'provider_event_has_no_individual_recipient',
+  });
+  assert.deepEqual(interaction.persistenceStatus.clipXtraRedemption, {
+    attempted: false,
+    ok: null,
+    error: null,
+    skipped: true,
+    reason: 'provider_event_has_no_individual_recipient',
+  });
+});
+
+test('codeClip scan and keyword persistence keep default skip reasons and interaction types', async () => {
+  const scan = await runScanPersistenceCase({
+    rewardAssignments: {},
+    saveCodeClipRewardAssignments: async () => {
+      throw new Error('scan reward assignment should be skipped');
+    },
+    saveCodeClipXtraRedemption: async () => {
+      throw new Error('scan ClipXtra should be skipped');
+    },
+  });
+  const keyword = await runKeywordPersistenceCase({
+    rewardAssignments: {},
+    saveCodeClipRewardAssignments: async () => {
+      throw new Error('keyword reward assignment should be skipped');
+    },
+    saveCodeClipXtraRedemption: async () => {
+      throw new Error('keyword ClipXtra should be skipped');
+    },
+  });
+
+  assert.equal(scan.runtimeInteraction.interactionType, undefined);
+  assert.equal(keyword.runtimeInteraction.interactionType, undefined);
+  assert.notEqual(scan.runtimeInteraction.interactionType, 'provider_event');
+  assert.notEqual(keyword.runtimeInteraction.interactionType, 'scan');
+  assert.deepEqual(
+    scan.runtimeInteraction.stateTransitions.map((transition) => [
+      transition.from,
+      transition.to,
+      transition.transition,
+    ]),
+    [
+      [null, 'received', 'receive'],
+      ['received', 'routed', 'route_match'],
+      ['routed', 'reward_assigned', 'assign_reward'],
+      ['reward_assigned', 'processed', 'complete'],
+    ]
+  );
+  assert.deepEqual(
+    keyword.runtimeInteraction.stateTransitions.map((transition) => [
+      transition.from,
+      transition.to,
+      transition.transition,
+    ]),
+    [
+      [null, 'received', 'receive'],
+      ['received', 'routed', 'route_match'],
+      ['routed', 'reward_assigned', 'assign_reward'],
+      ['reward_assigned', 'processed', 'complete'],
+    ]
+  );
+  assert.equal(
+    scan.runtimeInteraction.persistenceStatus.rewardAssignments.reason,
+    'no_persistable_assignments'
+  );
+  assert.equal(
+    scan.runtimeInteraction.persistenceStatus.clipXtraRedemption.reason,
+    'clipxtra_not_assigned'
+  );
+  assert.equal(
+    keyword.runtimeInteraction.persistenceStatus.rewardAssignments.reason,
+    'no_persistable_assignments'
+  );
+  assert.equal(
+    keyword.runtimeInteraction.persistenceStatus.clipXtraRedemption.reason,
+    'clipxtra_not_assigned'
+  );
+});
+
+test('codeClip provider-event persistence fails closed without confirmed interaction write', async () => {
+  const interaction = createProviderEventFixture();
+  const transaction = createRecordingTransactionRunner();
+
+  await codeClipService.persistCodeClipCoreInteraction({
+    interaction,
+    runCodeClipCorePersistenceTransaction: transaction.run,
+    saveCodeClipInteraction: async () => null,
+    saveCodeClipRewardAssignments: async () => {
+      throw new Error('reward assignment should not run');
+    },
+    saveCodeClipXtraRedemption: async () => {
+      throw new Error('ClipXtra should not run');
+    },
+  });
+
+  assert.deepEqual(transaction.calls, ['BEGIN', 'ROLLBACK']);
+  assert.equal(interaction.persistenceStatus.interaction.attempted, true);
+  assert.equal(interaction.persistenceStatus.interaction.ok, false);
+  assert.equal(interaction.persistenceStatus.interaction.committed, false);
+  assert.equal(interaction.persistenceStatus.interaction.rolledBack, true);
+  assert.match(interaction.persistenceStatus.interaction.error, /interaction persistence/i);
+  assert.equal(interaction.persistenceStatus.rewardAssignments.attempted, false);
+  assert.equal(interaction.persistenceStatus.clipXtraRedemption.attempted, false);
+});
+
+test('codeClip service exports only the provider-event adapter surface needed by YouTube', () => {
+  assert.equal(typeof codeClipService.createProviderEventInteraction, 'function');
+  assert.equal(typeof codeClipService.persistCodeClipCoreInteraction, 'function');
+  assert.equal(codeClipService.createInteraction, undefined);
+  assert.equal(codeClipService.createPersistenceStatus, undefined);
 });
 
 test('codeClip ClipXtra redemption confirmation applies to scan and keyword', async () => {

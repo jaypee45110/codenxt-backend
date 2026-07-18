@@ -16,6 +16,11 @@ const INTERACTION_TRANSITIONS = {
   EXPIRE: "expire",
 };
 
+const {
+  normalizeActivationChannels,
+  readActivationValue,
+} = require("./provider-activation");
+
 const INTERACTION_STATE_MACHINE = {
   transitions: [
     {
@@ -40,6 +45,26 @@ const INTERACTION_STATE_MACHINE = {
     },
     {
       from: INTERACTION_STATES.REWARD_ASSIGNED,
+      to: INTERACTION_STATES.PROCESSED,
+      transition: INTERACTION_TRANSITIONS.COMPLETE,
+    },
+  ],
+};
+
+const PROVIDER_EVENT_INTERACTION_STATE_MACHINE = {
+  transitions: [
+    {
+      from: null,
+      to: INTERACTION_STATES.RECEIVED,
+      transition: INTERACTION_TRANSITIONS.RECEIVE,
+    },
+    {
+      from: INTERACTION_STATES.RECEIVED,
+      to: INTERACTION_STATES.ROUTED,
+      transition: INTERACTION_TRANSITIONS.ROUTE_MATCH,
+    },
+    {
+      from: INTERACTION_STATES.ROUTED,
       to: INTERACTION_STATES.PROCESSED,
       transition: INTERACTION_TRANSITIONS.COMPLETE,
     },
@@ -575,6 +600,20 @@ function buildValidInteractionStateTransition(input) {
   return buildInteractionStateTransition(input);
 }
 
+function buildValidProviderEventInteractionStateTransition(input) {
+  const isValidTransition = PROVIDER_EVENT_INTERACTION_STATE_MACHINE.transitions.some((allowed) => (
+    allowed.from === input.from &&
+    allowed.to === input.to &&
+    allowed.transition === input.transition
+  ));
+
+  if (!isValidTransition) {
+    throw new Error(`Invalid codeClip provider-event interaction state transition: ${input.transition}`);
+  }
+
+  return buildInteractionStateTransition(input);
+}
+
 function buildInteractionStateSnapshot(transitions, fallbackState = INTERACTION_STATES.PROCESSED) {
   const lastTransition = transitions[transitions.length - 1] || null;
 
@@ -609,15 +648,39 @@ function resolveSuccessfulScanInteractionState() {
   ]);
 }
 
+function resolveSuccessfulProviderEventInteractionState() {
+  return buildInteractionStateSnapshot([
+    buildValidProviderEventInteractionStateTransition({
+      from: null,
+      to: INTERACTION_STATES.RECEIVED,
+      transition: INTERACTION_TRANSITIONS.RECEIVE,
+    }),
+    buildValidProviderEventInteractionStateTransition({
+      from: INTERACTION_STATES.RECEIVED,
+      to: INTERACTION_STATES.ROUTED,
+      transition: INTERACTION_TRANSITIONS.ROUTE_MATCH,
+    }),
+    buildValidProviderEventInteractionStateTransition({
+      from: INTERACTION_STATES.ROUTED,
+      to: INTERACTION_STATES.PROCESSED,
+      transition: INTERACTION_TRANSITIONS.COMPLETE,
+      reason: "provider_event_has_no_individual_recipient",
+    }),
+  ]);
+}
+
 function createInteraction({
   interactionContext,
   routingOutcome,
   tier = null,
   rewardAssignments = null,
+  interactionType = null,
+  interactionState = null,
+  providerEvent = null,
 }) {
-  const interactionState = resolveSuccessfulScanInteractionState();
+  const resolvedInteractionState = interactionState || resolveSuccessfulScanInteractionState();
 
-  return {
+  const interaction = {
     interactionId: null,
     eventCode: interactionContext.eventCode,
     eventId: interactionContext.eventId,
@@ -627,13 +690,18 @@ function createInteraction({
     scanRank: interactionContext.scanRank,
     audienceEntry: interactionContext.audienceEntry,
     audienceIntent: interactionContext.audienceIntent,
-    state: interactionState.state,
-    stateTransitions: interactionState.transitions,
+    state: resolvedInteractionState.state,
+    stateTransitions: resolvedInteractionState.transitions,
     tier,
     timestamp: new Date().toISOString(),
     routingOutcome,
     rewardAssignments,
   };
+
+  if (interactionType) interaction.interactionType = interactionType;
+  if (providerEvent) interaction.providerEvent = providerEvent;
+
+  return interaction;
 }
 
 function createScanPayloadInteraction(interaction) {
@@ -726,6 +794,107 @@ function createRewardAssignmentSnapshot(interaction = {}) {
       rawAssignment: assignment,
     })),
   };
+}
+
+function createProviderEventInteraction({
+  event = {},
+  eventCode,
+  eventId,
+  providerEvent = {},
+  occurredAt = null,
+} = {}) {
+  const providerEventId = String(
+    providerEvent.providerEventId || providerEvent.externalMessageId || ""
+  ).trim();
+
+  if (!providerEventId) {
+    const error = new Error("codeClip provider event interaction requires providerEventId");
+    error.code = "INVALID_PROVIDER_EVENT";
+    error.fieldName = "providerEventId";
+    throw error;
+  }
+
+  const providerEventMetadata = {
+    provider: String(providerEvent.provider || "").trim().toLowerCase(),
+    channel: String(providerEvent.channel || "").trim().toLowerCase(),
+    activationEvent: String(providerEvent.activationEvent || "").trim().toLowerCase(),
+    providerEventId,
+    videoId: String(providerEvent.videoId || "").trim(),
+    externalMessageId: String(providerEvent.externalMessageId || "").trim(),
+    publishedAt: providerEvent.publishedAt || null,
+    updatedAt: providerEvent.updatedAt || null,
+    title: String(providerEvent.title || "").trim(),
+    canonicalUrl: String(providerEvent.canonicalUrl || "").trim(),
+  };
+  const activationChannels =
+    normalizeActivationChannels(readActivationValue(event, "activationChannels")) || [];
+  const interactionContext = buildInteractionContext({
+    event,
+    eventCode,
+    eventId,
+    scanId: providerEventId,
+    rawScans: null,
+    uniqueScans: null,
+    scanRank: null,
+    audienceEntry: null,
+    audienceIntent: {
+      type: "provider_event",
+      source: "provider_event",
+      transport: "websub",
+      provider: providerEventMetadata.provider,
+      channel: providerEventMetadata.channel,
+      activationEvent: providerEventMetadata.activationEvent,
+      providerEventId,
+    },
+  });
+  const interaction = createInteraction({
+    interactionContext,
+    routingOutcome: ROUTING_OUTCOMES.MATCH,
+    tier: null,
+    rewardAssignments: {},
+    interactionType: "provider_event",
+    interactionState: resolveSuccessfulProviderEventInteractionState(),
+    providerEvent: providerEventMetadata,
+  });
+
+  interaction.vertical = "codeclip";
+  interaction.timestamp = occurredAt || providerEvent.publishedAt || providerEvent.updatedAt || interaction.timestamp;
+  interaction.audienceContext = {
+    campaign: {
+      eventCode,
+      eventId,
+      vertical: event.vertical,
+      venue: event.venue,
+      city: event.city,
+      startAt: event.startAt,
+      unlockAt: event.unlockAt,
+      endAt: event.endAt,
+    },
+    activation: {
+      method: readActivationValue(event, "activationMethod"),
+      keyword: readActivationValue(event, "activationKeyword"),
+      channels: activationChannels,
+      event: readActivationValue(event, "activationEvent"),
+    },
+    entry: {
+      source: "provider_event",
+      transport: "websub",
+    },
+    providerEvent: providerEventMetadata,
+    rewardContext: {
+      supported: false,
+      reason: "provider_event_has_no_individual_recipient",
+    },
+  };
+  interaction.persistenceStatus = createPersistenceStatus();
+  interaction.rewardAssignmentSnapshot = createRewardAssignmentSnapshot(interaction);
+  interaction.rewardAssignmentSnapshot.persistenceStatus = interaction.persistenceStatus;
+  interaction.persistenceSkipReasons = {
+    rewardAssignments: "provider_event_has_no_individual_recipient",
+    clipXtraRedemption: "provider_event_has_no_individual_recipient",
+  };
+
+  return interaction;
 }
 
 function createPersistenceStatus() {
@@ -1096,7 +1265,11 @@ async function persistCodeClipCoreInteraction({
           outcomes.push({
             step: "rewardAssignments",
             type: "skipped",
-            reason: "no_persistable_assignments",
+            reason:
+              interaction.interactionType === "provider_event"
+                ? interaction.persistenceSkipReasons?.rewardAssignments ||
+                  "provider_event_has_no_individual_recipient"
+                : "no_persistable_assignments",
           });
         } else {
           const persistedRewardAssignments = saveCodeClipRewardAssignments
@@ -1126,7 +1299,11 @@ async function persistCodeClipCoreInteraction({
         outcomes.push({
           step: "clipXtraRedemption",
           type: "skipped",
-          reason: "clipxtra_not_assigned",
+          reason:
+            interaction.interactionType === "provider_event"
+              ? interaction.persistenceSkipReasons?.clipXtraRedemption ||
+                "provider_event_has_no_individual_recipient"
+              : "clipxtra_not_assigned",
         });
       }
     });
@@ -1360,11 +1537,13 @@ module.exports = {
   normalizeScanAudienceEntry,
   normalizeKeywordAudienceEntry,
   normalizeAudienceEntry,
+  createProviderEventInteraction,
   createRewardAssignmentSnapshot,
   buildPersistenceDecision,
   applyPersistenceGuaranteePolicy,
   buildPersistenceAction,
   recordPersistenceAction,
+  persistCodeClipCoreInteraction,
   handleCodeClipScan,
   handleCodeClipKeywordEntry,
 };

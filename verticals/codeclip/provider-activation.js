@@ -174,5 +174,7 @@ function resolveCodeClipProviderActivationEvent({
 module.exports = {
   eventMatchesBoundProviderActivation,
   eventMatchesBoundProviderEventActivation,
+  normalizeActivationChannels,
+  readActivationValue,
   resolveCodeClipProviderActivationEvent,
 };

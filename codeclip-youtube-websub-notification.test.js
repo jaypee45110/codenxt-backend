@@ -103,9 +103,12 @@ function eventRow(rawEvent = {}) {
 
 function notificationDeps(overrides = {}) {
   const state = {
+    calls: [],
     createdDeliveries: [],
     deliveryUpdates: [],
     firstActivations: [],
+    providerEventInteractions: [],
+    persistenceCalls: [],
     existingDelivery: false,
     subscription: subscriptionRow(),
     binding: bindingRow(),
@@ -116,10 +119,20 @@ function notificationDeps(overrides = {}) {
     state,
     queryClient: { query: async () => ({ rows: [] }) },
     env: { CODECLIP_YOUTUBE_WEBSUB_SECRET: ROOT_SECRET },
-    getSubscriptionByCallbackId: async () => state.subscription,
-    findActiveBinding: async () => state.binding,
-    getEventByCode: async () => state.event,
+    getSubscriptionByCallbackId: async () => {
+      state.calls.push("subscription");
+      return state.subscription;
+    },
+    findActiveBinding: async () => {
+      state.calls.push("binding");
+      return state.binding;
+    },
+    getEventByCode: async () => {
+      state.calls.push("event");
+      return state.event;
+    },
     createCodeClipProviderDelivery: async (delivery) => {
+      state.calls.push("delivery_claim");
       if (state.existingDelivery) {
         return { status: "existing", row: { ...delivery, id: "delivery-existing" } };
       }
@@ -127,13 +140,69 @@ function notificationDeps(overrides = {}) {
       return { status: "created", row: { ...delivery, id: "delivery-new" } };
     },
     updateCodeClipProviderDeliveryState: async (identity, updates) => {
+      state.calls.push(
+        updates.completionState === "completed" && updates.terminalState === true
+          ? "delivery_terminal"
+          : "delivery_update"
+      );
       state.deliveryUpdates.push({ identity, updates });
       return { status: "updated", row: { ...identity, ...updates } };
     },
     recordFirstActivatedVideo: async (input) => {
+      state.calls.push("first_video");
       state.firstActivations.push(input);
       return state.subscription;
     },
+    createProviderEventInteraction: (input) => {
+      state.calls.push("create_interaction");
+      state.providerEventInteractions.push(input);
+      return {
+        interactionType: "provider_event",
+        eventCode: input.eventCode,
+        eventId: input.eventId,
+        scanId: input.providerEvent.providerEventId,
+        providerEvent: input.providerEvent,
+        persistenceStatus: {
+          interaction: { attempted: false, ok: null, error: null },
+          rewardAssignments: { attempted: false, ok: null, error: null },
+          clipXtraRedemption: { attempted: false, ok: null, error: null },
+        },
+        rewardAssignmentSnapshot: { assignments: [] },
+      };
+    },
+    persistCodeClipCoreInteraction: async (input) => {
+      state.calls.push("core_persistence");
+      state.persistenceCalls.push(input);
+      input.interaction.persistenceStatus.interaction = {
+        attempted: true,
+        ok: true,
+        error: null,
+        committed: true,
+      };
+      input.interaction.persistenceStatus.rewardAssignments = {
+        attempted: false,
+        ok: null,
+        error: null,
+        skipped: true,
+        reason: "provider_event_has_no_individual_recipient",
+      };
+      input.interaction.persistenceStatus.clipXtraRedemption = {
+        attempted: false,
+        ok: null,
+        error: null,
+        skipped: true,
+        reason: "provider_event_has_no_individual_recipient",
+      };
+    },
+    saveCodeClipInteraction: async () => ({ id: "interaction-row" }),
+    saveCodeClipRewardAssignments: async () => {
+      throw new Error("reward assignments should be skipped by core");
+    },
+    saveCodeClipXtraRedemption: async () => {
+      throw new Error("ClipXtra should be skipped by core");
+    },
+    runCodeClipCorePersistenceTransaction: async (work) =>
+      work({ queryClient: { transaction: "youtube-provider-event" } }),
     ...overrides.deps,
   };
 }
@@ -301,6 +370,225 @@ test("YouTube notification records one delivery per entry and deduplicates exist
   assert.equal(duplicate.result.payload.duplicate, 2);
   assert.equal(duplicate.state.createdDeliveries.length, 0);
   assert.equal(duplicate.state.firstActivations.length, 0);
+});
+
+test("YouTube notification persists provider-event runtime after activation resolution", async () => {
+  const xml = youtubeXml([entryXml("videoABC123", {
+    title: "Runtime Video",
+    published: "2026-07-18T09:15:00+00:00",
+    updated: "2026-07-18T09:16:00+00:00",
+  })]);
+  const { result, state } = await postNotification(xml);
+  const interactionInput = state.providerEventInteractions[0];
+  const persistenceCall = state.persistenceCalls[0];
+  const terminalUpdate = state.deliveryUpdates[state.deliveryUpdates.length - 1].updates;
+
+  assert.equal(result.httpStatus, 202);
+  assert.equal(result.payload.status, "processed");
+  assert.equal(state.providerEventInteractions.length, 1);
+  assert.equal(interactionInput.event, state.event.raw_event);
+  assert.equal(interactionInput.eventCode, state.binding.eventCode);
+  assert.equal(interactionInput.eventId, "event-42");
+  assert.deepEqual(interactionInput.providerEvent, {
+    provider: "youtube",
+    channel: "youtube",
+    activationEvent: "published_video",
+    providerEventId: `youtube:${CHANNEL_ID}:videoABC123:published`,
+    videoId: "videoABC123",
+    externalMessageId: `youtube:${CHANNEL_ID}:videoABC123:published`,
+    publishedAt: "2026-07-18T09:15:00.000Z",
+    updatedAt: "2026-07-18T09:16:00.000Z",
+    title: "Runtime Video",
+    canonicalUrl: "https://www.youtube.com/watch?v=videoABC123",
+  });
+  assert.equal(interactionInput.occurredAt, "2026-07-18T09:15:00.000Z");
+  assert.equal(state.persistenceCalls.length, 1);
+  assert.equal(persistenceCall.interaction.providerEvent.provider, "youtube");
+  assert.equal(persistenceCall.interaction.providerEvent.channel, "youtube");
+  assert.equal(terminalUpdate.processingState, "completed");
+  assert.equal(terminalUpdate.corePersistenceState, "committed");
+  assert.equal(terminalUpdate.completionState, "completed");
+  assert.equal(terminalUpdate.publicResponseJson.status, "processed");
+  assert.equal(terminalUpdate.terminalState, true);
+  assert.deepEqual(state.calls, [
+    "subscription",
+    "binding",
+    "event",
+    "delivery_claim",
+    "first_video",
+    "create_interaction",
+    "core_persistence",
+    "delivery_terminal",
+  ]);
+});
+
+test("YouTube notification passes core persistence dependencies to the adapter pipeline", async () => {
+  const xml = youtubeXml([entryXml("videoABC123")]);
+  const saveInteraction = async () => ({ id: "custom-interaction" });
+  const saveRewards = async () => [];
+  const saveClipXtra = async () => ({ id: "custom-clipxtra" });
+  const runTransaction = async (work) =>
+    work({ queryClient: { transaction: "custom-transaction" } });
+  let persistenceInput = null;
+
+  const { result } = await postNotification(xml, {
+    deps: {
+      saveCodeClipInteraction: saveInteraction,
+      saveCodeClipRewardAssignments: saveRewards,
+      saveCodeClipXtraRedemption: saveClipXtra,
+      runCodeClipCorePersistenceTransaction: runTransaction,
+      persistCodeClipCoreInteraction: async (input) => {
+        persistenceInput = input;
+        input.interaction.persistenceStatus.interaction = {
+          attempted: true,
+          ok: true,
+          error: null,
+          committed: true,
+        };
+      },
+    },
+  });
+
+  assert.equal(result.httpStatus, 202);
+  assert.equal(persistenceInput.saveCodeClipInteraction, saveInteraction);
+  assert.equal(persistenceInput.saveCodeClipRewardAssignments, saveRewards);
+  assert.equal(persistenceInput.saveCodeClipXtraRedemption, saveClipXtra);
+  assert.equal(persistenceInput.runCodeClipCorePersistenceTransaction, runTransaction);
+});
+
+test("YouTube notification marks delivery retryable when provider-event persistence fails", async () => {
+  const xml = youtubeXml([entryXml("videoABC123")]);
+  const { result, state } = await postNotification(xml, {
+    deps: {
+      persistCodeClipCoreInteraction: async ({ interaction }) => {
+        interaction.persistenceStatus.interaction = {
+          attempted: true,
+          ok: false,
+          error: "provider event persistence failed",
+          committed: false,
+        };
+      },
+    },
+  });
+  const failedUpdate = state.deliveryUpdates[state.deliveryUpdates.length - 1].updates;
+
+  assert.equal(result.httpStatus, 503);
+  assert.equal(result.payload.code, "persistence_failed");
+  assert.equal(failedUpdate.processingState, "failed");
+  assert.equal(failedUpdate.corePersistenceState, "failed");
+  assert.equal(failedUpdate.completionState, "not_completed");
+  assert.equal(failedUpdate.responseStatus, 503);
+  assert.equal(failedUpdate.publicResponseJson.code, "persistence_failed");
+  assert.equal(failedUpdate.errorClass, "persistence_failed");
+  assert.equal(failedUpdate.retryEligible, true);
+  assert.equal(failedUpdate.terminalState, false);
+  assert.equal(state.calls.includes("delivery_terminal"), false);
+});
+
+test("YouTube notification honors recipient-required policy only from the resolved episode", async () => {
+  const xml = youtubeXml([entryXml("videoABC123")]);
+  const recipientRequired = await postNotification(xml, {
+    state: {
+      event: eventRow({ providerEventRewardMode: "individual_reward" }),
+    },
+  });
+
+  assert.equal(recipientRequired.result.httpStatus, 202);
+  assert.equal(
+    recipientRequired.state.deliveryUpdates[0].updates.publicResponseJson.status,
+    "provider_event_recipient_required"
+  );
+  assert.equal(recipientRequired.state.providerEventInteractions.length, 0);
+  assert.equal(recipientRequired.state.persistenceCalls.length, 0);
+
+  const externalOnly = await postNotification(
+    youtubeXml([entryXml("videoABC123", { title: "individual_reward" })]),
+    {
+      deps: {
+        createProviderEventInteraction: (input) => {
+          assert.equal(input.providerEvent.providerEventRewardMode, undefined);
+          assert.equal(input.providerEvent.title, "individual_reward");
+          return notificationDeps().createProviderEventInteraction(input);
+        },
+      },
+    }
+  );
+  assert.equal(externalOnly.result.httpStatus, 202);
+  assert.equal(externalOnly.result.payload.status, "processed");
+});
+
+test("YouTube notification provider-event allowlist excludes external identity and secret fields", async () => {
+  const xml = youtubeXml([entryXml("videoABC123", { title: "secret signature phone email meta" })]);
+  let providerEvent = null;
+  const { result } = await postNotification(xml, {
+    deps: {
+      createProviderEventInteraction: (input) => {
+        providerEvent = input.providerEvent;
+        return notificationDeps().createProviderEventInteraction(input);
+      },
+    },
+  });
+
+  assert.equal(result.httpStatus, 202);
+  assert.equal(providerEvent.secret, undefined);
+  assert.equal(providerEvent.signature, undefined);
+  assert.equal(providerEvent.hmac, undefined);
+  assert.equal(providerEvent.rawXml, undefined);
+  assert.equal(providerEvent.userId, undefined);
+  assert.equal(providerEvent.phone, undefined);
+  assert.equal(providerEvent.email, undefined);
+  assert.equal(providerEvent.metaUserId, undefined);
+});
+
+test("YouTube notification keeps existing non-runtime WebSub flows unchanged", async () => {
+  const xml = youtubeXml([entryXml("videoABC123")]);
+
+  const duplicate = await postNotification(xml, {
+    state: { existingDelivery: true },
+  });
+  assert.equal(duplicate.result.httpStatus, 202);
+  assert.equal(duplicate.result.payload.duplicate, 1);
+  assert.equal(duplicate.state.providerEventInteractions.length, 0);
+  assert.equal(duplicate.state.persistenceCalls.length, 0);
+
+  const unbound = await postNotification(xml, {
+    state: { binding: null },
+  });
+  assert.equal(unbound.result.httpStatus, 404);
+  assert.equal(unbound.result.payload.code, "unknown_subscription");
+
+  const inactiveEpisode = await postNotification(xml, {
+    state: { event: eventRow({ status: "disabled" }) },
+  });
+  assert.equal(inactiveEpisode.result.httpStatus, 202);
+  assert.equal(
+    inactiveEpisode.state.deliveryUpdates[0].updates.publicResponseJson.status,
+    "non_activating"
+  );
+  assert.equal(inactiveEpisode.state.providerEventInteractions.length, 0);
+
+  const wrongChannel = await postNotification(xml, {
+    state: { event: eventRow({ activationChannels: ["instagram"] }) },
+  });
+  assert.equal(wrongChannel.result.httpStatus, 202);
+  assert.equal(wrongChannel.state.deliveryUpdates[0].updates.publicResponseJson.status, "non_activating");
+
+  const wrongEvent = await postNotification(xml, {
+    state: { event: eventRow({ activationEvent: "something_else" }) },
+  });
+  assert.equal(wrongEvent.result.httpStatus, 202);
+  assert.equal(wrongEvent.state.deliveryUpdates[0].updates.publicResponseJson.status, "non_activating");
+
+  const historical = await postNotification(
+    youtubeXml([entryXml("oldVideo123", { published: "2026-07-18T07:59:00+00:00" })])
+  );
+  assert.equal(historical.result.httpStatus, 202);
+  assert.equal(
+    historical.state.deliveryUpdates[0].updates.publicResponseJson.status,
+    "non_activating_historical"
+  );
+  assert.equal(historical.state.providerEventInteractions.length, 0);
+  assert.equal(historical.state.firstActivations.length, 0);
 });
 
 test("YouTube notification ledger records historical and unconfigured entries as non-activating", async () => {

@@ -23,6 +23,7 @@ const {
 const {
   eventMatchesBoundProviderEventActivation,
 } = require("./provider-activation");
+const codeClipService = require("./service");
 const database = require("../../db");
 
 const YOUTUBE_WEBSUB_MAX_BODY_BYTES = 256 * 1024;
@@ -149,6 +150,21 @@ function isHistoricalEntry(subscription, entry) {
   return published <= boundary;
 }
 
+function providerEventRequiresRecipient(event = {}) {
+  const rewardMode = String(
+    event?.providerEventRewardMode ||
+    event?.metadata?.providerEventRewardMode ||
+    event?.config?.providerEventRewardMode ||
+    ""
+  ).trim().toLowerCase();
+
+  return [
+    "audience_reward",
+    "individual_reward",
+    "participant_reward",
+  ].includes(rewardMode);
+}
+
 async function markDeliveryState({
   identity,
   updates,
@@ -174,6 +190,12 @@ async function processEntry({
     getCodeClipProviderDeliveryByIdentity = database.getCodeClipProviderDeliveryByIdentity,
     updateCodeClipProviderDeliveryState = database.updateCodeClipProviderDeliveryState,
     recordFirstActivatedVideo = recordCodeClipYouTubeWebSubFirstActivatedVideo,
+    createProviderEventInteraction = codeClipService.createProviderEventInteraction,
+    persistCodeClipCoreInteraction = codeClipService.persistCodeClipCoreInteraction,
+    saveCodeClipInteraction = database.saveCodeClipInteraction,
+    saveCodeClipRewardAssignments = database.saveCodeClipRewardAssignments,
+    saveCodeClipXtraRedemption = database.saveCodeClipXtraRedemption,
+    runCodeClipCorePersistenceTransaction = database.withCodeClipCorePersistenceTransaction,
   } = dependencies;
 
   if (entry.channelId !== subscription.providerAccountId) {
@@ -247,6 +269,10 @@ async function processEntry({
     return finish("provider_event_not_configured", "non_activating");
   }
 
+  if (providerEventRequiresRecipient(event)) {
+    return finish("provider_event_recipient_required", "provider_event_recipient_required");
+  }
+
   const activation = await recordFirstActivatedVideo(
     {
       callbackId: subscription.callbackId,
@@ -259,7 +285,67 @@ async function processEntry({
     return { status: "failed", code: "persistence_failed" };
   }
 
-  return finish("runtime_not_available", "runtime_not_available", "not_started");
+  const interaction = createProviderEventInteraction({
+    event,
+    eventCode: binding.eventCode,
+    eventId: event?.id || null,
+    providerEvent: {
+      provider: "youtube",
+      channel: "youtube",
+      activationEvent: entry.eventType,
+      providerEventId: entry.activationIdentity,
+      videoId: entry.videoId,
+      externalMessageId: entry.externalMessageId,
+      publishedAt: entry.publishedAt,
+      updatedAt: entry.updatedAt,
+      title: entry.title,
+      canonicalUrl: entry.alternateUrl,
+    },
+    occurredAt: entry.publishedAt,
+  });
+  await persistCodeClipCoreInteraction({
+    interaction,
+    saveCodeClipInteraction,
+    saveCodeClipRewardAssignments,
+    saveCodeClipXtraRedemption,
+    runCodeClipCorePersistenceTransaction,
+    logPrefix: "codeClip YouTube provider-event",
+  });
+  interaction.persistenceDecision = codeClipService.buildPersistenceDecision(
+    interaction.persistenceStatus
+  );
+  interaction.persistenceGuaranteePolicy = codeClipService.applyPersistenceGuaranteePolicy(
+    interaction.persistenceDecision
+  );
+  interaction.persistenceAction = codeClipService.buildPersistenceAction(
+    interaction.persistenceGuaranteePolicy
+  );
+
+  if (!interaction.persistenceDecision.ok) {
+    await markDeliveryState({
+      identity,
+      queryClient,
+      updateCodeClipProviderDeliveryState,
+      updates: {
+        processingState: "failed",
+        corePersistenceState: "failed",
+        completionState: "not_completed",
+        responseStatus: 503,
+        publicResponseJson: {
+          ok: false,
+          error: "YouTube WebSub notification unavailable",
+          code: "persistence_failed",
+        },
+        errorClass: "persistence_failed",
+        retryEligible: true,
+        terminalState: false,
+        lastAttemptAt: now.toISOString(),
+      },
+    });
+    return { status: "failed", code: "persistence_failed" };
+  }
+
+  return finish("runtime_completed", "processed", "committed");
 }
 
 async function processCodeClipYouTubeWebSubNotification(input = {}, options = {}) {
