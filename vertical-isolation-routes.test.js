@@ -499,6 +499,65 @@ test('POST /event creates a codeClip YouTube provider-event Episode', async () =
   });
 });
 
+test('GET /event/:eventId returns public-safe 404 for unknown Episodes', async () => {
+  await withTestServer(async (baseUrl) => {
+    for (const path of [
+      `/event/UNKNOWN-EPISODE-${Date.now()}`,
+      `/event/UNKNOWN-CODECLIP-EPISODE-${Date.now()}?vertical=codeclip`,
+    ]) {
+      const response = await fetch(`${baseUrl}${path}`);
+      const body = await response.json();
+
+      assert.equal(response.status, 404);
+      assert.deepEqual(body, {
+        error: 'Event not found',
+        code: 'EVENT_NOT_FOUND',
+      });
+      assert.equal(Object.hasOwn(body, 'stack'), false);
+    }
+  });
+});
+
+test('GET /event/:eventId keeps cross-vertical Episode read-back isolated', async () => {
+  await withTestServer(async (baseUrl) => {
+    const code = `CP-CROSS-VERTICAL-READ-${Date.now()}`;
+    const createResponse = await fetch(`${baseUrl}/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vertical: 'codepod',
+        code,
+        name: 'codePod read-back isolation route test',
+        startAt: '2099-01-01T10:00:00.000Z',
+        unlockAt: '2099-01-01T10:00:00.000Z',
+        endAt: '2099-01-01T11:00:00.000Z',
+        status: 'active',
+      }),
+    });
+    const created = await createResponse.json();
+
+    assert.equal(createResponse.ok, true);
+    assert.equal(created.event.vertical, 'codepod');
+
+    const wrongVerticalResponse = await fetch(`${baseUrl}/event/${code}?vertical=codeclip`);
+    const wrongVertical = await wrongVerticalResponse.json();
+
+    assert.equal(wrongVerticalResponse.status, 404);
+    assert.deepEqual(wrongVertical, {
+      error: 'Event not found',
+      code: 'EVENT_NOT_FOUND',
+    });
+    assert.equal(Object.hasOwn(wrongVertical, 'stack'), false);
+
+    const readResponse = await fetch(`${baseUrl}/event/${code}`);
+    const readBack = await readResponse.json();
+
+    assert.equal(readResponse.ok, true);
+    assert.equal(readBack.code, code);
+    assert.equal(readBack.vertical, 'codepod');
+  });
+});
+
 test('POST /event rejects invalid codeClip provider-event activation configs safely', async () => {
   await withTestServer(async (baseUrl) => {
     const invalidCases = [

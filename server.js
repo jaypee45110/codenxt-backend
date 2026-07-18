@@ -1358,6 +1358,13 @@ if (!meta || !meta.id) {
   }
 }
 
+if (!meta || !meta.id) {
+  return res.status(404).json({
+    error: "Event not found",
+    code: "EVENT_NOT_FOUND",
+  });
+}
+
 let rawScans = 0;
 let uniqueScans = 0;
 let innerCircleJoinCount = 0;
