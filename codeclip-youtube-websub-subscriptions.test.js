@@ -10,12 +10,14 @@ const {
   disableCodeClipYouTubeWebSubSubscription,
   getCodeClipYouTubeWebSubSubscriptionByCallbackId,
   getCodeClipYouTubeWebSubSubscriptionByProviderAccountId,
+  getOpenCodeClipYouTubeWebSubSubscriptionByProviderAccountId,
   markCodeClipYouTubeWebSubSubscriptionExpired,
   markCodeClipYouTubeWebSubSubscriptionRenewalPending,
   markCodeClipYouTubeWebSubSubscriptionUnsubscribePending,
   markCodeClipYouTubeWebSubSubscriptionUnsubscribed,
   markCodeClipYouTubeWebSubSubscriptionVerified,
   normalizeSubscriptionInput,
+  recordCodeClipYouTubeWebSubSubscriptionAudit,
   recordCodeClipYouTubeWebSubFirstActivatedVideo,
   toInternalCodeClipYouTubeWebSubSubscription,
   updateCodeClipYouTubeWebSubSubscriptionLease,
@@ -90,6 +92,26 @@ function createSubscriptionClient() {
       calls.push({ sql, params });
 
       if (/INSERT INTO codeclip_youtube_websub_subscriptions/.test(sql)) {
+        const openStatuses = new Set([
+          SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE,
+          SUBSCRIPTION_STATUSES.ACTIVE,
+          SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+          SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+        ]);
+        const existingOpen = rows.find(
+          (item) =>
+            item.vertical === params[0] &&
+            item.provider === params[2] &&
+            item.provider_account_id === params[4] &&
+            openStatuses.has(item.status) &&
+            openStatuses.has(params[6])
+        );
+        if (existingOpen) {
+          const error = new Error("duplicate open subscription");
+          error.code = "23505";
+          error.constraint = "codeclip_youtube_websub_subscriptions_open_account_uidx";
+          throw error;
+        }
         const inserted = row({
           id: String(nextId++),
           vertical: params[0],
@@ -115,6 +137,25 @@ function createSubscriptionClient() {
         return { rows: [inserted] };
       }
 
+      if (/INSERT INTO codeclip_youtube_websub_subscription_audit/.test(sql)) {
+        const inserted = {
+          id: String(nextId++),
+          vertical: "codeclip",
+          provider: "youtube",
+          callback_id: params[0],
+          provider_account_id: params[1],
+          event_code: params[2],
+          action: params[3],
+          mode: params[4],
+          result_code: params[5],
+          hub_http_status: params[6],
+          retryable: params[7],
+          metadata: JSON.parse(params[8]),
+          created_at: "2026-07-18T00:00:02.000Z",
+        };
+        return { rows: [inserted] };
+      }
+
       if (/FROM codeclip_youtube_websub_subscriptions/.test(sql) && /callback_id = \$1/.test(sql)) {
         return { rows: find(params[0]) ? [find(params[0])] : [] };
       }
@@ -127,7 +168,16 @@ function createSubscriptionClient() {
                 item.provider_account_id === params[0] &&
                 item.vertical === "codeclip" &&
                 item.provider === "youtube" &&
-                item.channel === "youtube"
+                item.channel === "youtube" &&
+                (
+                  !/status IN/.test(sql) ||
+                  [
+                    SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE,
+                    SUBSCRIPTION_STATUSES.ACTIVE,
+                    SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+                    SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+                  ].includes(item.status)
+                )
             )
             .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)))
             .slice(0, 1),
@@ -202,6 +252,25 @@ test("YouTube WebSub subscription schema ensure is idempotent and preserves data
   assert.match(sql, /codeclip_youtube_websub_subscriptions_account_idx/);
   assert.match(sql, /codeclip_youtube_websub_subscriptions_topic_idx/);
   assert.match(sql, /codeclip_youtube_websub_subscriptions_status_lease_idx/);
+  assert.match(sql, /codeclip_youtube_websub_subscriptions_open_account_uidx/);
+  const openIndexSql = client.calls
+    .map((call) => call.sql)
+    .find((statement) => /codeclip_youtube_websub_subscriptions_open_account_uidx/.test(statement));
+  assert.match(openIndexSql, /'pending_subscribe'/);
+  assert.match(openIndexSql, /'active'/);
+  assert.match(openIndexSql, /'pending_renewal'/);
+  assert.match(openIndexSql, /'pending_unsubscribe'/);
+  assert.doesNotMatch(openIndexSql, /'expired'/);
+  assert.doesNotMatch(openIndexSql, /'unsubscribed'/);
+  assert.doesNotMatch(openIndexSql, /'disabled'/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS codeclip_youtube_websub_subscription_audit/);
+  assert.match(sql, /subscription_requested/);
+  assert.match(sql, /renewal_requested/);
+  assert.match(sql, /unsubscribe_requested/);
+  assert.match(sql, /hub_request_accepted/);
+  assert.match(sql, /hub_request_failed/);
+  assert.match(sql, /codeclip_youtube_websub_subscription_audit_callback_idx/);
+  assert.match(sql, /codeclip_youtube_websub_subscription_audit_account_idx/);
   assert.deepEqual(client.rows, [existingRow]);
 });
 
@@ -286,6 +355,90 @@ test("YouTube WebSub subscription create and reads are scoped and parameterized"
       assert.match(call.sql, /channel = 'youtube'/);
     }
   }
+});
+
+test("YouTube WebSub open subscription uniqueness allows expired history but rejects simultaneous open rows", async () => {
+  const client = createSubscriptionClient();
+  const expired = await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({ callbackId: "yt_expired", status: SUBSCRIPTION_STATUSES.EXPIRED, pendingMode: null }),
+    { queryClient: client }
+  );
+  const nextPending = await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({ callbackId: "yt_pending_after_expired" }),
+    { queryClient: client }
+  );
+
+  assert.equal(expired.status, SUBSCRIPTION_STATUSES.EXPIRED);
+  assert.equal(nextPending.status, SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE);
+
+  await assert.rejects(
+    () => createPendingCodeClipYouTubeWebSubSubscription(
+      validInput({ callbackId: "yt_second_pending" }),
+      { queryClient: client }
+    ),
+    (error) =>
+      error.code === "23505" &&
+      error.constraint === "codeclip_youtube_websub_subscriptions_open_account_uidx"
+  );
+
+  const open = await getOpenCodeClipYouTubeWebSubSubscriptionByProviderAccountId(CHANNEL_ID, {
+    queryClient: client,
+  });
+  assert.equal(open.callbackId, "yt_pending_after_expired");
+});
+
+test("YouTube WebSub subscription audit is parameterized and stores only allowlisted metadata", async () => {
+  const client = createSubscriptionClient();
+  const derivedSecret = "derived-secret-must-not-store";
+  const rootSecret = "root-secret-must-not-store";
+  const audit = await recordCodeClipYouTubeWebSubSubscriptionAudit(
+    {
+      callbackId: "yt_cb_123",
+      providerAccountId: CHANNEL_ID,
+      eventCode: "CC-YOUTUBE-AUDIT",
+      action: "hub_request_failed",
+      mode: "subscribe",
+      resultCode: "hub_request_timeout",
+      hubHttpStatus: 503,
+      retryable: true,
+      metadata: {
+        requestedLeaseSeconds: 864000,
+        operationSource: "operator_key",
+        previousStatus: SUBSCRIPTION_STATUSES.ACTIVE,
+        resultingStatus: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+        reason: `network error ${rootSecret}`,
+        detail: `exception ${derivedSecret}`,
+        secret: rootSecret,
+        token: "token-value",
+        authorization: "Bearer value",
+        header: "x-secret",
+        body: "<xml/>",
+        signature: "sha256=value",
+      },
+    },
+    { queryClient: client }
+  );
+
+  assert.equal(audit.vertical, "codeclip");
+  assert.equal(audit.provider, "youtube");
+  assert.equal(audit.action, "hub_request_failed");
+  assert.equal(audit.resultCode, "hub_request_timeout");
+  assert.equal(audit.hubHttpStatus, 503);
+  assert.equal(audit.retryable, true);
+  assert.deepEqual(audit.metadata, {
+    requestedLeaseSeconds: 864000,
+    operationSource: "operator_key",
+    previousStatus: SUBSCRIPTION_STATUSES.ACTIVE,
+    resultingStatus: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+  });
+  const serialized = JSON.stringify(audit);
+  assert.equal(serialized.includes(rootSecret), false);
+  assert.equal(serialized.includes(derivedSecret), false);
+  assert.equal(serialized.includes("network error"), false);
+  assert.equal(serialized.includes("exception"), false);
+  assert.equal(serialized.includes("Bearer"), false);
+  assert.equal(serialized.includes("<xml"), false);
+  assert.equal(serialized.includes("sha256="), false);
 });
 
 test("YouTube WebSub verified transition sets lease and preserves activation boundary on renewal", async () => {

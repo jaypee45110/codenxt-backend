@@ -7282,6 +7282,195 @@ app.get("/internal/codeclip/provider-deliveries/summary", requireCodeClipAdmin, 
   }
 });
 
+function mapCodeClipYouTubeWebSubOperationStatus(code) {
+  if (code === "subscription_already_exists") return 200;
+  if (code === "validation_error") return 400;
+  if (code === "episode_not_found" || code === "binding_not_found" || code === "subscription_not_found") {
+    return 404;
+  }
+  if (
+    code === "episode_not_eligible" ||
+    code === "binding_episode_mismatch" ||
+    code === "subscription_state_conflict"
+  ) {
+    return 409;
+  }
+  if (code === "authentication_unavailable" || code === "public_base_url_unavailable") {
+    return 503;
+  }
+  if (code === "hub_request_timeout" || code === "hub_request_failed") {
+    return 502;
+  }
+  return 500;
+}
+
+function mapCodeClipYouTubeWebSubOperationSuccessStatus(result) {
+  if (result?.code === "subscription_already_exists") return 200;
+  return 202;
+}
+
+function sendCodeClipYouTubeWebSubOperationError(res, error) {
+  const code = error?.code || "internal_error";
+  return res
+    .status(mapCodeClipYouTubeWebSubOperationStatus(code))
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      error: "YouTube WebSub subscription operation failed",
+      code,
+    });
+}
+
+app.post("/internal/codeclip/youtube-websub/subscriptions", requireCodeClipAdmin, async (req, res) => {
+  const {
+    CodeClipYouTubeWebSubOperationError,
+    createCodeClipYouTubeWebSubSubscriptionOperation,
+  } = require("./verticals/codeclip/youtube-websub-operations");
+
+  try {
+    const result = await createCodeClipYouTubeWebSubSubscriptionOperation(req.body || {}, {
+      queryClient: database.pool,
+    });
+    return res
+      .status(result.ok ? mapCodeClipYouTubeWebSubOperationSuccessStatus(result) : mapCodeClipYouTubeWebSubOperationStatus(result.code))
+      .set("Cache-Control", "no-store")
+      .json(result);
+  } catch (error) {
+    if (error instanceof CodeClipYouTubeWebSubOperationError) {
+      return sendCodeClipYouTubeWebSubOperationError(res, error);
+    }
+    console.warn("codeClip YouTube WebSub subscription create failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/youtube-websub/subscriptions",
+      operationalEvent: "youtube_websub_subscription_create_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeWebSubOperationError(res, { code: "internal_error" });
+  }
+});
+
+app.get("/internal/codeclip/youtube-websub/subscriptions", requireCodeClipAdmin, async (req, res) => {
+  const {
+    CodeClipYouTubeWebSubOperationError,
+    listCodeClipYouTubeWebSubSubscriptionStatuses,
+  } = require("./verticals/codeclip/youtube-websub-operations");
+
+  try {
+    const items = await listCodeClipYouTubeWebSubSubscriptionStatuses(
+      {
+        providerAccountId: req.query?.providerAccountId,
+        status: req.query?.status,
+      },
+      { queryClient: database.pool }
+    );
+    return res
+      .set("Cache-Control", "no-store")
+      .json({ ok: true, items });
+  } catch (error) {
+    if (error instanceof CodeClipYouTubeWebSubOperationError) {
+      return sendCodeClipYouTubeWebSubOperationError(res, error);
+    }
+    console.warn("codeClip YouTube WebSub subscription list failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/youtube-websub/subscriptions",
+      operationalEvent: "youtube_websub_subscription_list_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeWebSubOperationError(res, { code: "internal_error" });
+  }
+});
+
+app.get("/internal/codeclip/youtube-websub/subscriptions/:callbackId", requireCodeClipAdmin, async (req, res) => {
+  const {
+    CodeClipYouTubeWebSubOperationError,
+    getCodeClipYouTubeWebSubSubscriptionStatus,
+  } = require("./verticals/codeclip/youtube-websub-operations");
+
+  try {
+    const subscription = await getCodeClipYouTubeWebSubSubscriptionStatus(
+      req.params.callbackId,
+      { queryClient: database.pool }
+    );
+    if (!subscription) {
+      return sendCodeClipYouTubeWebSubOperationError(res, { code: "subscription_not_found" });
+    }
+    return res
+      .set("Cache-Control", "no-store")
+      .json({ ok: true, subscription });
+  } catch (error) {
+    if (error instanceof CodeClipYouTubeWebSubOperationError) {
+      return sendCodeClipYouTubeWebSubOperationError(res, error);
+    }
+    console.warn("codeClip YouTube WebSub subscription read failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/youtube-websub/subscriptions/:callbackId",
+      operationalEvent: "youtube_websub_subscription_read_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeWebSubOperationError(res, { code: "internal_error" });
+  }
+});
+
+app.post("/internal/codeclip/youtube-websub/subscriptions/:callbackId/renew", requireCodeClipAdmin, async (req, res) => {
+  const {
+    CodeClipYouTubeWebSubOperationError,
+    renewCodeClipYouTubeWebSubSubscriptionOperation,
+  } = require("./verticals/codeclip/youtube-websub-operations");
+
+  try {
+    const result = await renewCodeClipYouTubeWebSubSubscriptionOperation(
+      req.params.callbackId,
+      req.body || {},
+      { queryClient: database.pool }
+    );
+    return res
+      .status(result.ok ? mapCodeClipYouTubeWebSubOperationSuccessStatus(result) : mapCodeClipYouTubeWebSubOperationStatus(result.code))
+      .set("Cache-Control", "no-store")
+      .json(result);
+  } catch (error) {
+    if (error instanceof CodeClipYouTubeWebSubOperationError) {
+      return sendCodeClipYouTubeWebSubOperationError(res, error);
+    }
+    console.warn("codeClip YouTube WebSub subscription renew failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/youtube-websub/subscriptions/:callbackId/renew",
+      operationalEvent: "youtube_websub_subscription_renew_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeWebSubOperationError(res, { code: "internal_error" });
+  }
+});
+
+app.post("/internal/codeclip/youtube-websub/subscriptions/:callbackId/unsubscribe", requireCodeClipAdmin, async (req, res) => {
+  const {
+    CodeClipYouTubeWebSubOperationError,
+    unsubscribeCodeClipYouTubeWebSubSubscriptionOperation,
+  } = require("./verticals/codeclip/youtube-websub-operations");
+
+  try {
+    const result = await unsubscribeCodeClipYouTubeWebSubSubscriptionOperation(
+      req.params.callbackId,
+      req.body || {},
+      { queryClient: database.pool }
+    );
+    return res
+      .status(result.ok ? mapCodeClipYouTubeWebSubOperationSuccessStatus(result) : mapCodeClipYouTubeWebSubOperationStatus(result.code))
+      .set("Cache-Control", "no-store")
+      .json(result);
+  } catch (error) {
+    if (error instanceof CodeClipYouTubeWebSubOperationError) {
+      return sendCodeClipYouTubeWebSubOperationError(res, error);
+    }
+    console.warn("codeClip YouTube WebSub subscription unsubscribe failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/youtube-websub/subscriptions/:callbackId/unsubscribe",
+      operationalEvent: "youtube_websub_subscription_unsubscribe_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeWebSubOperationError(res, { code: "internal_error" });
+  }
+});
+
 
 // codePerks reward claim registration
 globalThis.__CODEPERKS_REWARD_CLAIMS = globalThis.__CODEPERKS_REWARD_CLAIMS || [];

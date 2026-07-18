@@ -25,9 +25,17 @@ const PENDING_MODES = Object.freeze({
 
 const VALID_STATUSES = new Set(Object.values(SUBSCRIPTION_STATUSES));
 const VALID_PENDING_MODES = new Set(Object.values(PENDING_MODES));
+const VALID_AUDIT_ACTIONS = new Set([
+  "subscription_requested",
+  "renewal_requested",
+  "unsubscribe_requested",
+  "hub_request_accepted",
+  "hub_request_failed",
+]);
 const CALLBACK_ID_MAX_LENGTH = 160;
 const SECRET_VERSION_MAX_LENGTH = 40;
 const VIDEO_ID_MAX_LENGTH = 80;
+const RESULT_CODE_MAX_LENGTH = 80;
 
 class CodeClipYouTubeWebSubSubscriptionError extends Error {
   constructor(code, message, details = {}) {
@@ -122,6 +130,34 @@ function normalizePendingMode(value) {
   return normalized;
 }
 
+function normalizeAuditAction(value) {
+  const normalized = normalizeRequiredString(value, "action", 80).toLowerCase();
+  if (!VALID_AUDIT_ACTIONS.has(normalized)) {
+    throw subscriptionInputError("action is not valid", { fieldName: "action" });
+  }
+  return normalized;
+}
+
+function normalizeEventCode(value) {
+  if (value === undefined || value === null || value === "") return null;
+  return normalizeRequiredString(value, "eventCode", 120);
+}
+
+function normalizeResultCode(value) {
+  return normalizeRequiredString(value, "resultCode", RESULT_CODE_MAX_LENGTH)
+    .toLowerCase()
+    .replace(/[^a-z0-9_:-]/g, "_");
+}
+
+function normalizeHubHttpStatus(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 100 || parsed > 599) {
+    throw subscriptionInputError("hubHttpStatus is invalid", { fieldName: "hubHttpStatus" });
+  }
+  return parsed;
+}
+
 function normalizeSecretVersion(value) {
   return normalizeRequiredString(
     value || DEFAULT_SECRET_VERSION,
@@ -197,6 +233,26 @@ function normalizeMetadata(value) {
     throw subscriptionInputError("metadata must be an object", { fieldName: "metadata" });
   }
   return value;
+}
+
+function sanitizeAuditMetadata(value) {
+  const metadata = normalizeMetadata(value);
+  const sanitized = {};
+
+  if (Number.isSafeInteger(metadata.requestedLeaseSeconds) && metadata.requestedLeaseSeconds > 0) {
+    sanitized.requestedLeaseSeconds = metadata.requestedLeaseSeconds;
+  }
+  if (metadata.operationSource === "operator_key") {
+    sanitized.operationSource = "operator_key";
+  }
+  if (typeof metadata.previousStatus === "string" && VALID_STATUSES.has(metadata.previousStatus)) {
+    sanitized.previousStatus = metadata.previousStatus;
+  }
+  if (typeof metadata.resultingStatus === "string" && VALID_STATUSES.has(metadata.resultingStatus)) {
+    sanitized.resultingStatus = metadata.resultingStatus;
+  }
+
+  return sanitized;
 }
 
 function normalizeOptionalVideoId(value, fieldName = "videoId") {
@@ -287,6 +343,25 @@ function mapSubscriptionRow(row = null) {
   };
 }
 
+function mapSubscriptionAuditRow(row = null) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    vertical: row.vertical,
+    provider: row.provider,
+    callbackId: row.callback_id,
+    providerAccountId: row.provider_account_id,
+    eventCode: row.event_code || null,
+    action: row.action,
+    mode: row.mode || null,
+    resultCode: row.result_code,
+    hubHttpStatus: row.hub_http_status ?? null,
+    retryable: Boolean(row.retryable),
+    metadata: row.metadata || {},
+    createdAt: row.created_at,
+  };
+}
+
 function toInternalCodeClipYouTubeWebSubSubscription(subscription = null) {
   const mapped = subscription?.callback_id ? mapSubscriptionRow(subscription) : subscription;
   if (!mapped) return null;
@@ -373,6 +448,44 @@ async function createPendingCodeClipYouTubeWebSubSubscription(input = {}, { quer
   return mapSubscriptionRow(result.rows?.[0] || null);
 }
 
+async function recordCodeClipYouTubeWebSubSubscriptionAudit(input = {}, { queryClient } = {}) {
+  const client = requireQueryClient(queryClient);
+  const providerAccountId = normalizeYouTubeProviderAccountId(
+    input.providerAccountId || input.provider_account_id
+  );
+  const result = await client.query(
+    `
+      INSERT INTO codeclip_youtube_websub_subscription_audit (
+        vertical,
+        provider,
+        callback_id,
+        provider_account_id,
+        event_code,
+        action,
+        mode,
+        result_code,
+        hub_http_status,
+        retryable,
+        metadata
+      )
+      VALUES ('codeclip', 'youtube', $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+      RETURNING *
+    `,
+    [
+      normalizeCallbackId(input.callbackId || input.callback_id),
+      providerAccountId,
+      normalizeEventCode(input.eventCode || input.event_code),
+      normalizeAuditAction(input.action),
+      normalizePendingMode(input.mode),
+      normalizeResultCode(input.resultCode || input.result_code),
+      normalizeHubHttpStatus(input.hubHttpStatus || input.hub_http_status),
+      Boolean(input.retryable),
+      JSON.stringify(sanitizeAuditMetadata(input.metadata)),
+    ]
+  );
+  return mapSubscriptionAuditRow(result.rows?.[0] || null);
+}
+
 async function getCodeClipYouTubeWebSubSubscriptionByCallbackId(callbackId, { queryClient } = {}) {
   const client = requireQueryClient(queryClient);
   const normalizedCallbackId = normalizeCallbackId(callbackId);
@@ -411,6 +524,68 @@ async function getCodeClipYouTubeWebSubSubscriptionByProviderAccountId(
     [normalizedProviderAccountId]
   );
   return mapSubscriptionRow(result.rows?.[0] || null);
+}
+
+async function getOpenCodeClipYouTubeWebSubSubscriptionByProviderAccountId(
+  providerAccountId,
+  { queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  const normalizedProviderAccountId = normalizeYouTubeProviderAccountId(providerAccountId);
+  const result = await client.query(
+    `
+      SELECT *
+      FROM codeclip_youtube_websub_subscriptions
+      WHERE provider_account_id = $1
+        AND vertical = 'codeclip'
+        AND provider = 'youtube'
+        AND channel = 'youtube'
+        AND status IN (
+          'pending_subscribe',
+          'active',
+          'pending_renewal',
+          'pending_unsubscribe'
+        )
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 1
+    `,
+    [normalizedProviderAccountId]
+  );
+  return mapSubscriptionRow(result.rows?.[0] || null);
+}
+
+async function listCodeClipYouTubeWebSubSubscriptions(filters = {}, { queryClient } = {}) {
+  const client = requireQueryClient(queryClient);
+  const predicates = [
+    "vertical = 'codeclip'",
+    "provider = 'youtube'",
+    "channel = 'youtube'",
+  ];
+  const params = [];
+
+  if (filters.providerAccountId || filters.provider_account_id) {
+    params.push(normalizeYouTubeProviderAccountId(
+      filters.providerAccountId || filters.provider_account_id
+    ));
+    predicates.push(`provider_account_id = $${params.length}`);
+  }
+
+  if (filters.status) {
+    params.push(normalizeStatus(filters.status));
+    predicates.push(`status = $${params.length}`);
+  }
+
+  const result = await client.query(
+    `
+      SELECT *
+      FROM codeclip_youtube_websub_subscriptions
+      WHERE ${predicates.join(" AND ")}
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 100
+    `,
+    params
+  );
+  return (result.rows || []).map(mapSubscriptionRow);
 }
 
 async function updateStatusByCallbackId(callbackId, fields = {}, { queryClient } = {}) {
@@ -600,6 +775,8 @@ module.exports = {
   disableCodeClipYouTubeWebSubSubscription,
   getCodeClipYouTubeWebSubSubscriptionByCallbackId,
   getCodeClipYouTubeWebSubSubscriptionByProviderAccountId,
+  getOpenCodeClipYouTubeWebSubSubscriptionByProviderAccountId,
+  listCodeClipYouTubeWebSubSubscriptions,
   markCodeClipYouTubeWebSubSubscriptionExpired,
   markCodeClipYouTubeWebSubSubscriptionRenewalPending,
   markCodeClipYouTubeWebSubSubscriptionUnsubscribePending,
@@ -607,6 +784,7 @@ module.exports = {
   markCodeClipYouTubeWebSubSubscriptionVerified,
   normalizeCallbackId,
   normalizeSubscriptionInput,
+  recordCodeClipYouTubeWebSubSubscriptionAudit,
   recordCodeClipYouTubeWebSubFirstActivatedVideo,
   toInternalCodeClipYouTubeWebSubSubscription,
   updateCodeClipYouTubeWebSubSubscriptionLease,

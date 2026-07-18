@@ -1382,6 +1382,55 @@ async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool)
     CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_subscriptions_status_lease_idx
     ON codeclip_youtube_websub_subscriptions (status, lease_expires_at)
   `);
+
+  await queryClient.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS codeclip_youtube_websub_subscriptions_open_account_uidx
+    ON codeclip_youtube_websub_subscriptions (vertical, provider, provider_account_id)
+    WHERE status IN (
+      'pending_subscribe',
+      'active',
+      'pending_renewal',
+      'pending_unsubscribe'
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_youtube_websub_subscription_audit (
+      id BIGSERIAL PRIMARY KEY,
+      vertical TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      callback_id TEXT NOT NULL,
+      provider_account_id TEXT NOT NULL,
+      event_code TEXT,
+      action TEXT NOT NULL,
+      mode TEXT,
+      result_code TEXT NOT NULL,
+      hub_http_status INTEGER,
+      retryable BOOLEAN NOT NULL DEFAULT false,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (vertical = 'codeclip'),
+      CHECK (provider = 'youtube'),
+      CHECK (action IN (
+        'subscription_requested',
+        'renewal_requested',
+        'unsubscribe_requested',
+        'hub_request_accepted',
+        'hub_request_failed'
+      )),
+      CHECK (mode IS NULL OR mode IN ('subscribe', 'unsubscribe'))
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_subscription_audit_callback_idx
+    ON codeclip_youtube_websub_subscription_audit (callback_id, created_at)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_subscription_audit_account_idx
+    ON codeclip_youtube_websub_subscription_audit (provider_account_id, created_at)
+  `);
 }
 
 async function ensureCodeClipProviderAccountBindingAuditTable(queryClient = pool) {
