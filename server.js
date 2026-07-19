@@ -76,6 +76,7 @@ async function initializeCodeClipStartup({
 } = {}) {
   await databaseClient.ensureCodeClipProviderAccountBindingsTable();
   await databaseClient.ensureCodeClipYouTubeWebSubSubscriptionsTable();
+  await databaseClient.ensureCodeClipYouTubeOAuthStatesTable();
   await databaseClient.ensureCodeClipProviderAccountBindingAuditTable();
 }
 
@@ -480,7 +481,7 @@ async function refreshCodePodGoldXtraRedisToken(token, row) {
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-admin-key"]
+  allowedHeaders: ["Content-Type", "Authorization", "x-admin-key", "x-dashboard-key"]
 }));
 app.options(/.*/, cors());
 
@@ -6664,6 +6665,205 @@ async function getCodeClipOperatorEventByCode(eventCode) {
   if (!event || !isCodeClipEventRecord(event)) return null;
   return event;
 }
+
+function getCodeClipDashboardKeyFromEvent(event = {}) {
+  return String(
+    event.dashboard_access_key ||
+    event.dashboardAccessKey ||
+    event.raw_event?.dashboardAccessKey ||
+    event.raw_event?.dashboard_access_key ||
+    ""
+  ).trim();
+}
+
+function timingSafeStringEqual(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  const leftBuffer = Buffer.from(left, "utf8");
+  const rightBuffer = Buffer.from(right, "utf8");
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+async function requireCodeClipCreatorEpisodeAccess(req, res, next) {
+  const eventCode = String(req.params?.eventCode || "").trim();
+  const providedKey = String(req.headers["x-dashboard-key"] || "").trim();
+
+  if (!providedKey) {
+    return res.status(401).set("Cache-Control", "no-store").json({
+      ok: false,
+      error: { code: "youtube_connection_unauthorized" },
+    });
+  }
+
+  try {
+    const event = await getCodeClipOperatorEventByCode(eventCode);
+    if (!event) {
+      return res.status(404).set("Cache-Control", "no-store").json({
+        ok: false,
+        error: { code: "youtube_episode_not_found" },
+      });
+    }
+    const campaignKey = getCodeClipDashboardKeyFromEvent(event);
+    if (!campaignKey || !timingSafeStringEqual(providedKey, campaignKey)) {
+      return res.status(403).set("Cache-Control", "no-store").json({
+        ok: false,
+        error: { code: "youtube_connection_forbidden" },
+      });
+    }
+    req.codeClipCreatorEvent = event;
+    return next();
+  } catch {
+    return res.status(503).set("Cache-Control", "no-store").json({
+      ok: false,
+      error: { code: "youtube_connection_unavailable" },
+    });
+  }
+}
+
+function mapCodeClipYouTubeConnectionHttpStatus(code) {
+  if (
+    [
+      "youtube_oauth_state_invalid",
+      "youtube_oauth_state_expired",
+      "youtube_oauth_replayed",
+      "youtube_authorization_denied",
+      "youtube_channel_not_found",
+      "youtube_channel_ambiguous",
+      "youtube_connection_invalid",
+      "youtube_oauth_return_url_not_allowed",
+    ].includes(code)
+  ) {
+    return 400;
+  }
+  if (code === "youtube_episode_not_found") return 404;
+  if (code === "youtube_binding_conflict") return 409;
+  if (code === "youtube_oauth_unavailable" || code === "youtube_connection_unavailable") return 503;
+  return 503;
+}
+
+function sendCodeClipYouTubeConnectionError(res, error) {
+  const {
+    mapConnectionError,
+  } = require("./verticals/codeclip/youtube-connection");
+  const mapped = mapConnectionError(error);
+  return res
+    .status(mapCodeClipYouTubeConnectionHttpStatus(mapped.code))
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      error: { code: mapped.code },
+    });
+}
+
+app.post(
+  "/api/codeclip/events/:eventCode/providers/youtube/connect",
+  requireCodeClipCreatorEpisodeAccess,
+  async (req, res) => {
+    const {
+      startCodeClipYouTubeConnection,
+    } = require("./verticals/codeclip/youtube-connection");
+
+    try {
+      const result = await startCodeClipYouTubeConnection(
+        {
+          eventCode: req.params.eventCode,
+          returnUrl: req.body?.returnUrl,
+        },
+        {
+          queryClient: database.pool,
+          getEventByCode: async () => req.codeClipCreatorEvent,
+          recordOAuthState: database.recordCodeClipYouTubeOAuthState,
+        }
+      );
+      return res
+        .set("Cache-Control", "no-store")
+        .json(result);
+    } catch (error) {
+      console.warn("codeClip YouTube OAuth start failed", {
+        vertical: "codeclip",
+        provider: "youtube",
+        route: "/api/codeclip/events/:eventCode/providers/youtube/connect",
+        operationalEvent: "youtube_oauth_start_failed",
+        error: error?.name || "Error",
+      });
+      return sendCodeClipYouTubeConnectionError(res, error);
+    }
+  }
+);
+
+app.get("/api/codeclip/providers/youtube/oauth/callback", async (req, res) => {
+  const {
+    completeCodeClipYouTubeConnection,
+  } = require("./verticals/codeclip/youtube-connection");
+
+  try {
+    const result = await completeCodeClipYouTubeConnection(
+      {
+        code: req.query?.code,
+        state: req.query?.state,
+        error: req.query?.error,
+      },
+      {
+        queryClient: database.pool,
+        getEventByCode: getCampaignByCode,
+        consumeOAuthState: database.consumeCodeClipYouTubeOAuthState,
+        runTransaction: withCodeClipCorePersistenceTransaction,
+      }
+    );
+    const redirectUrl = new URL(result.returnUrl);
+    redirectUrl.searchParams.set("provider", "youtube");
+    redirectUrl.searchParams.set("connectionStatus", result.connection.connectionStatus);
+    redirectUrl.searchParams.set("eventCode", result.eventCode);
+    return res
+      .status(303)
+      .set("Cache-Control", "no-store")
+      .set("Location", redirectUrl.toString())
+      .json({
+        ok: true,
+        provider: "youtube",
+        eventCode: result.eventCode,
+        connection: result.connection,
+      });
+  } catch (error) {
+    console.warn("codeClip YouTube OAuth callback failed", {
+      vertical: "codeclip",
+      provider: "youtube",
+      route: "/api/codeclip/providers/youtube/oauth/callback",
+      operationalEvent: "youtube_oauth_callback_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeConnectionError(res, error);
+  }
+});
+
+app.get(
+  "/api/codeclip/events/:eventCode/providers/youtube/connection",
+  requireCodeClipCreatorEpisodeAccess,
+  async (req, res) => {
+    const {
+      getCodeClipYouTubeConnectionStatus,
+    } = require("./verticals/codeclip/youtube-connection");
+    const {
+      listCodeClipProviderAccountBindingsForEvent,
+    } = require("./verticals/codeclip/provider-account-bindings");
+
+    try {
+      const result = await getCodeClipYouTubeConnectionStatus(
+        { eventCode: req.params.eventCode },
+        {
+          queryClient: database.pool,
+          getEventByCode: async () => req.codeClipCreatorEvent,
+          listBindingsForEvent: listCodeClipProviderAccountBindingsForEvent,
+        }
+      );
+      return res
+        .set("Cache-Control", "no-store")
+        .json(result);
+    } catch (error) {
+      return sendCodeClipYouTubeConnectionError(res, error);
+    }
+  }
+);
 
 function isExplicitTrue(value) {
   return String(value || "").trim().toLowerCase() === "true";

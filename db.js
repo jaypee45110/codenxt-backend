@@ -1628,6 +1628,102 @@ async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool)
   `);
 }
 
+async function ensureCodeClipYouTubeOAuthStatesTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_youtube_oauth_states (
+      nonce TEXT PRIMARY KEY,
+      vertical TEXT NOT NULL,
+      event_code TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      issued_at TIMESTAMPTZ NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      consumed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (vertical = 'codeclip'),
+      CHECK (provider = 'youtube')
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_oauth_states_event_idx
+    ON codeclip_youtube_oauth_states (event_code, expires_at)
+  `);
+}
+
+async function recordCodeClipYouTubeOAuthState(state = {}, { queryClient = pool } = {}) {
+  if (!queryClient || typeof queryClient.query !== 'function') {
+    const error = new Error('codeClip YouTube OAuth state repository requires PostgreSQL');
+    error.code = 'DATABASE_UNAVAILABLE';
+    throw error;
+  }
+  await queryClient.query(
+    `
+      INSERT INTO codeclip_youtube_oauth_states (
+        nonce,
+        vertical,
+        event_code,
+        provider,
+        issued_at,
+        expires_at
+      )
+      VALUES ($1,$2,$3,$4,$5::timestamptz,$6::timestamptz)
+    `,
+    [
+      String(state.nonce || '').trim(),
+      'codeclip',
+      String(state.eventCode || '').trim(),
+      'youtube',
+      state.issuedAt,
+      state.expiresAt,
+    ]
+  );
+}
+
+async function consumeCodeClipYouTubeOAuthState(state = {}, { queryClient = pool } = {}) {
+  if (!queryClient || typeof queryClient.query !== 'function') {
+    const error = new Error('codeClip YouTube OAuth state repository requires PostgreSQL');
+    error.code = 'DATABASE_UNAVAILABLE';
+    throw error;
+  }
+  const result = await queryClient.query(
+    `
+      UPDATE codeclip_youtube_oauth_states
+      SET consumed_at = NOW()
+      WHERE nonce = $1
+        AND vertical = 'codeclip'
+        AND provider = 'youtube'
+        AND event_code = $2
+        AND consumed_at IS NULL
+        AND expires_at > NOW()
+      RETURNING nonce, event_code, issued_at, expires_at, consumed_at
+    `,
+    [String(state.nonce || '').trim(), String(state.eventCode || '').trim()]
+  );
+  if (result.rows?.[0]) return { consumed: true, row: result.rows[0] };
+
+  const lookup = await queryClient.query(
+    `
+      SELECT nonce, event_code, issued_at, expires_at, consumed_at
+      FROM codeclip_youtube_oauth_states
+      WHERE nonce = $1
+        AND vertical = 'codeclip'
+        AND provider = 'youtube'
+        AND event_code = $2
+      LIMIT 1
+    `,
+    [String(state.nonce || '').trim(), String(state.eventCode || '').trim()]
+  );
+  const row = lookup.rows?.[0] || null;
+  if (!row) return { consumed: false, reason: 'missing' };
+  if (row.consumed_at) return { consumed: false, reason: 'replayed', row };
+  if (Date.parse(row.expires_at) <= Date.now()) {
+    return { consumed: false, reason: 'expired', row };
+  }
+  return { consumed: false, reason: 'unavailable', row };
+}
+
 async function ensureCodeClipProviderAccountBindingAuditTable(queryClient = pool) {
   if (!queryClient) return;
 
@@ -3212,7 +3308,10 @@ module.exports = {
   ensureCodeClipProviderAccountBindingsTable,
   ensureCodeClipProviderAccountBindingAuditTable,
   ensureCodeClipYouTubeWebSubSubscriptionsTable,
+  ensureCodeClipYouTubeOAuthStatesTable,
   ensureCodeClipProviderDeliveriesTable,
+  recordCodeClipYouTubeOAuthState,
+  consumeCodeClipYouTubeOAuthState,
   createCodeClipProviderDelivery,
   getCodeClipProviderDeliveryByIdentity,
   findCodeClipProviderDeliveryForReplayIdentity,
