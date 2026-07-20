@@ -9,6 +9,7 @@ const {
   getCodeClipYouTubeWebSubSubscriptionStatus,
   buildTopic,
   buildCallbackUrl,
+  toPublicSubscriptionStatus,
 } = require("./verticals/codeclip/youtube-websub-operations");
 
 const CHANNEL_ID = "UCaaaaaaaaaaaaaaaaaaaaaa";
@@ -221,6 +222,65 @@ test("YouTube WebSub create validates episode and binding, creates pending recor
       .map((call) => call[0]),
     ["BEGIN", "createPending", "audit", "COMMIT", "hub", "audit"]
   );
+});
+
+test("YouTube WebSub public status serializes operator state, expiry and last operation without secrets", () => {
+  const result = toPublicSubscriptionStatus(subscription({
+    status: "active",
+    pendingMode: null,
+    secretVersion: "v99",
+    leaseStartedAt: "2026-07-18T00:00:00.000Z",
+    leaseExpiresAt: "2026-07-22T00:00:00.000Z",
+    metadata: {
+      requestedLeaseSeconds: 864000,
+      dispatch: {
+        mode: "subscribe",
+        status: "accepted",
+        resultCode: "hub_request_accepted",
+        hubHttpStatus: 202,
+        retryEligible: false,
+        attemptNumber: 2,
+        startedAt: "2026-07-18T00:01:00.000Z",
+        completedAt: "2026-07-18T00:01:01.000Z",
+        secret: "derived-secret",
+      },
+    },
+  }), { now: new Date("2026-07-18T12:00:00.000Z") });
+
+  assert.equal(result.secretVersion, undefined);
+  assert.equal(result.operatorStatus, "active");
+  assert.equal(result.recommendedAction, null);
+  assert.equal(result.leaseSeconds, 345600);
+  assert.equal(result.expiresInSeconds, 302400);
+  assert.deepEqual(result.lastOperation, {
+    mode: "subscribe",
+    status: "accepted",
+    resultCode: "hub_request_accepted",
+    hubHttpStatus: 202,
+    retryEligible: false,
+    attemptNumber: 2,
+    startedAt: "2026-07-18T00:01:00.000Z",
+    completedAt: "2026-07-18T00:01:01.000Z",
+  });
+  assert.equal(JSON.stringify(result).includes("v99"), false);
+  assert.equal(JSON.stringify(result).includes("derived-secret"), false);
+});
+
+test("YouTube WebSub public status maps pending, expiring, expired, disabled and failed states", () => {
+  const now = new Date("2026-07-18T12:00:00.000Z");
+  assert.equal(toPublicSubscriptionStatus(subscription(), { now }).operatorStatus, "pending_activation");
+  assert.equal(
+    toPublicSubscriptionStatus(subscription({
+      status: "active",
+      pendingMode: null,
+      leaseStartedAt: "2026-07-18T00:00:00.000Z",
+      leaseExpiresAt: "2026-07-19T00:00:00.000Z",
+    }), { now }).operatorStatus,
+    "needs_renewal"
+  );
+  assert.equal(toPublicSubscriptionStatus(subscription({ status: "expired" }), { now }).operatorStatus, "expired");
+  assert.equal(toPublicSubscriptionStatus(subscription({ status: "unsubscribed" }), { now }).operatorStatus, "disabled");
+  assert.equal(toPublicSubscriptionStatus(subscription({ status: "failed" }), { now }).operatorStatus, "error");
 });
 
 test("YouTube WebSub create fails before database and hub when root secret or base URL is missing", async () => {

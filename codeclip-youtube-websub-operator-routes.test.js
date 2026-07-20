@@ -5,11 +5,15 @@ const { Readable, Writable } = require("node:stream");
 const dbModulePath = require.resolve("./db");
 const originalDb = require(dbModulePath);
 const operationsModulePath = require.resolve("./verticals/codeclip/youtube-websub-operations");
+const bindingsModulePath = require.resolve("./verticals/codeclip/provider-account-bindings");
+const originalBindings = require(bindingsModulePath);
 
 const queryClient = { name: "youtube-websub-operator-route-pool" };
 const calls = [];
 let operationError = null;
 let operationResults = {};
+let bindingRows = [];
+let operatorEvent = { code: "CC-ROUTE", vertical: "codeclip" };
 
 class StubOperationError extends Error {
   constructor(code) {
@@ -26,6 +30,10 @@ require.cache[dbModulePath] = {
   exports: {
     ...originalDb,
     pool: queryClient,
+    getCampaignByCode: async (eventCode) => {
+      calls.push(["getCampaignByCode", eventCode]);
+      return operatorEvent && operatorEvent.code === eventCode ? operatorEvent : null;
+    },
   },
 };
 
@@ -63,6 +71,32 @@ require.cache[operationsModulePath] = {
   },
 };
 
+require.cache[bindingsModulePath] = {
+  id: bindingsModulePath,
+  filename: bindingsModulePath,
+  loaded: true,
+  exports: {
+    ...originalBindings,
+    listCodeClipProviderAccountBindingsForEvent: async (eventCode, options) => {
+      calls.push(["listBindingsForEvent", eventCode, options]);
+      return bindingRows;
+    },
+    getCodeClipProviderAccountBindingById: async (bindingId, options) => {
+      calls.push(["getBindingById", bindingId, options]);
+      return bindingRows.find((binding) => String(binding.id) === String(bindingId)) || null;
+    },
+    toPublicCodeClipProviderBinding: (binding) => ({
+      id: binding.id,
+      eventCode: binding.eventCode,
+      provider: binding.provider,
+      channel: binding.channel,
+      maskedAccountId: "****************6789",
+      status: binding.status,
+      displayName: binding.displayName || "",
+    }),
+  },
+};
+
 process.env.CODECLIP_ADMIN_KEY = "route-admin-secret";
 const { app } = require("./server");
 
@@ -92,6 +126,18 @@ function reset(results = {}) {
     },
     ...results,
   };
+  bindingRows = [
+    {
+      id: "123",
+      eventCode: "CC-ROUTE",
+      provider: "youtube",
+      channel: "youtube",
+      providerAccountId: "UCrouteSafeChannel123456789",
+      status: "active",
+      displayName: "Main YouTube",
+    },
+  ];
+  operatorEvent = { code: "CC-ROUTE", vertical: "codeclip" };
 }
 
 function callApp({ method = "GET", path, body = null, adminKey = "route-admin-secret" }) {
@@ -184,6 +230,24 @@ test("YouTube WebSub create route calls operation with body and database pool", 
   assertNoSecretLeak(response);
 });
 
+test("YouTube WebSub binding create route resolves raw account server-side", async () => {
+  reset();
+  const response = await callApp({
+    method: "POST",
+    path: "/internal/codeclip/provider-bindings/123/youtube-websub/subscription",
+    body: { leaseSeconds: 864000, providerAccountId: "attacker-input" },
+  });
+
+  assert.equal(response.status, 202);
+  assert.equal(response.body.code, "subscription_pending");
+  assert.deepEqual(calls.map((call) => call[0]), ["getBindingById", "create"]);
+  assert.equal(calls[0][2].queryClient, queryClient);
+  assert.equal(calls[1][1].eventCode, "CC-ROUTE");
+  assert.equal(calls[1][1].providerAccountId, "UCrouteSafeChannel123456789");
+  assert.equal(calls[1][1].leaseSeconds, 864000);
+  assertNoSecretLeak(response);
+});
+
 test("YouTube WebSub list and get routes are read-only operation calls", async () => {
   reset();
   const list = await callApp({
@@ -202,6 +266,38 @@ test("YouTube WebSub list and get routes are read-only operation calls", async (
   assert.deepEqual(get.body.subscription, operationResults.get);
   assert.equal(calls[1][0], "get");
   assert.equal(calls[1][1], "yt_route_cb");
+});
+
+test("YouTube WebSub episode route joins public bindings with subscription status", async () => {
+  reset({
+    list: [{
+      callbackId: "yt_route_cb",
+      providerAccountId: "UCrouteSafeChannel123456789",
+      topic: "https://www.youtube.com/feeds/videos.xml?channel_id=UCrouteSafeChannel123456789",
+      status: "active",
+      operatorStatus: "active",
+      leaseExpiresAt: "2026-07-20T00:00:00.000Z",
+      lastOperation: { mode: "subscribe", resultCode: "hub_request_accepted" },
+    }],
+  });
+  const response = await callApp({
+    path: "/internal/codeclip/events/CC-ROUTE/youtube-websub/subscriptions?includeDisabled=true",
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.equal(response.body.eventCode, "CC-ROUTE");
+  assert.equal(response.body.items.length, 1);
+  assert.equal(response.body.items[0].binding.provider, "youtube");
+  assert.equal(response.body.items[0].binding.maskedAccountId, "****************6789");
+  assert.equal(response.body.items[0].binding.providerAccountId, undefined);
+  assert.equal(response.body.items[0].subscription.callbackId, "yt_route_cb");
+  assert.equal(response.body.items[0].subscription.providerAccountId, undefined);
+  assert.deepEqual(calls.map((call) => call[0]), ["getCampaignByCode", "listBindingsForEvent", "list"]);
+  assert.equal(calls[1][1], "CC-ROUTE");
+  assert.equal(calls[1][2].includeDisabled, true);
+  assert.equal(calls[2][1].providerAccountId, "UCrouteSafeChannel123456789");
+  assertNoSecretLeak(response);
 });
 
 test("YouTube WebSub renew and unsubscribe routes call operation without exposing secrets", async () => {

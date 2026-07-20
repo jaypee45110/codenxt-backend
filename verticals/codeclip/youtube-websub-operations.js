@@ -33,6 +33,7 @@ const database = require("../../db");
 const DEFAULT_LEASE_SECONDS = 60 * 60 * 24 * 10;
 const MAX_LEASE_SECONDS = 60 * 60 * 24 * 30;
 const DEFAULT_SECRET_VERSION = "v1";
+const RENEWAL_WARNING_SECONDS = 60 * 60 * 24 * 3;
 
 class CodeClipYouTubeWebSubOperationError extends Error {
   constructor(code, message, details = {}) {
@@ -153,9 +154,73 @@ function isActiveCodeClipEpisode(event) {
   );
 }
 
-function toPublicSubscriptionStatus(subscription = null) {
+function parseTimestamp(value) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function getPublicLastOperation(mapped, metadata = {}) {
+  const dispatch = metadata?.dispatch;
+  if (dispatch && typeof dispatch === "object") {
+    return {
+      mode: dispatch.mode || mapped.pendingMode || null,
+      status: dispatch.status || null,
+      resultCode: dispatch.resultCode || null,
+      hubHttpStatus: dispatch.hubHttpStatus || null,
+      retryEligible: dispatch.retryEligible === true,
+      attemptNumber: Number.isSafeInteger(dispatch.attemptNumber) ? dispatch.attemptNumber : null,
+      startedAt: dispatch.startedAt || null,
+      completedAt: dispatch.completedAt || null,
+    };
+  }
+  const operation = metadata?.operation;
+  if (!operation) return null;
+  return {
+    mode: operation,
+    status: mapped.status,
+    resultCode: null,
+    hubHttpStatus: null,
+    retryEligible: false,
+    attemptNumber: null,
+    startedAt: null,
+    completedAt: mapped.updatedAt || null,
+  };
+}
+
+function classifyOperatorSubscriptionStatus(mapped, now = new Date()) {
+  if (!mapped) return "not_configured";
+  const status = String(mapped.status || "").trim().toLowerCase();
+  const expiresAt = parseTimestamp(mapped.leaseExpiresAt);
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now);
+  if (status === SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE) return "pending_activation";
+  if (status === SUBSCRIPTION_STATUSES.PENDING_RENEWAL) return "needs_renewal";
+  if (status === SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE) return "disabled";
+  if (status === SUBSCRIPTION_STATUSES.UNSUBSCRIBED || status === SUBSCRIPTION_STATUSES.DISABLED) {
+    return "disabled";
+  }
+  if (status === SUBSCRIPTION_STATUSES.EXPIRED) return "expired";
+  if (status === SUBSCRIPTION_STATUSES.ACTIVE) {
+    if (Number.isFinite(expiresAt) && Number.isFinite(nowMs)) {
+      if (expiresAt <= nowMs) return "expired";
+      if ((expiresAt - nowMs) / 1000 <= RENEWAL_WARNING_SECONDS) return "needs_renewal";
+    }
+    return "active";
+  }
+  return "error";
+}
+
+function getRecommendedSubscriptionAction(operatorStatus) {
+  if (operatorStatus === "pending_activation") return "wait_for_activation";
+  if (operatorStatus === "needs_renewal" || operatorStatus === "expired") return "renew";
+  if (operatorStatus === "error") return "review_error";
+  return null;
+}
+
+function toPublicSubscriptionStatus(subscription = null, options = {}) {
   const mapped = toInternalCodeClipYouTubeWebSubSubscription(subscription);
   if (!mapped) return null;
+  const now = options.now || new Date();
+  const metadata = mapped.metadata || subscription?.metadata || {};
   const leaseSeconds =
     mapped.leaseStartedAt && mapped.leaseExpiresAt
       ? Math.max(
@@ -165,19 +230,29 @@ function toPublicSubscriptionStatus(subscription = null) {
           )
         )
       : null;
+  const leaseExpiresAtMs = parseTimestamp(mapped.leaseExpiresAt);
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now);
+  const expiresInSeconds =
+    Number.isFinite(leaseExpiresAtMs) && Number.isFinite(nowMs)
+      ? Math.max(0, Math.floor((leaseExpiresAtMs - nowMs) / 1000))
+      : null;
+  const operatorStatus = classifyOperatorSubscriptionStatus(mapped, now);
   return {
     callbackId: mapped.callbackId,
     provider: mapped.provider,
     providerAccountId: mapped.providerAccountId,
     topic: mapped.topic,
     status: mapped.status,
+    operatorStatus,
+    recommendedAction: getRecommendedSubscriptionAction(operatorStatus),
     pendingMode: mapped.pendingMode,
-    secretVersion: mapped.secretVersion,
-    requestedLeaseSeconds: mapped.metadata?.requestedLeaseSeconds || null,
+    requestedLeaseSeconds: metadata?.requestedLeaseSeconds || null,
     leaseSeconds,
+    expiresInSeconds,
     leaseExpiresAt: mapped.leaseExpiresAt,
     activationBoundaryAt: mapped.activationBoundaryAt,
     firstActivatedVideoId: mapped.firstActivatedVideoId,
+    lastOperation: getPublicLastOperation(mapped, metadata),
     createdAt: mapped.createdAt,
     updatedAt: mapped.updatedAt,
   };
