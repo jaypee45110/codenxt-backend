@@ -6,7 +6,9 @@ const {
   CodeClipYouTubeWebSubSubscriptionError,
   SUBSCRIPTION_STATUSES,
   PENDING_MODES,
+  claimCodeClipYouTubeWebSubRenewDispatch,
   claimCodeClipYouTubeWebSubSubscribeDispatch,
+  claimCodeClipYouTubeWebSubUnsubscribeDispatch,
   createPendingCodeClipYouTubeWebSubSubscription,
   disableCodeClipYouTubeWebSubSubscription,
   getCodeClipYouTubeWebSubSubscriptionByCallbackId,
@@ -18,7 +20,9 @@ const {
   markCodeClipYouTubeWebSubSubscriptionUnsubscribed,
   markCodeClipYouTubeWebSubSubscriptionVerified,
   normalizeSubscriptionInput,
+  recordCodeClipYouTubeWebSubRenewDispatchResult,
   recordCodeClipYouTubeWebSubSubscribeDispatchResult,
+  recordCodeClipYouTubeWebSubUnsubscribeDispatchResult,
   recordCodeClipYouTubeWebSubSubscriptionAudit,
   recordCodeClipYouTubeWebSubFirstActivatedVideo,
   toInternalCodeClipYouTubeWebSubSubscription,
@@ -75,19 +79,19 @@ function isSafeAttemptNumber(value) {
   );
 }
 
-function claimableDispatch(dispatch, nowEpochMs) {
+function claimableDispatch(dispatch, nowEpochMs, expectedMode = "subscribe") {
   if (dispatch === undefined || dispatch === null) return true;
   if (typeof dispatch !== "object" || Array.isArray(dispatch)) return false;
   if (dispatch.status === "failed") {
     return (
-      dispatch.mode === "subscribe" &&
+      dispatch.mode === expectedMode &&
       dispatch.retryEligible === true &&
       isSafeAttemptNumber(dispatch.attemptNumber)
     );
   }
   if (dispatch.status === "started") {
     return (
-      dispatch.mode === "subscribe" &&
+      dispatch.mode === expectedMode &&
       isSafeAttemptNumber(dispatch.attemptNumber) &&
       Number.isSafeInteger(dispatch.staleAfterEpochMs) &&
       dispatch.staleAfterEpochMs >= 0 &&
@@ -196,10 +200,13 @@ function createSubscriptionClient() {
         const current = find(params[0]);
         if (!current) return { rows: [] };
         const nowEpochMs = params[4] ?? 1_800_000_000_000;
+        const mode = params[5];
+        const requiredStatus = params[6];
+        const requiredPendingMode = params[7];
         if (
-          current.status !== SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE ||
-          current.pending_mode !== PENDING_MODES.SUBSCRIBE ||
-          !claimableDispatch(current.metadata.dispatch, nowEpochMs)
+          current.status !== requiredStatus ||
+          current.pending_mode !== requiredPendingMode ||
+          !claimableDispatch(current.metadata.dispatch, nowEpochMs, mode)
         ) {
           return { rows: [] };
         }
@@ -213,7 +220,7 @@ function createSubscriptionClient() {
             attemptNumber: previousAttemptNumber + 1,
             previousAttemptCount: previousAttemptNumber,
             status: "started",
-            mode: "subscribe",
+            mode,
             startedAt: "2026-07-17T00:00:01.000Z",
             staleAfterEpochMs: nowEpochMs + params[3] * 1000,
             requestedLeaseSeconds: params[2],
@@ -231,16 +238,21 @@ function createSubscriptionClient() {
         const current = find(params[0]);
         if (!current) return { rows: [] };
         const dispatch = current.metadata.dispatch;
+        const mode = params[6];
+        const allowedStates = [
+          { status: params[7], pending_mode: params[8] },
+          { status: params[9], pending_mode: params[10] },
+          { status: params[11], pending_mode: params[12] },
+        ];
         if (
           typeof dispatch !== "object" ||
           dispatch === null ||
           dispatch.attemptId !== params[1] ||
           dispatch.status !== "started" ||
-          dispatch.mode !== "subscribe" ||
-          !(
-            (current.status === SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE &&
-              current.pending_mode === PENDING_MODES.SUBSCRIBE) ||
-            (current.status === SUBSCRIPTION_STATUSES.ACTIVE && current.pending_mode === null)
+          dispatch.mode !== mode ||
+          !allowedStates.some((state) =>
+            current.status === state.status &&
+            current.pending_mode === state.pending_mode
           )
         ) {
           return { rows: [] };
@@ -251,7 +263,7 @@ function createSubscriptionClient() {
             ...dispatch,
             attemptId: params[1],
             status: params[2],
-            mode: "subscribe",
+            mode,
             resultCode: params[3],
             hubHttpStatus: params[4],
             retryEligible: params[5],
@@ -771,6 +783,229 @@ test("YouTube WebSub subscribe dispatch result cannot modify renewal, unsubscrib
       queryClient: client,
     });
     assert.equal(result, null);
+    assert.equal(client.rows[0].metadata.dispatch.status, "started");
+  }
+});
+
+test("YouTube WebSub renew and unsubscribe dispatch claims are mode and state isolated", async () => {
+  const renewClient = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+      pendingMode: PENDING_MODES.SUBSCRIBE,
+    }),
+    { queryClient: renewClient }
+  );
+  const renewClaim = await claimCodeClipYouTubeWebSubRenewDispatch("yt_cb_123", {
+    attemptId: "attempt_renew",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: renewClient,
+  });
+  assert.equal(renewClaim.metadata.dispatch.mode, "renew");
+  assert.equal(renewClaim.metadata.dispatch.status, "started");
+
+  const unsubscribeAgainstRenew = await claimCodeClipYouTubeWebSubUnsubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_wrong_unsubscribe",
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: renewClient,
+  });
+  assert.equal(unsubscribeAgainstRenew, null);
+
+  const unsubscribeClient = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+      pendingMode: PENDING_MODES.UNSUBSCRIBE,
+    }),
+    { queryClient: unsubscribeClient }
+  );
+  const unsubscribeClaim = await claimCodeClipYouTubeWebSubUnsubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_unsubscribe",
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: unsubscribeClient,
+  });
+  assert.equal(unsubscribeClaim.metadata.dispatch.mode, "unsubscribe");
+
+  const renewAgainstUnsubscribe = await claimCodeClipYouTubeWebSubRenewDispatch("yt_cb_123", {
+    attemptId: "attempt_wrong_renew",
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: unsubscribeClient,
+  });
+  assert.equal(renewAgainstUnsubscribe, null);
+});
+
+test("YouTube WebSub renew and unsubscribe dispatch results require exact mode and preserve callback state", async () => {
+  const renewClient = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+      pendingMode: PENDING_MODES.SUBSCRIBE,
+    }),
+    { queryClient: renewClient }
+  );
+  await claimCodeClipYouTubeWebSubRenewDispatch("yt_cb_123", {
+    attemptId: "attempt_renew",
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: renewClient,
+  });
+  const wrongSubscribeResult = await recordCodeClipYouTubeWebSubSubscribeDispatchResult("yt_cb_123", {
+    attemptId: "attempt_renew",
+    resultCode: "hub_request_accepted",
+    queryClient: renewClient,
+  });
+  assert.equal(wrongSubscribeResult, null);
+  renewClient.rows[0].status = SUBSCRIPTION_STATUSES.ACTIVE;
+  renewClient.rows[0].pending_mode = null;
+  const renewAccepted = await recordCodeClipYouTubeWebSubRenewDispatchResult("yt_cb_123", {
+    attemptId: "attempt_renew",
+    resultCode: "hub_request_accepted",
+    hubHttpStatus: 202,
+    retryable: true,
+    queryClient: renewClient,
+  });
+  assert.equal(renewAccepted.status, SUBSCRIPTION_STATUSES.ACTIVE);
+  assert.equal(renewAccepted.pendingMode, null);
+  assert.equal(renewAccepted.metadata.dispatch.mode, "renew");
+  assert.equal(renewAccepted.metadata.dispatch.status, "accepted");
+  assert.equal(renewAccepted.metadata.dispatch.retryEligible, false);
+
+  const unsubscribeClient = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+      pendingMode: PENDING_MODES.UNSUBSCRIBE,
+    }),
+    { queryClient: unsubscribeClient }
+  );
+  await claimCodeClipYouTubeWebSubUnsubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_unsubscribe",
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: unsubscribeClient,
+  });
+  const wrongRenewResult = await recordCodeClipYouTubeWebSubRenewDispatchResult("yt_cb_123", {
+    attemptId: "attempt_unsubscribe",
+    resultCode: "hub_request_accepted",
+    queryClient: unsubscribeClient,
+  });
+  assert.equal(wrongRenewResult, null);
+  unsubscribeClient.rows[0].status = SUBSCRIPTION_STATUSES.UNSUBSCRIBED;
+  unsubscribeClient.rows[0].pending_mode = null;
+  const unsubscribeAccepted = await recordCodeClipYouTubeWebSubUnsubscribeDispatchResult("yt_cb_123", {
+    attemptId: "attempt_unsubscribe",
+    resultCode: "hub_request_accepted",
+    hubHttpStatus: 202,
+    retryable: true,
+    queryClient: unsubscribeClient,
+  });
+  assert.equal(unsubscribeAccepted.status, SUBSCRIPTION_STATUSES.UNSUBSCRIBED);
+  assert.equal(unsubscribeAccepted.pendingMode, null);
+  assert.equal(unsubscribeAccepted.metadata.dispatch.mode, "unsubscribe");
+  assert.equal(unsubscribeAccepted.metadata.dispatch.status, "accepted");
+});
+
+test("YouTube WebSub renew and unsubscribe dispatch claims fail closed for malformed dispatch metadata", async () => {
+  const cases = [
+    {
+      status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+      pendingMode: PENDING_MODES.SUBSCRIBE,
+      claim: claimCodeClipYouTubeWebSubRenewDispatch,
+      mode: "renew",
+    },
+    {
+      status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+      pendingMode: PENDING_MODES.UNSUBSCRIBE,
+      claim: claimCodeClipYouTubeWebSubUnsubscribeDispatch,
+      mode: "unsubscribe",
+    },
+  ];
+
+  for (const item of cases) {
+    const client = createSubscriptionClient();
+    await createPendingCodeClipYouTubeWebSubSubscription(
+      validInput({
+        status: item.status,
+        pendingMode: item.pendingMode,
+        metadata: {
+          dispatch: {
+            status: "started",
+            mode: item.mode,
+            staleAfterEpochMs: "1",
+            attemptNumber: 1,
+          },
+        },
+      }),
+      { queryClient: client }
+    );
+    const claim = await item.claim("yt_cb_123", {
+      attemptId: `attempt_${item.mode}`,
+      staleAfterSeconds: 60,
+      nowEpochMs: 1_800_000_000_000,
+      queryClient: client,
+    });
+    assert.equal(claim, null);
+  }
+});
+
+test("YouTube WebSub renew and unsubscribe dispatch results reject old attempts after newer claims", async () => {
+  const cases = [
+    {
+      status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+      pendingMode: PENDING_MODES.SUBSCRIBE,
+      claim: claimCodeClipYouTubeWebSubRenewDispatch,
+      record: recordCodeClipYouTubeWebSubRenewDispatchResult,
+      mode: "renew",
+    },
+    {
+      status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+      pendingMode: PENDING_MODES.UNSUBSCRIBE,
+      claim: claimCodeClipYouTubeWebSubUnsubscribeDispatch,
+      record: recordCodeClipYouTubeWebSubUnsubscribeDispatchResult,
+      mode: "unsubscribe",
+    },
+  ];
+
+  for (const item of cases) {
+    const client = createSubscriptionClient();
+    await createPendingCodeClipYouTubeWebSubSubscription(
+      validInput({
+        status: item.status,
+        pendingMode: item.pendingMode,
+        metadata: {
+          dispatch: {
+            status: "started",
+            mode: item.mode,
+            attemptId: "attempt_old",
+            staleAfterEpochMs: 1,
+            attemptNumber: 1,
+          },
+        },
+      }),
+      { queryClient: client }
+    );
+    const newerClaim = await item.claim("yt_cb_123", {
+      attemptId: "attempt_new",
+      staleAfterSeconds: 60,
+      nowEpochMs: 1_800_000_000_000,
+      queryClient: client,
+    });
+    assert.equal(newerClaim.metadata.dispatch.attemptId, "attempt_new");
+
+    const oldResult = await item.record("yt_cb_123", {
+      attemptId: "attempt_old",
+      resultCode: "hub_request_accepted",
+      hubHttpStatus: 202,
+      retryable: false,
+      queryClient: client,
+    });
+    assert.equal(oldResult, null);
+    assert.equal(client.rows[0].metadata.dispatch.attemptId, "attempt_new");
     assert.equal(client.rows[0].metadata.dispatch.status, "started");
   }
 });

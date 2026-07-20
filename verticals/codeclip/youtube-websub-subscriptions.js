@@ -566,11 +566,49 @@ async function getCodeClipYouTubeWebSubSubscriptionByProviderAccountId(
   return mapSubscriptionRow(result.rows?.[0] || null);
 }
 
-async function claimCodeClipYouTubeWebSubSubscribeDispatch(
+const DISPATCH_MODE_CONTRACTS = Object.freeze({
+  subscribe: Object.freeze({
+    status: SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE,
+    pendingMode: PENDING_MODES.SUBSCRIBE,
+    resultStates: Object.freeze([
+      Object.freeze({ status: SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE, pendingMode: PENDING_MODES.SUBSCRIBE }),
+      Object.freeze({ status: SUBSCRIPTION_STATUSES.ACTIVE, pendingMode: null }),
+    ]),
+  }),
+  renew: Object.freeze({
+    status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+    pendingMode: PENDING_MODES.SUBSCRIBE,
+    resultStates: Object.freeze([
+      Object.freeze({ status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL, pendingMode: PENDING_MODES.SUBSCRIBE }),
+      Object.freeze({ status: SUBSCRIPTION_STATUSES.ACTIVE, pendingMode: null }),
+    ]),
+  }),
+  unsubscribe: Object.freeze({
+    status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+    pendingMode: PENDING_MODES.UNSUBSCRIBE,
+    resultStates: Object.freeze([
+      Object.freeze({ status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE, pendingMode: PENDING_MODES.UNSUBSCRIBE }),
+      Object.freeze({ status: SUBSCRIPTION_STATUSES.UNSUBSCRIBED, pendingMode: null }),
+      Object.freeze({ status: SUBSCRIPTION_STATUSES.DISABLED, pendingMode: null }),
+    ]),
+  }),
+});
+
+function getDispatchModeContract(mode) {
+  const contract = DISPATCH_MODE_CONTRACTS[mode];
+  if (!contract) {
+    throw subscriptionInputError("dispatch mode is invalid", { fieldName: "mode" });
+  }
+  return contract;
+}
+
+async function claimCodeClipYouTubeWebSubDispatch(
+  mode,
   callbackId,
   { attemptId, leaseSeconds, staleAfterSeconds, nowEpochMs, queryClient } = {}
 ) {
   const client = requireQueryClient(queryClient);
+  const contract = getDispatchModeContract(mode);
   const normalizedCallbackId = normalizeCallbackId(callbackId);
   const normalizedAttemptId = normalizeDispatchAttemptId(attemptId);
   const normalizedStaleAfterSeconds = normalizeDispatchStaleAfterSeconds(staleAfterSeconds);
@@ -617,10 +655,10 @@ async function claimCodeClipYouTubeWebSubSubscribeDispatch(
                 ELSE 0
               END,
             'status', 'started',
-            'mode', 'subscribe',
+            'mode', $6::text,
             'startedAt', NOW(),
             'staleAfterEpochMs',
-              FLOOR(EXTRACT(EPOCH FROM NOW()) * 1000)::bigint + ($4::integer * 1000),
+            FLOOR(EXTRACT(EPOCH FROM NOW()) * 1000)::bigint + ($4::integer * 1000),
             'requestedLeaseSeconds', $3::integer,
             'retryEligible', false
           ),
@@ -631,15 +669,15 @@ async function claimCodeClipYouTubeWebSubSubscribeDispatch(
         AND vertical = 'codeclip'
         AND provider = 'youtube'
         AND channel = 'youtube'
-        AND status = 'pending_subscribe'
-        AND pending_mode = 'subscribe'
+        AND status = $7
+        AND pending_mode = $8
         AND (
           NOT (metadata ? 'dispatch')
           OR metadata->'dispatch' = 'null'::jsonb
           OR (
             jsonb_typeof(metadata->'dispatch') = 'object'
             AND metadata->'dispatch'->>'status' = 'failed'
-            AND metadata->'dispatch'->>'mode' = 'subscribe'
+            AND metadata->'dispatch'->>'mode' = $6
             AND metadata->'dispatch'->>'retryEligible' = 'true'
             AND jsonb_typeof(metadata->'dispatch'->'attemptNumber') = 'number'
             AND (metadata->'dispatch'->>'attemptNumber') ~ '^[0-9]{1,9}$'
@@ -648,7 +686,7 @@ async function claimCodeClipYouTubeWebSubSubscribeDispatch(
           OR (
             jsonb_typeof(metadata->'dispatch') = 'object'
             AND metadata->'dispatch'->>'status' = 'started'
-            AND metadata->'dispatch'->>'mode' = 'subscribe'
+            AND metadata->'dispatch'->>'mode' = $6
             AND jsonb_typeof(metadata->'dispatch'->'attemptNumber') = 'number'
             AND (metadata->'dispatch'->>'attemptNumber') ~ '^[0-9]{1,9}$'
             AND (metadata->'dispatch'->>'attemptNumber')::bigint < 2147483647
@@ -666,16 +704,21 @@ async function claimCodeClipYouTubeWebSubSubscribeDispatch(
       requestedLeaseSeconds,
       normalizedStaleAfterSeconds,
       comparisonEpochMs,
+      mode,
+      contract.status,
+      contract.pendingMode,
     ]
   );
   return mapSubscriptionRow(result.rows?.[0] || null);
 }
 
-async function recordCodeClipYouTubeWebSubSubscribeDispatchResult(
+async function recordCodeClipYouTubeWebSubDispatchResult(
+  mode,
   callbackId,
   { attemptId, resultCode, hubHttpStatus, retryable, queryClient } = {}
 ) {
   const client = requireQueryClient(queryClient);
+  const contract = getDispatchModeContract(mode);
   const normalizedCallbackId = normalizeCallbackId(callbackId);
   const normalizedAttemptId = normalizeDispatchAttemptId(attemptId);
   const normalizedResultCode = normalizeResultCode(resultCode || "hub_request_failed");
@@ -695,7 +738,7 @@ async function recordCodeClipYouTubeWebSubSubscribeDispatchResult(
           jsonb_build_object(
             'attemptId', $2::text,
             'status', $3::text,
-            'mode', 'subscribe',
+            'mode', $7::text,
             'resultCode', $4::text,
             'hubHttpStatus', $5::integer,
             'retryEligible', $6::boolean,
@@ -712,10 +755,11 @@ async function recordCodeClipYouTubeWebSubSubscribeDispatchResult(
         AND jsonb_typeof(metadata->'dispatch') = 'object'
         AND metadata->'dispatch'->>'attemptId' = $2
         AND metadata->'dispatch'->>'status' = 'started'
-        AND metadata->'dispatch'->>'mode' = 'subscribe'
+        AND metadata->'dispatch'->>'mode' = $7
         AND (
-          (status = 'pending_subscribe' AND pending_mode = 'subscribe')
-          OR (status = 'active' AND pending_mode IS NULL)
+          (status = $8 AND pending_mode = $9)
+          OR (status = $10 AND pending_mode IS NOT DISTINCT FROM $11)
+          OR (status = $12 AND pending_mode IS NOT DISTINCT FROM $13)
         )
       RETURNING *
     `,
@@ -726,9 +770,40 @@ async function recordCodeClipYouTubeWebSubSubscribeDispatchResult(
       normalizedResultCode,
       normalizedHubHttpStatus,
       retryEligible,
+      mode,
+      contract.resultStates[0].status,
+      contract.resultStates[0].pendingMode,
+      contract.resultStates[1]?.status || "__never__",
+      contract.resultStates[1]?.pendingMode ?? null,
+      contract.resultStates[2]?.status || "__never__",
+      contract.resultStates[2]?.pendingMode ?? null,
     ]
   );
   return mapSubscriptionRow(result.rows?.[0] || null);
+}
+
+async function claimCodeClipYouTubeWebSubSubscribeDispatch(callbackId, options = {}) {
+  return claimCodeClipYouTubeWebSubDispatch("subscribe", callbackId, options);
+}
+
+async function recordCodeClipYouTubeWebSubSubscribeDispatchResult(callbackId, options = {}) {
+  return recordCodeClipYouTubeWebSubDispatchResult("subscribe", callbackId, options);
+}
+
+async function claimCodeClipYouTubeWebSubRenewDispatch(callbackId, options = {}) {
+  return claimCodeClipYouTubeWebSubDispatch("renew", callbackId, options);
+}
+
+async function recordCodeClipYouTubeWebSubRenewDispatchResult(callbackId, options = {}) {
+  return recordCodeClipYouTubeWebSubDispatchResult("renew", callbackId, options);
+}
+
+async function claimCodeClipYouTubeWebSubUnsubscribeDispatch(callbackId, options = {}) {
+  return claimCodeClipYouTubeWebSubDispatch("unsubscribe", callbackId, options);
+}
+
+async function recordCodeClipYouTubeWebSubUnsubscribeDispatchResult(callbackId, options = {}) {
+  return recordCodeClipYouTubeWebSubDispatchResult("unsubscribe", callbackId, options);
 }
 
 async function getOpenCodeClipYouTubeWebSubSubscriptionByProviderAccountId(
@@ -1013,7 +1088,9 @@ module.exports = {
   CodeClipYouTubeWebSubSubscriptionError,
   PENDING_MODES,
   SUBSCRIPTION_STATUSES,
+  claimCodeClipYouTubeWebSubRenewDispatch,
   claimCodeClipYouTubeWebSubSubscribeDispatch,
+  claimCodeClipYouTubeWebSubUnsubscribeDispatch,
   createPendingCodeClipYouTubeWebSubSubscription,
   disableCodeClipYouTubeWebSubSubscription,
   getCodeClipYouTubeWebSubSubscriptionByCallbackId,
@@ -1028,7 +1105,9 @@ module.exports = {
   markCodeClipYouTubeWebSubSubscriptionVerified,
   normalizeCallbackId,
   normalizeSubscriptionInput,
+  recordCodeClipYouTubeWebSubRenewDispatchResult,
   recordCodeClipYouTubeWebSubSubscribeDispatchResult,
+  recordCodeClipYouTubeWebSubUnsubscribeDispatchResult,
   recordCodeClipYouTubeWebSubSubscriptionAudit,
   recordCodeClipYouTubeWebSubFirstActivatedVideo,
   toInternalCodeClipYouTubeWebSubSubscription,

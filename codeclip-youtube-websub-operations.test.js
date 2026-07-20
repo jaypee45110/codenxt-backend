@@ -81,6 +81,53 @@ function baseOptions(overrides = {}) {
     hubResult: { ok: true, code: "hub_request_accepted", status: 202, mode: "subscribe" },
     ...overrides.state,
   };
+  const claimDispatch = async (mode, callbackId, input) => {
+    state.calls.push(["claimDispatch", mode, callbackId, input]);
+    if (state.claimResult === null) return null;
+    const base = state.claimResult || state.created || state.existingByAccount || state.existingByCallback || subscription({ callbackId });
+    const claimed = subscription({
+      ...base,
+      callbackId,
+      metadata: {
+        ...(base.metadata || {}),
+        dispatch: {
+          attemptId: input.attemptId,
+          attemptNumber: 1,
+          status: "started",
+          mode,
+          startedAt: "2026-07-18T00:00:01.000Z",
+          requestedLeaseSeconds: input.leaseSeconds,
+          retryEligible: false,
+        },
+      },
+    });
+    state.claimed = claimed;
+    return claimed;
+  };
+  const recordDispatch = async (mode, callbackId, input) => {
+    state.calls.push(["recordDispatch", mode, callbackId, input]);
+    if (state.recordResult === null) return null;
+    const base = state.recordResult || state.claimed || state.created || state.existingByAccount || state.existingByCallback || subscription({ callbackId });
+    const recorded = subscription({
+      ...base,
+      callbackId,
+      metadata: {
+        ...(base.metadata || {}),
+        dispatch: {
+          ...((base.metadata || {}).dispatch || {}),
+          attemptId: input.attemptId,
+          status: input.resultCode === "hub_request_accepted" ? "accepted" : "failed",
+          mode,
+          resultCode: input.resultCode,
+          hubHttpStatus: input.hubHttpStatus,
+          retryEligible: input.retryable === true,
+          completedAt: "2026-07-18T00:00:02.000Z",
+        },
+      },
+    });
+    state.recorded = recorded;
+    return recorded;
+  };
   return {
     state,
     options: {
@@ -165,53 +212,14 @@ function baseOptions(overrides = {}) {
         state.calls.push(["hub", input]);
         return state.hubResult;
       },
-      claimSubscribeDispatch: async (callbackId, input) => {
-        state.calls.push(["claimDispatch", callbackId, input]);
-        if (state.claimResult === null) return null;
-        const base = state.claimResult || state.created || state.existingByAccount || subscription({ callbackId });
-        const claimed = subscription({
-          ...base,
-          callbackId,
-          metadata: {
-            ...(base.metadata || {}),
-            dispatch: {
-              attemptId: input.attemptId,
-              attemptNumber: 1,
-              status: "started",
-              mode: "subscribe",
-              startedAt: "2026-07-18T00:00:01.000Z",
-              requestedLeaseSeconds: input.leaseSeconds,
-              retryEligible: false,
-            },
-          },
-        });
-        state.claimed = claimed;
-        return claimed;
-      },
-      recordSubscribeDispatchResult: async (callbackId, input) => {
-        state.calls.push(["recordDispatch", callbackId, input]);
-        if (state.recordResult === null) return null;
-        const base = state.recordResult || state.claimed || state.created || state.existingByAccount || subscription({ callbackId });
-        const recorded = subscription({
-          ...base,
-          callbackId,
-          metadata: {
-            ...(base.metadata || {}),
-            dispatch: {
-              ...((base.metadata || {}).dispatch || {}),
-              attemptId: input.attemptId,
-              status: input.resultCode === "hub_request_accepted" ? "accepted" : "failed",
-              mode: "subscribe",
-              resultCode: input.resultCode,
-              hubHttpStatus: input.hubHttpStatus,
-              retryEligible: input.retryable === true,
-              completedAt: "2026-07-18T00:00:02.000Z",
-            },
-          },
-        });
-        state.recorded = recorded;
-        return recorded;
-      },
+      claimDispatch,
+      recordDispatch,
+      claimSubscribeDispatch: async (callbackId, input) => claimDispatch("subscribe", callbackId, input),
+      recordSubscribeDispatchResult: async (callbackId, input) => recordDispatch("subscribe", callbackId, input),
+      claimRenewDispatch: async (callbackId, input) => claimDispatch("renew", callbackId, input),
+      recordRenewDispatchResult: async (callbackId, input) => recordDispatch("renew", callbackId, input),
+      claimUnsubscribeDispatch: async (callbackId, input) => claimDispatch("unsubscribe", callbackId, input),
+      recordUnsubscribeDispatchResult: async (callbackId, input) => recordDispatch("unsubscribe", callbackId, input),
       recordAudit: async (input) => {
         state.calls.push(["audit", input]);
         if (
@@ -255,13 +263,15 @@ test("YouTube WebSub create validates episode and binding, creates pending recor
   assert.equal(createCall.metadata.requestedLeaseSeconds, 864000);
   const claimCall = state.calls.find((call) => call[0] === "claimDispatch");
   const recordCall = state.calls.find((call) => call[0] === "recordDispatch");
-  assert.equal(claimCall[1], "yt_callback_1");
-  assert.equal(claimCall[2].attemptId, "attempt_1");
-  assert.equal(claimCall[2].leaseSeconds, 864000);
-  assert.equal(recordCall[1], "yt_callback_1");
-  assert.equal(recordCall[2].attemptId, "attempt_1");
-  assert.equal(recordCall[2].resultCode, "hub_request_accepted");
-  assert.equal(recordCall[2].retryable, false);
+  assert.equal(claimCall[1], "subscribe");
+  assert.equal(claimCall[2], "yt_callback_1");
+  assert.equal(claimCall[3].attemptId, "attempt_1");
+  assert.equal(claimCall[3].leaseSeconds, 864000);
+  assert.equal(recordCall[1], "subscribe");
+  assert.equal(recordCall[2], "yt_callback_1");
+  assert.equal(recordCall[3].attemptId, "attempt_1");
+  assert.equal(recordCall[3].resultCode, "hub_request_accepted");
+  assert.equal(recordCall[3].retryable, false);
   assert.equal(hubCall.mode, "subscribe");
   assert.equal(hubCall.callbackUrl, buildCallbackUrl("https://backend.example.test", "yt_callback_1"));
   assert.equal(hubCall.topic, buildTopic(CHANNEL_ID));
@@ -497,8 +507,9 @@ test("YouTube WebSub outbound subscribe failure leaves local status pending and 
   assert.equal(state.auditRows[1].retryable, true);
   assert.equal(state.auditRows[1].resultCode, "hub_request_timeout");
   const recordCall = state.calls.find((call) => call[0] === "recordDispatch");
-  assert.equal(recordCall[2].resultCode, "hub_request_timeout");
-  assert.equal(recordCall[2].retryable, true);
+  assert.equal(recordCall[1], "subscribe");
+  assert.equal(recordCall[3].resultCode, "hub_request_timeout");
+  assert.equal(recordCall[3].retryable, true);
   assert.equal(result.subscription.lastOperation.status, "failed");
   assert.equal(result.subscription.lastOperation.retryEligible, true);
 });
@@ -524,10 +535,11 @@ test("YouTube WebSub non-retryable subscribe failure records non-retryable faile
   assert.equal(result.code, "hub_request_rejected");
   assert.equal(result.retryable, false);
   const recordCall = state.calls.find((call) => call[0] === "recordDispatch");
-  assert.equal(recordCall[2].attemptId, "attempt_1");
-  assert.equal(recordCall[2].resultCode, "hub_request_rejected");
-  assert.equal(recordCall[2].hubHttpStatus, 400);
-  assert.equal(recordCall[2].retryable, false);
+  assert.equal(recordCall[1], "subscribe");
+  assert.equal(recordCall[3].attemptId, "attempt_1");
+  assert.equal(recordCall[3].resultCode, "hub_request_rejected");
+  assert.equal(recordCall[3].hubHttpStatus, 400);
+  assert.equal(recordCall[3].retryable, false);
   assert.equal(result.subscription.lastOperation.status, "failed");
   assert.equal(result.subscription.lastOperation.retryEligible, false);
 });
@@ -814,10 +826,93 @@ test("YouTube WebSub renew preserves boundary and keeps status pending until cha
   assert.equal(result.subscription.status, "pending_renewal");
   assert.equal(result.subscription.activationBoundaryAt, "2026-07-18T00:00:00.000Z");
   assert.equal(state.calls.find((call) => call[0] === "hub")[1].mode, "subscribe");
+  assert.equal(state.calls.find((call) => call[0] === "claimDispatch")[1], "renew");
+  assert.equal(state.calls.find((call) => call[0] === "recordDispatch")[1], "renew");
   assert.deepEqual(state.auditRows.map((row) => row.action), [
     "renewal_requested",
     "hub_request_accepted",
   ]);
+  assert.deepEqual(state.auditRows.map((row) => row.mode), ["renew", "renew"]);
+});
+
+test("YouTube WebSub renew duplicate, retry, stale and failure dispatch states are handled", async () => {
+  const activeClaim = baseOptions({
+    state: {
+      existingByCallback: subscription({ status: "pending_renewal", pendingMode: "subscribe" }),
+      claimResult: null,
+    },
+  });
+  const activeClaimResult = await renewCodeClipYouTubeWebSubSubscriptionOperation(
+    "yt_callback_1",
+    {},
+    activeClaim.options
+  );
+  assert.equal(activeClaimResult.ok, true);
+  assert.equal(activeClaimResult.code, "renewal_pending");
+  assert.equal(activeClaimResult.dispatchClaimed, false);
+  assert.equal(activeClaim.state.calls.some((call) => call[0] === "hub"), false);
+
+  for (const dispatch of [
+    { status: "failed", mode: "renew", retryEligible: true, attemptNumber: 1 },
+    { status: "started", mode: "renew", retryEligible: false, attemptNumber: 1, staleAfterEpochMs: 1 },
+  ]) {
+    const retryable = baseOptions({
+      state: {
+        existingByCallback: subscription({
+          status: "pending_renewal",
+          pendingMode: "subscribe",
+          metadata: { dispatch },
+        }),
+      },
+    });
+    const result = await renewCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, retryable.options);
+    assert.equal(result.ok, true);
+    assert.equal(result.dispatchClaimed, true);
+    assert.equal(retryable.state.calls.filter((call) => call[0] === "hub").length, 1);
+  }
+
+  const retryableFailure = baseOptions({
+    state: {
+      existingByCallback: subscription({ status: "active", pendingMode: null }),
+      hubResult: { ok: false, code: "hub_request_timeout", status: 0, mode: "subscribe" },
+    },
+  });
+  const retryableResult = await renewCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, retryableFailure.options);
+  assert.equal(retryableResult.ok, false);
+  assert.equal(retryableResult.retryable, true);
+  assert.equal(retryableFailure.state.calls.find((call) => call[0] === "recordDispatch")[1], "renew");
+  assert.equal(retryableFailure.state.calls.find((call) => call[0] === "recordDispatch")[3].retryable, true);
+
+  const rejectedFailure = baseOptions({
+    state: {
+      existingByCallback: subscription({ status: "active", pendingMode: null }),
+      hubResult: { ok: false, code: "hub_request_rejected", status: 400, retryable: false, mode: "subscribe" },
+    },
+  });
+  const rejectedResult = await renewCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, rejectedFailure.options);
+  assert.equal(rejectedResult.ok, false);
+  assert.equal(rejectedResult.retryable, false);
+  assert.equal(rejectedFailure.state.calls.find((call) => call[0] === "recordDispatch")[3].retryable, false);
+});
+
+test("YouTube WebSub renew callback race preserves active state and lastOperation mode", async () => {
+  const activeAfterCallback = baseOptions({
+    state: {
+      existingByCallback: subscription({ status: "active", pendingMode: null }),
+      recordResult: subscription({
+        status: "active",
+        pendingMode: null,
+        leaseStartedAt: "2026-07-18T00:00:00.000Z",
+        leaseExpiresAt: "2026-07-28T00:00:00.000Z",
+      }),
+    },
+  });
+  const result = await renewCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, activeAfterCallback.options);
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "active");
+  assert.equal(result.subscription.status, "active");
+  assert.equal(result.subscription.lastOperation.mode, "renew");
+  assert.equal(result.subscription.lastOperation.status, "accepted");
 });
 
 test("YouTube WebSub renew rejects pending unsubscribe lifecycle", async () => {
@@ -844,11 +939,89 @@ test("YouTube WebSub unsubscribe marks pending and leaves binding lifecycle unto
   assert.equal(result.code, "unsubscribe_pending");
   assert.equal(result.subscription.status, "pending_unsubscribe");
   assert.equal(state.calls.find((call) => call[0] === "hub")[1].mode, "unsubscribe");
+  assert.equal(state.calls.find((call) => call[0] === "claimDispatch")[1], "unsubscribe");
+  assert.equal(state.calls.find((call) => call[0] === "recordDispatch")[1], "unsubscribe");
   assert.equal(state.calls.some((call) => call[0] === "binding"), false);
   assert.deepEqual(state.auditRows.map((row) => row.action), [
     "unsubscribe_requested",
     "hub_request_accepted",
   ]);
+  assert.deepEqual(state.auditRows.map((row) => row.mode), ["unsubscribe", "unsubscribe"]);
+});
+
+test("YouTube WebSub unsubscribe duplicate, retry, stale and failure dispatch states are handled", async () => {
+  const activeClaim = baseOptions({
+    state: {
+      existingByCallback: subscription({ status: "pending_unsubscribe", pendingMode: "unsubscribe" }),
+      claimResult: null,
+    },
+  });
+  const activeClaimResult = await unsubscribeCodeClipYouTubeWebSubSubscriptionOperation(
+    "yt_callback_1",
+    {},
+    activeClaim.options
+  );
+  assert.equal(activeClaimResult.ok, true);
+  assert.equal(activeClaimResult.code, "unsubscribe_pending");
+  assert.equal(activeClaimResult.dispatchClaimed, false);
+  assert.equal(activeClaim.state.calls.some((call) => call[0] === "hub"), false);
+
+  for (const dispatch of [
+    { status: "failed", mode: "unsubscribe", retryEligible: true, attemptNumber: 1 },
+    { status: "started", mode: "unsubscribe", retryEligible: false, attemptNumber: 1, staleAfterEpochMs: 1 },
+  ]) {
+    const retryable = baseOptions({
+      state: {
+        existingByCallback: subscription({
+          status: "pending_unsubscribe",
+          pendingMode: "unsubscribe",
+          metadata: { dispatch },
+        }),
+      },
+    });
+    const result = await unsubscribeCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, retryable.options);
+    assert.equal(result.ok, true);
+    assert.equal(result.dispatchClaimed, true);
+    assert.equal(retryable.state.calls.filter((call) => call[0] === "hub").length, 1);
+  }
+
+  const retryableFailure = baseOptions({
+    state: {
+      existingByCallback: subscription({ status: "active", pendingMode: null }),
+      hubResult: { ok: false, code: "hub_request_timeout", status: 0, mode: "unsubscribe" },
+    },
+  });
+  const retryableResult = await unsubscribeCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, retryableFailure.options);
+  assert.equal(retryableResult.ok, false);
+  assert.equal(retryableResult.retryable, true);
+  assert.equal(retryableFailure.state.calls.find((call) => call[0] === "recordDispatch")[1], "unsubscribe");
+  assert.equal(retryableFailure.state.calls.find((call) => call[0] === "recordDispatch")[3].retryable, true);
+
+  const rejectedFailure = baseOptions({
+    state: {
+      existingByCallback: subscription({ status: "active", pendingMode: null }),
+      hubResult: { ok: false, code: "hub_request_rejected", status: 400, retryable: false, mode: "unsubscribe" },
+    },
+  });
+  const rejectedResult = await unsubscribeCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, rejectedFailure.options);
+  assert.equal(rejectedResult.ok, false);
+  assert.equal(rejectedResult.retryable, false);
+  assert.equal(rejectedFailure.state.calls.find((call) => call[0] === "recordDispatch")[3].retryable, false);
+});
+
+test("YouTube WebSub unsubscribe callback race preserves terminal state and lastOperation mode", async () => {
+  const unsubscribedAfterCallback = baseOptions({
+    state: {
+      existingByCallback: subscription({ status: "active", pendingMode: null }),
+      recordResult: subscription({ status: "unsubscribed", pendingMode: null }),
+    },
+  });
+  const result = await unsubscribeCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, unsubscribedAfterCallback.options);
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "unsubscribed");
+  assert.equal(result.subscription.status, "unsubscribed");
+  assert.equal(result.subscription.lastOperation.mode, "unsubscribe");
+  assert.equal(result.subscription.lastOperation.status, "accepted");
 });
 
 test("YouTube WebSub status helpers return public-safe subscription fields", async () => {

@@ -14,7 +14,9 @@ const {
 const {
   PENDING_MODES,
   SUBSCRIPTION_STATUSES,
+  claimCodeClipYouTubeWebSubRenewDispatch,
   claimCodeClipYouTubeWebSubSubscribeDispatch,
+  claimCodeClipYouTubeWebSubUnsubscribeDispatch,
   createPendingCodeClipYouTubeWebSubSubscription,
   getCodeClipYouTubeWebSubSubscriptionByCallbackId,
   getCodeClipYouTubeWebSubSubscriptionByProviderAccountId,
@@ -23,7 +25,9 @@ const {
   markCodeClipYouTubeWebSubSubscriptionRenewalPending,
   markCodeClipYouTubeWebSubSubscriptionUnsubscribePending,
   normalizeCallbackId,
+  recordCodeClipYouTubeWebSubRenewDispatchResult,
   recordCodeClipYouTubeWebSubSubscribeDispatchResult,
+  recordCodeClipYouTubeWebSubUnsubscribeDispatchResult,
   recordCodeClipYouTubeWebSubSubscriptionAudit,
   toInternalCodeClipYouTubeWebSubSubscription,
 } = require("./youtube-websub-subscriptions");
@@ -326,10 +330,12 @@ async function auditHubResult({
   subscription,
   eventCode,
   mode,
+  operationMode,
   hubResult,
   queryClient,
   recordAudit,
 }) {
+  const auditMode = operationMode || mode;
   try {
     await recordSubscriptionAudit(
       {
@@ -337,7 +343,7 @@ async function auditHubResult({
         providerAccountId: subscription.providerAccountId,
         eventCode,
         action: hubResult.ok ? "hub_request_accepted" : "hub_request_failed",
-        mode,
+        mode: auditMode,
         resultCode: hubResult.code,
         hubHttpStatus: hubResult.status || null,
         retryable: hubResult.retryable === undefined ? !hubResult.ok : Boolean(hubResult.retryable),
@@ -352,7 +358,7 @@ async function auditHubResult({
     console.warn("codeClip YouTube WebSub subscription audit failed", {
       vertical: "codeclip",
       provider: "youtube",
-      operation: mode,
+      operation: auditMode,
       auditAction: hubResult.ok ? "hub_request_accepted" : "hub_request_failed",
       error: error?.name || "Error",
     });
@@ -368,7 +374,35 @@ function isRetryableHubResult(hubResult = {}) {
   return status >= 500 && status <= 599;
 }
 
-async function runSubscribeDispatch({
+const DISPATCH_OPERATIONS = Object.freeze({
+  subscribe: Object.freeze({
+    hubMode: "subscribe",
+    successCode: "subscription_pending",
+    claimOption: "claimSubscribeDispatch",
+    recordOption: "recordSubscribeDispatchResult",
+    claim: claimCodeClipYouTubeWebSubSubscribeDispatch,
+    record: recordCodeClipYouTubeWebSubSubscribeDispatchResult,
+  }),
+  renew: Object.freeze({
+    hubMode: "subscribe",
+    successCode: "renewal_pending",
+    claimOption: "claimRenewDispatch",
+    recordOption: "recordRenewDispatchResult",
+    claim: claimCodeClipYouTubeWebSubRenewDispatch,
+    record: recordCodeClipYouTubeWebSubRenewDispatchResult,
+  }),
+  unsubscribe: Object.freeze({
+    hubMode: "unsubscribe",
+    successCode: "unsubscribe_pending",
+    claimOption: "claimUnsubscribeDispatch",
+    recordOption: "recordUnsubscribeDispatchResult",
+    claim: claimCodeClipYouTubeWebSubUnsubscribeDispatch,
+    record: recordCodeClipYouTubeWebSubUnsubscribeDispatchResult,
+  }),
+});
+
+async function runLifecycleDispatch({
+  dispatchMode,
   subscription,
   eventCode,
   leaseSeconds,
@@ -377,9 +411,13 @@ async function runSubscribeDispatch({
   queryClient,
   options = {},
 }) {
+  const operation = DISPATCH_OPERATIONS[dispatchMode];
+  if (!operation) {
+    throw operationError("validation_error", "YouTube WebSub dispatch mode is invalid");
+  }
   const attemptId = (options.generateDispatchAttemptId || buildDispatchAttemptId)();
   const claim = await (
-    options.claimSubscribeDispatch || claimCodeClipYouTubeWebSubSubscribeDispatch
+    options[operation.claimOption] || operation.claim
   )(
     subscription.callbackId,
     {
@@ -394,7 +432,7 @@ async function runSubscribeDispatch({
   if (!claim) {
     return {
       ok: true,
-      code: "subscription_pending",
+      code: operation.successCode,
       status: subscription.status,
       dispatchClaimed: false,
       subscription: toPublicSubscriptionStatus(subscription),
@@ -405,11 +443,11 @@ async function runSubscribeDispatch({
   try {
     const derivedSecret = deriveSubscriptionSecret({ rootSecret, subscription: claim });
     hubResult = await (options.requestSubscription || requestSubscription)({
-      mode: "subscribe",
+      mode: operation.hubMode,
       callbackUrl: buildCallbackUrl(publicBaseUrl, claim.callbackId),
       topic: claim.topic,
       secret: derivedSecret,
-      leaseSeconds,
+      ...(operation.hubMode === "subscribe" ? { leaseSeconds } : {}),
       fetchImpl: options.fetchImpl,
       timeoutMs: options.timeoutMs,
     });
@@ -419,14 +457,14 @@ async function runSubscribeDispatch({
       code: "hub_request_failed",
       status: 0,
       retryable: true,
-      mode: "subscribe",
+      mode: operation.hubMode,
     };
   }
 
   const retryable = isRetryableHubResult(hubResult);
   hubResult = { ...hubResult, retryable };
   const recorded = await (
-    options.recordSubscribeDispatchResult || recordCodeClipYouTubeWebSubSubscribeDispatchResult
+    options[operation.recordOption] || operation.record
   )(
     claim.callbackId,
     {
@@ -442,7 +480,8 @@ async function runSubscribeDispatch({
   await auditHubResult({
     subscription: resultSubscription,
     eventCode,
-    mode: "subscribe",
+    operationMode: dispatchMode,
+    mode: operation.hubMode,
     hubResult,
     queryClient,
     recordAudit: options.recordAudit,
@@ -461,11 +500,23 @@ async function runSubscribeDispatch({
 
   return {
     ok: true,
-    code: "subscription_pending",
+    code: operation.successCode,
     status: resultSubscription.status,
     dispatchClaimed: true,
     subscription: toPublicSubscriptionStatus(resultSubscription),
   };
+}
+
+async function runSubscribeDispatch(options) {
+  return runLifecycleDispatch({ ...options, dispatchMode: "subscribe" });
+}
+
+async function runRenewDispatch(options) {
+  return runLifecycleDispatch({ ...options, dispatchMode: "renew" });
+}
+
+async function runUnsubscribeDispatch(options) {
+  return runLifecycleDispatch({ ...options, dispatchMode: "unsubscribe" });
 }
 
 async function resolveEligibleBindingAndEpisode({
@@ -670,7 +721,7 @@ async function renewCodeClipYouTubeWebSubSubscriptionOperation(callbackId, input
         callbackId: updated.callbackId,
         providerAccountId: updated.providerAccountId,
         action: "renewal_requested",
-        mode: "subscribe",
+        mode: "renew",
         resultCode: "renewal_pending",
         retryable: false,
         metadata: {
@@ -684,38 +735,15 @@ async function renewCodeClipYouTubeWebSubSubscriptionOperation(callbackId, input
     );
     return updated;
   });
-  const derivedSecret = deriveSubscriptionSecret({ rootSecret, subscription: pending });
-  const hubResult = await (options.requestSubscription || requestSubscription)({
-    mode: "subscribe",
-    callbackUrl: buildCallbackUrl(publicBaseUrl, pending.callbackId),
-    topic: pending.topic,
-    secret: derivedSecret,
-    leaseSeconds,
-    fetchImpl: options.fetchImpl,
-    timeoutMs: options.timeoutMs,
-  });
-  await auditHubResult({
+
+  return runRenewDispatch({
     subscription: pending,
-    mode: "subscribe",
-    hubResult,
+    leaseSeconds,
+    rootSecret,
+    publicBaseUrl,
     queryClient,
-    recordAudit: options.recordAudit,
+    options,
   });
-  if (!hubResult.ok) {
-    return {
-      ok: false,
-      code: hubResult.code,
-      status: pending.status,
-      retryable: true,
-      subscription: toPublicSubscriptionStatus(pending),
-    };
-  }
-  return {
-    ok: true,
-    code: "renewal_pending",
-    status: pending.status,
-    subscription: toPublicSubscriptionStatus(pending),
-  };
 }
 
 async function unsubscribeCodeClipYouTubeWebSubSubscriptionOperation(callbackId, input = {}, options = {}) {
@@ -760,37 +788,14 @@ async function unsubscribeCodeClipYouTubeWebSubSubscriptionOperation(callbackId,
     );
     return updated;
   });
-  const derivedSecret = deriveSubscriptionSecret({ rootSecret, subscription: pending });
-  const hubResult = await (options.requestSubscription || requestSubscription)({
-    mode: "unsubscribe",
-    callbackUrl: buildCallbackUrl(publicBaseUrl, pending.callbackId),
-    topic: pending.topic,
-    secret: derivedSecret,
-    fetchImpl: options.fetchImpl,
-    timeoutMs: options.timeoutMs,
-  });
-  await auditHubResult({
+
+  return runUnsubscribeDispatch({
     subscription: pending,
-    mode: "unsubscribe",
-    hubResult,
+    rootSecret,
+    publicBaseUrl,
     queryClient,
-    recordAudit: options.recordAudit,
+    options,
   });
-  if (!hubResult.ok) {
-    return {
-      ok: false,
-      code: hubResult.code,
-      status: pending.status,
-      retryable: true,
-      subscription: toPublicSubscriptionStatus(pending),
-    };
-  }
-  return {
-    ok: true,
-    code: "unsubscribe_pending",
-    status: pending.status,
-    subscription: toPublicSubscriptionStatus(pending),
-  };
 }
 
 async function listCodeClipYouTubeWebSubSubscriptionStatuses(filters = {}, options = {}) {
