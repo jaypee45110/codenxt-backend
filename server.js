@@ -74,10 +74,18 @@ database.ensureCodePodKeywordInteractionsTable().catch((error) => {
 async function initializeCodeClipStartup({
   databaseClient = database,
 } = {}) {
+  await databaseClient.ensureCampaignsTable();
+  await databaseClient.ensureEventScansTable();
+  await databaseClient.ensureEventRegistrationsTable();
+  await databaseClient.ensureCodeClipInteractionsTable();
+  await databaseClient.ensureCodeClipRewardAssignmentsTable();
+  await databaseClient.ensureCodeClipXtraRedemptionsTable();
+  await databaseClient.ensureCodeClipOutboxEventsTable();
   await databaseClient.ensureCodeClipProviderAccountBindingsTable();
+  await databaseClient.ensureCodeClipProviderAccountBindingAuditTable();
+  await databaseClient.ensureCodeClipProviderDeliveriesTable();
   await databaseClient.ensureCodeClipYouTubeWebSubSubscriptionsTable();
   await databaseClient.ensureCodeClipYouTubeOAuthStatesTable();
-  await databaseClient.ensureCodeClipProviderAccountBindingAuditTable();
 }
 
 function parsePositiveInteger(value, fallback) {

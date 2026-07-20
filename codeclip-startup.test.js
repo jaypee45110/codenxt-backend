@@ -7,7 +7,39 @@ const {
   startBackendServer,
 } = require("./server");
 
-test("codeClip startup initializes provider account binding schema before listen", async () => {
+const CODECLIP_STARTUP_ENSURES = [
+  ["ensureCampaignsTable", "ensure-campaigns"],
+  ["ensureEventScansTable", "ensure-event-scans"],
+  ["ensureEventRegistrationsTable", "ensure-event-registrations"],
+  ["ensureCodeClipInteractionsTable", "ensure-codeclip-interactions"],
+  ["ensureCodeClipRewardAssignmentsTable", "ensure-codeclip-reward-assignments"],
+  ["ensureCodeClipXtraRedemptionsTable", "ensure-codeclip-clipxtra-redemptions"],
+  ["ensureCodeClipOutboxEventsTable", "ensure-codeclip-outbox"],
+  ["ensureCodeClipProviderAccountBindingsTable", "ensure-codeclip-provider-bindings"],
+  ["ensureCodeClipProviderAccountBindingAuditTable", "ensure-codeclip-provider-binding-audit"],
+  ["ensureCodeClipProviderDeliveriesTable", "ensure-codeclip-provider-deliveries"],
+  ["ensureCodeClipYouTubeWebSubSubscriptionsTable", "ensure-codeclip-youtube-websub-subscriptions"],
+  ["ensureCodeClipYouTubeOAuthStatesTable", "ensure-codeclip-youtube-oauth-states"],
+];
+
+const EXPECTED_CODECLIP_STARTUP_EVENTS = CODECLIP_STARTUP_ENSURES.map(([, label]) => label);
+
+function createCodeClipStartupDatabaseClient(events, { failAt } = {}) {
+  const client = {};
+
+  for (const [methodName, label] of CODECLIP_STARTUP_ENSURES) {
+    client[methodName] = async () => {
+      events.push(label);
+      if (methodName === failAt) {
+        throw new Error(`${label} schema unavailable`);
+      }
+    };
+  }
+
+  return client;
+}
+
+test("codeClip startup initializes every active schema before listen", async () => {
   const events = [];
   const originalListen = app.listen;
   const fakeServer = { close() {} };
@@ -20,28 +52,12 @@ test("codeClip startup initializes provider account binding schema before listen
   try {
     const server = await startBackendServer({
       port: 0,
-      databaseClient: {
-        async ensureCodeClipProviderAccountBindingsTable() {
-          events.push("ensure-bindings");
-        },
-        async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
-          events.push("ensure-youtube-websub-subscriptions");
-        },
-        async ensureCodeClipYouTubeOAuthStatesTable() {
-          events.push("ensure-youtube-oauth-states");
-        },
-        async ensureCodeClipProviderAccountBindingAuditTable() {
-          events.push("ensure-binding-audit");
-        },
-      },
+      databaseClient: createCodeClipStartupDatabaseClient(events),
     });
 
     assert.equal(server, fakeServer);
     assert.deepEqual(events, [
-      "ensure-bindings",
-      "ensure-youtube-websub-subscriptions",
-      "ensure-youtube-oauth-states",
-      "ensure-binding-audit",
+      ...EXPECTED_CODECLIP_STARTUP_EVENTS,
       "listen:0",
     ]);
   } finally {
@@ -49,186 +65,10 @@ test("codeClip startup initializes provider account binding schema before listen
   }
 });
 
-test("codeClip startup binding init failure prevents listen", async () => {
-  const events = [];
-  const originalListen = app.listen;
-
-  app.listen = () => {
-    events.push("listen");
-    throw new Error("listen should not be called");
-  };
-
-  try {
-    await assert.rejects(
-      () =>
-        startBackendServer({
-          port: 0,
-          databaseClient: {
-            async ensureCodeClipProviderAccountBindingsTable() {
-              events.push("ensure-bindings");
-              throw new Error("binding schema unavailable");
-            },
-            async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
-              events.push("ensure-youtube-websub-subscriptions");
-            },
-            async ensureCodeClipYouTubeOAuthStatesTable() {
-              events.push("ensure-youtube-oauth-states");
-            },
-            async ensureCodeClipProviderAccountBindingAuditTable() {
-              events.push("ensure-binding-audit");
-            },
-          },
-        }),
-      /binding schema unavailable/
-    );
-
-    assert.deepEqual(events, ["ensure-bindings"]);
-  } finally {
-    app.listen = originalListen;
-  }
-});
-
-test("codeClip startup YouTube WebSub init failure prevents audit init and listen", async () => {
-  const events = [];
-  const originalListen = app.listen;
-
-  app.listen = () => {
-    events.push("listen");
-    throw new Error("listen should not be called");
-  };
-
-  try {
-    await assert.rejects(
-      () =>
-        startBackendServer({
-          port: 0,
-          databaseClient: {
-            async ensureCodeClipProviderAccountBindingsTable() {
-              events.push("ensure-bindings");
-            },
-            async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
-              events.push("ensure-youtube-websub-subscriptions");
-              throw new Error("youtube websub subscription schema unavailable");
-            },
-            async ensureCodeClipYouTubeOAuthStatesTable() {
-              events.push("ensure-youtube-oauth-states");
-            },
-            async ensureCodeClipProviderAccountBindingAuditTable() {
-              events.push("ensure-binding-audit");
-            },
-          },
-        }),
-      /youtube websub subscription schema unavailable/
-    );
-
-    assert.deepEqual(events, ["ensure-bindings", "ensure-youtube-websub-subscriptions"]);
-  } finally {
-    app.listen = originalListen;
-  }
-});
-
-test("codeClip startup YouTube OAuth state init failure prevents audit init and listen", async () => {
-  const events = [];
-  const originalListen = app.listen;
-
-  app.listen = () => {
-    events.push("listen");
-    throw new Error("listen should not be called");
-  };
-
-  try {
-    await assert.rejects(
-      () =>
-        startBackendServer({
-          port: 0,
-          databaseClient: {
-            async ensureCodeClipProviderAccountBindingsTable() {
-              events.push("ensure-bindings");
-            },
-            async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
-              events.push("ensure-youtube-websub-subscriptions");
-            },
-            async ensureCodeClipYouTubeOAuthStatesTable() {
-              events.push("ensure-youtube-oauth-states");
-              throw new Error("youtube oauth state schema unavailable");
-            },
-            async ensureCodeClipProviderAccountBindingAuditTable() {
-              events.push("ensure-binding-audit");
-            },
-          },
-        }),
-      /youtube oauth state schema unavailable/
-    );
-
-    assert.deepEqual(events, [
-      "ensure-bindings",
-      "ensure-youtube-websub-subscriptions",
-      "ensure-youtube-oauth-states",
-    ]);
-  } finally {
-    app.listen = originalListen;
-  }
-});
-
-test("codeClip startup audit init failure prevents listen", async () => {
-  const events = [];
-  const originalListen = app.listen;
-
-  app.listen = () => {
-    events.push("listen");
-    throw new Error("listen should not be called");
-  };
-
-  try {
-    await assert.rejects(
-      () =>
-        startBackendServer({
-          port: 0,
-          databaseClient: {
-            async ensureCodeClipProviderAccountBindingsTable() {
-              events.push("ensure-bindings");
-            },
-            async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
-              events.push("ensure-youtube-websub-subscriptions");
-            },
-            async ensureCodeClipYouTubeOAuthStatesTable() {
-              events.push("ensure-youtube-oauth-states");
-            },
-            async ensureCodeClipProviderAccountBindingAuditTable() {
-              events.push("ensure-binding-audit");
-              throw new Error("binding audit schema unavailable");
-            },
-          },
-        }),
-      /binding audit schema unavailable/
-    );
-
-    assert.deepEqual(events, [
-      "ensure-bindings",
-      "ensure-youtube-websub-subscriptions",
-      "ensure-youtube-oauth-states",
-      "ensure-binding-audit",
-    ]);
-  } finally {
-    app.listen = originalListen;
-  }
-});
-
-test("codeClip startup binding init is repeatable and does not run unrelated startup hooks", async () => {
+test("codeClip startup schema init is repeatable and does not run unrelated startup hooks", async () => {
   const calls = [];
   const databaseClient = {
-    async ensureCodeClipProviderAccountBindingsTable() {
-      calls.push("ensure-bindings");
-    },
-    async ensureCodeClipYouTubeWebSubSubscriptionsTable() {
-      calls.push("ensure-youtube-websub-subscriptions");
-    },
-    async ensureCodeClipYouTubeOAuthStatesTable() {
-      calls.push("ensure-youtube-oauth-states");
-    },
-    async ensureCodeClipProviderAccountBindingAuditTable() {
-      calls.push("ensure-binding-audit");
-    },
+    ...createCodeClipStartupDatabaseClient(calls),
     async testDbConnection() {
       calls.push("test-db");
       throw new Error("testDbConnection should not run inside codeClip init");
@@ -241,19 +81,56 @@ test("codeClip startup binding init is repeatable and does not run unrelated sta
       calls.push("codepod-keyword");
       throw new Error("codePod init should not run inside codeClip init");
     },
+    async ensureCodeDemoHandshakesTable() {
+      calls.push("codedemo-handshakes");
+      throw new Error("codeDemo init should not run inside codeClip init");
+    },
   };
 
   await initializeCodeClipStartup({ databaseClient });
   await initializeCodeClipStartup({ databaseClient });
 
   assert.deepEqual(calls, [
-    "ensure-bindings",
-    "ensure-youtube-websub-subscriptions",
-    "ensure-youtube-oauth-states",
-    "ensure-binding-audit",
-    "ensure-bindings",
-    "ensure-youtube-websub-subscriptions",
-    "ensure-youtube-oauth-states",
-    "ensure-binding-audit",
+    ...EXPECTED_CODECLIP_STARTUP_EVENTS,
+    ...EXPECTED_CODECLIP_STARTUP_EVENTS,
   ]);
+});
+
+test("codeClip startup schema failure is visible and prevents listen", async () => {
+  const events = [];
+  const originalListen = app.listen;
+
+  app.listen = () => {
+    events.push("listen");
+    throw new Error("listen should not be called");
+  };
+
+  try {
+    await assert.rejects(
+      () =>
+        startBackendServer({
+          port: 0,
+          databaseClient: createCodeClipStartupDatabaseClient(events, {
+            failAt: "ensureCodeClipRewardAssignmentsTable",
+          }),
+        }),
+      /ensure-codeclip-reward-assignments schema unavailable/
+    );
+
+    assert.deepEqual(events, EXPECTED_CODECLIP_STARTUP_EVENTS.slice(0, 5));
+  } finally {
+    app.listen = originalListen;
+  }
+});
+
+test("codeClip startup initializes provider delivery schema without waiting for first request", async () => {
+  const calls = [];
+  const databaseClient = createCodeClipStartupDatabaseClient(calls);
+
+  await initializeCodeClipStartup({ databaseClient });
+
+  assert.equal(calls.includes("ensure-codeclip-provider-deliveries"), true);
+  assert.equal(calls.includes("ensure-codeclip-interactions"), true);
+  assert.equal(calls.includes("ensure-codeclip-clipxtra-redemptions"), true);
+  assert.equal(calls.includes("ensure-codeclip-outbox"), true);
 });
