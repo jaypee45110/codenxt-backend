@@ -6,6 +6,7 @@ const {
   CodeClipYouTubeWebSubSubscriptionError,
   SUBSCRIPTION_STATUSES,
   PENDING_MODES,
+  claimCodeClipYouTubeWebSubSubscribeDispatch,
   createPendingCodeClipYouTubeWebSubSubscription,
   disableCodeClipYouTubeWebSubSubscription,
   getCodeClipYouTubeWebSubSubscriptionByCallbackId,
@@ -17,6 +18,7 @@ const {
   markCodeClipYouTubeWebSubSubscriptionUnsubscribed,
   markCodeClipYouTubeWebSubSubscriptionVerified,
   normalizeSubscriptionInput,
+  recordCodeClipYouTubeWebSubSubscribeDispatchResult,
   recordCodeClipYouTubeWebSubSubscriptionAudit,
   recordCodeClipYouTubeWebSubFirstActivatedVideo,
   toInternalCodeClipYouTubeWebSubSubscription,
@@ -63,6 +65,36 @@ function row(overrides = {}) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function isSafeAttemptNumber(value) {
+  return (
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value < 2147483647
+  );
+}
+
+function claimableDispatch(dispatch, nowEpochMs) {
+  if (dispatch === undefined || dispatch === null) return true;
+  if (typeof dispatch !== "object" || Array.isArray(dispatch)) return false;
+  if (dispatch.status === "failed") {
+    return (
+      dispatch.mode === "subscribe" &&
+      dispatch.retryEligible === true &&
+      isSafeAttemptNumber(dispatch.attemptNumber)
+    );
+  }
+  if (dispatch.status === "started") {
+    return (
+      dispatch.mode === "subscribe" &&
+      isSafeAttemptNumber(dispatch.attemptNumber) &&
+      Number.isSafeInteger(dispatch.staleAfterEpochMs) &&
+      dispatch.staleAfterEpochMs >= 0 &&
+      dispatch.staleAfterEpochMs <= nowEpochMs
+    );
+  }
+  return false;
 }
 
 function createSubscriptionClient() {
@@ -154,6 +186,79 @@ function createSubscriptionClient() {
           created_at: "2026-07-18T00:00:02.000Z",
         };
         return { rows: [inserted] };
+      }
+
+      if (
+        /UPDATE codeclip_youtube_websub_subscriptions/.test(sql) &&
+        /attemptNumber/.test(sql) &&
+        /staleAfterEpochMs/.test(sql)
+      ) {
+        const current = find(params[0]);
+        if (!current) return { rows: [] };
+        const nowEpochMs = params[4] ?? 1_800_000_000_000;
+        if (
+          current.status !== SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE ||
+          current.pending_mode !== PENDING_MODES.SUBSCRIBE ||
+          !claimableDispatch(current.metadata.dispatch, nowEpochMs)
+        ) {
+          return { rows: [] };
+        }
+        const previousAttemptNumber = isSafeAttemptNumber(current.metadata.dispatch?.attemptNumber)
+          ? current.metadata.dispatch.attemptNumber
+          : 0;
+        current.metadata = {
+          ...current.metadata,
+          dispatch: {
+            attemptId: params[1],
+            attemptNumber: previousAttemptNumber + 1,
+            previousAttemptCount: previousAttemptNumber,
+            status: "started",
+            mode: "subscribe",
+            startedAt: "2026-07-17T00:00:01.000Z",
+            staleAfterEpochMs: nowEpochMs + params[3] * 1000,
+            requestedLeaseSeconds: params[2],
+            retryEligible: false,
+          },
+        };
+        return { rows: [touch(current)] };
+      }
+
+      if (
+        /UPDATE codeclip_youtube_websub_subscriptions/.test(sql) &&
+        /resultCode/.test(sql) &&
+        /completedAt/.test(sql)
+      ) {
+        const current = find(params[0]);
+        if (!current) return { rows: [] };
+        const dispatch = current.metadata.dispatch;
+        if (
+          typeof dispatch !== "object" ||
+          dispatch === null ||
+          dispatch.attemptId !== params[1] ||
+          dispatch.status !== "started" ||
+          dispatch.mode !== "subscribe" ||
+          !(
+            (current.status === SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE &&
+              current.pending_mode === PENDING_MODES.SUBSCRIBE) ||
+            (current.status === SUBSCRIPTION_STATUSES.ACTIVE && current.pending_mode === null)
+          )
+        ) {
+          return { rows: [] };
+        }
+        current.metadata = {
+          ...current.metadata,
+          dispatch: {
+            ...dispatch,
+            attemptId: params[1],
+            status: params[2],
+            mode: "subscribe",
+            resultCode: params[3],
+            hubHttpStatus: params[4],
+            retryEligible: params[5],
+            completedAt: "2026-07-17T00:00:02.000Z",
+          },
+        };
+        return { rows: [touch(current)] };
       }
 
       if (/FROM codeclip_youtube_websub_subscriptions/.test(sql) && /callback_id = \$1/.test(sql)) {
@@ -354,6 +459,445 @@ test("YouTube WebSub subscription create and reads are scoped and parameterized"
       assert.match(call.sql, /provider = 'youtube'/);
       assert.match(call.sql, /channel = 'youtube'/);
     }
+  }
+});
+
+test("YouTube WebSub subscribe dispatch claim allows absent and JSON-null dispatch only as initial states", async () => {
+  const absent = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(validInput(), { queryClient: absent });
+  const absentClaim = await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_absent",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: absent,
+  });
+
+  assert.equal(absentClaim.metadata.dispatch.attemptId, "attempt_absent");
+  assert.equal(absentClaim.metadata.dispatch.attemptNumber, 1);
+  assert.equal(absentClaim.metadata.dispatch.previousAttemptCount, 0);
+  assert.equal(absentClaim.metadata.dispatch.status, "started");
+  assert.equal(absentClaim.metadata.dispatch.mode, "subscribe");
+  assert.equal(absentClaim.metadata.dispatch.staleAfterEpochMs, 1_800_000_060_000);
+
+  const jsonNull = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({ metadata: { dispatch: null } }),
+    { queryClient: jsonNull }
+  );
+  const jsonNullClaim = await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_null",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: jsonNull,
+  });
+
+  assert.equal(jsonNullClaim.metadata.dispatch.attemptId, "attempt_null");
+  assert.equal(jsonNullClaim.metadata.dispatch.attemptNumber, 1);
+});
+
+test("YouTube WebSub subscribe dispatch claim fails closed for malformed dispatch metadata", async () => {
+  const malformedDispatches = [
+    {},
+    { status: "pending" },
+    { status: "failed", retryEligible: true, attemptNumber: 1 },
+    { status: "failed", mode: "unsubscribe", retryEligible: true, attemptNumber: 1 },
+    { status: "started", staleAfterEpochMs: 1, attemptNumber: 1 },
+    { status: "started", mode: "unsubscribe", staleAfterEpochMs: 1, attemptNumber: 1 },
+    { status: "started", mode: "subscribe", staleAfterEpochMs: "1", attemptNumber: 1 },
+    { status: "started", mode: "subscribe", staleAfterEpochMs: 1, attemptNumber: "1" },
+    { status: "started", mode: "subscribe", staleAfterEpochMs: 1, attemptNumber: 1.5 },
+    { status: "started", mode: "subscribe", staleAfterEpochMs: 1, attemptNumber: -1 },
+    { status: "started", mode: "subscribe", staleAfterEpochMs: 1, attemptNumber: 2147483647 },
+  ];
+
+  for (const dispatch of malformedDispatches) {
+    const client = createSubscriptionClient();
+    await createPendingCodeClipYouTubeWebSubSubscription(
+      validInput({ metadata: { dispatch } }),
+      { queryClient: client }
+    );
+    const claimed = await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+      attemptId: "attempt_malformed",
+      leaseSeconds: 864000,
+      staleAfterSeconds: 60,
+      nowEpochMs: 1_800_000_000_000,
+      queryClient: client,
+    });
+
+    assert.equal(claimed, null, `malformed dispatch was claimable: ${JSON.stringify(dispatch)}`);
+  }
+});
+
+test("YouTube WebSub subscribe dispatch claim supports retryable failed subscribe and mode isolation", async () => {
+  const retryable = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      metadata: {
+        dispatch: {
+          attemptId: "attempt_1",
+          attemptNumber: 1,
+          status: "failed",
+          mode: "subscribe",
+          retryEligible: true,
+        },
+      },
+    }),
+    { queryClient: retryable }
+  );
+
+  const claimed = await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_2",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: retryable,
+  });
+  assert.equal(claimed.metadata.dispatch.attemptId, "attempt_2");
+  assert.equal(claimed.metadata.dispatch.attemptNumber, 2);
+  assert.equal(claimed.metadata.dispatch.previousAttemptCount, 1);
+
+  for (const dispatch of [
+    { attemptId: "attempt_1", attemptNumber: 1, status: "failed", retryEligible: true },
+    {
+      attemptId: "attempt_1",
+      attemptNumber: 1,
+      status: "failed",
+      mode: "unsubscribe",
+      retryEligible: true,
+    },
+  ]) {
+    const client = createSubscriptionClient();
+    await createPendingCodeClipYouTubeWebSubSubscription(
+      validInput({ metadata: { dispatch } }),
+      { queryClient: client }
+    );
+    const result = await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+      attemptId: "attempt_rejected",
+      leaseSeconds: 864000,
+      staleAfterSeconds: 60,
+      nowEpochMs: 1_800_000_000_000,
+      queryClient: client,
+    });
+    assert.equal(result, null);
+  }
+});
+
+test("YouTube WebSub subscribe dispatch claim supports numeric stale reclaim and rejects fresh claims", async () => {
+  const stale = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      metadata: {
+        dispatch: {
+          attemptId: "attempt_1",
+          attemptNumber: 1,
+          status: "started",
+          mode: "subscribe",
+          staleAfterEpochMs: 1_799_999_999_999,
+          retryEligible: false,
+        },
+      },
+    }),
+    { queryClient: stale }
+  );
+  const reclaimed = await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_2",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: stale,
+  });
+  assert.equal(reclaimed.metadata.dispatch.attemptId, "attempt_2");
+  assert.equal(reclaimed.metadata.dispatch.attemptNumber, 2);
+
+  const fresh = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      metadata: {
+        dispatch: {
+          attemptId: "attempt_1",
+          attemptNumber: 1,
+          status: "started",
+          mode: "subscribe",
+          staleAfterEpochMs: 1_800_000_060_000,
+          retryEligible: false,
+        },
+      },
+    }),
+    { queryClient: fresh }
+  );
+  const rejected = await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_2",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: fresh,
+  });
+  assert.equal(rejected, null);
+});
+
+test("YouTube WebSub subscribe dispatch validates stale comparison inputs", async () => {
+  const client = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(validInput(), { queryClient: client });
+
+  for (const nowEpochMs of [1.5, Number.MAX_SAFE_INTEGER + 1, -1]) {
+    await assert.rejects(
+      () => claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+        attemptId: "attempt_invalid_now",
+        staleAfterSeconds: 60,
+        nowEpochMs,
+        queryClient: client,
+      }),
+      CodeClipYouTubeWebSubSubscriptionError
+    );
+  }
+
+  for (const staleAfterSeconds of [0, -1, 3601, 1.5]) {
+    await assert.rejects(
+      () => claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+        attemptId: "attempt_invalid_stale",
+        staleAfterSeconds,
+        nowEpochMs: 1_800_000_000_000,
+        queryClient: client,
+      }),
+      CodeClipYouTubeWebSubSubscriptionError
+    );
+  }
+});
+
+test("YouTube WebSub subscribe dispatch result is owned by exact attempt and preserves verified callback race", async () => {
+  const client = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(validInput(), { queryClient: client });
+  await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_1",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: client,
+  });
+
+  const wrongAttempt = await recordCodeClipYouTubeWebSubSubscribeDispatchResult("yt_cb_123", {
+    attemptId: "attempt_other",
+    resultCode: "hub_request_accepted",
+    hubHttpStatus: 202,
+    retryable: true,
+    queryClient: client,
+  });
+  assert.equal(wrongAttempt, null);
+
+  client.rows[0].status = SUBSCRIPTION_STATUSES.ACTIVE;
+  client.rows[0].pending_mode = null;
+  const accepted = await recordCodeClipYouTubeWebSubSubscribeDispatchResult("yt_cb_123", {
+    attemptId: "attempt_1",
+    resultCode: "hub_request_accepted",
+    hubHttpStatus: 202,
+    retryable: true,
+    queryClient: client,
+  });
+
+  assert.equal(accepted.status, SUBSCRIPTION_STATUSES.ACTIVE);
+  assert.equal(accepted.pendingMode, null);
+  assert.equal(accepted.metadata.dispatch.status, "accepted");
+  assert.equal(accepted.metadata.dispatch.retryEligible, false);
+  assert.equal(accepted.lastVerifiedAt, null);
+});
+
+test("YouTube WebSub late result cannot overwrite a reclaimed attempt", async () => {
+  const client = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      metadata: {
+        dispatch: {
+          attemptId: "attempt_1",
+          attemptNumber: 1,
+          status: "started",
+          mode: "subscribe",
+          staleAfterEpochMs: 1_799_999_999_999,
+          retryEligible: false,
+        },
+      },
+    }),
+    { queryClient: client }
+  );
+  await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_2",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: client,
+  });
+
+  const late = await recordCodeClipYouTubeWebSubSubscribeDispatchResult("yt_cb_123", {
+    attemptId: "attempt_1",
+    resultCode: "hub_request_accepted",
+    hubHttpStatus: 202,
+    queryClient: client,
+  });
+  assert.equal(late, null);
+  assert.equal(client.rows[0].metadata.dispatch.attemptId, "attempt_2");
+  assert.equal(client.rows[0].metadata.dispatch.status, "started");
+});
+
+test("YouTube WebSub subscribe dispatch result cannot modify renewal, unsubscribe, or unrelated state", async () => {
+  for (const currentState of [
+    { status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL, pending_mode: PENDING_MODES.SUBSCRIBE },
+    { status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE, pending_mode: PENDING_MODES.UNSUBSCRIBE },
+    { status: SUBSCRIPTION_STATUSES.DISABLED, pending_mode: null },
+  ]) {
+    const client = createSubscriptionClient();
+    await createPendingCodeClipYouTubeWebSubSubscription(
+      validInput({
+        status: currentState.status,
+        pendingMode: currentState.pending_mode,
+        metadata: {
+          dispatch: {
+            attemptId: "attempt_1",
+            attemptNumber: 1,
+            status: "started",
+            mode: "subscribe",
+            staleAfterEpochMs: 1_800_000_060_000,
+            retryEligible: false,
+          },
+        },
+      }),
+      { queryClient: client }
+    );
+
+    const result = await recordCodeClipYouTubeWebSubSubscribeDispatchResult("yt_cb_123", {
+      attemptId: "attempt_1",
+      resultCode: "hub_request_accepted",
+      hubHttpStatus: 202,
+      queryClient: client,
+    });
+    assert.equal(result, null);
+    assert.equal(client.rows[0].metadata.dispatch.status, "started");
+  }
+});
+
+test("YouTube WebSub subscribe dispatch claim is single-winner in PostgreSQL", async (t) => {
+  const connectionString = process.env.CODECLIP_YOUTUBE_WEBSUB_CONCURRENCY_TEST_DATABASE_URL;
+  if (!connectionString) {
+    t.skip("CODECLIP_YOUTUBE_WEBSUB_CONCURRENCY_TEST_DATABASE_URL is not configured");
+    return;
+  }
+
+  const parsed = new URL(connectionString);
+  if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) {
+    t.skip("concurrency test requires an explicitly isolated local PostgreSQL database");
+    return;
+  }
+
+  const { Pool } = require("pg");
+  const pool = new Pool({ connectionString });
+  const schema = `codeclip_websub_test_${process.pid}_${Date.now()}`;
+  const clientA = await pool.connect();
+  const clientB = await pool.connect();
+  try {
+    await pool.query(`CREATE SCHEMA ${schema}`);
+    await pool.query(`
+      CREATE TABLE ${schema}.codeclip_youtube_websub_subscriptions (
+        id BIGSERIAL PRIMARY KEY,
+        vertical TEXT NOT NULL DEFAULT 'codeclip',
+        callback_id TEXT NOT NULL UNIQUE,
+        provider TEXT NOT NULL DEFAULT 'youtube',
+        channel TEXT NOT NULL DEFAULT 'youtube',
+        provider_account_id TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        status TEXT NOT NULL,
+        pending_mode TEXT,
+        secret_version TEXT NOT NULL DEFAULT 'v1',
+        activation_boundary_at TIMESTAMPTZ,
+        activation_boundary_video_id TEXT,
+        activated_at TIMESTAMPTZ,
+        first_activated_video_id TEXT,
+        first_activated_at TIMESTAMPTZ,
+        lease_started_at TIMESTAMPTZ,
+        lease_expires_at TIMESTAMPTZ,
+        last_verified_at TIMESTAMPTZ,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(
+      `
+        INSERT INTO ${schema}.codeclip_youtube_websub_subscriptions (
+          callback_id,
+          provider_account_id,
+          topic,
+          status,
+          pending_mode,
+          secret_version,
+          metadata
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+      `,
+      [
+        "yt_pg_concurrency",
+        CHANNEL_ID,
+        TOPIC,
+        SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE,
+        PENDING_MODES.SUBSCRIBE,
+        "v1",
+        "{}",
+      ]
+    );
+    await clientA.query(`SET search_path TO ${schema}`);
+    await clientB.query(`SET search_path TO ${schema}`);
+
+    const [first, second] = await Promise.all([
+      claimCodeClipYouTubeWebSubSubscribeDispatch("yt_pg_concurrency", {
+        attemptId: "attempt_pg_1",
+        staleAfterSeconds: 60,
+        nowEpochMs: 1_800_000_000_000,
+        queryClient: clientA,
+      }),
+      claimCodeClipYouTubeWebSubSubscribeDispatch("yt_pg_concurrency", {
+        attemptId: "attempt_pg_2",
+        staleAfterSeconds: 60,
+        nowEpochMs: 1_800_000_000_000,
+        queryClient: clientB,
+      }),
+    ]);
+
+    const winners = [first, second].filter(Boolean);
+    const losers = [first, second].filter((item) => item === null);
+    assert.equal(winners.length, 1);
+    assert.equal(losers.length, 1);
+
+    const winningAttemptId = winners[0].metadata.dispatch.attemptId;
+    const losingAttemptId = winningAttemptId === "attempt_pg_1" ? "attempt_pg_2" : "attempt_pg_1";
+    const persisted = (await pool.query(
+      `SELECT metadata FROM ${schema}.codeclip_youtube_websub_subscriptions WHERE callback_id = $1`,
+      ["yt_pg_concurrency"]
+    )).rows[0].metadata.dispatch;
+
+    assert.equal(persisted.attemptId, winningAttemptId);
+    assert.equal(persisted.attemptNumber, 1);
+
+    const losingResult = await recordCodeClipYouTubeWebSubSubscribeDispatchResult(
+      "yt_pg_concurrency",
+      {
+        attemptId: losingAttemptId,
+        resultCode: "hub_request_accepted",
+        hubHttpStatus: 202,
+        queryClient: clientA,
+      }
+    );
+    assert.equal(losingResult, null);
+
+    const afterLosingResult = (await pool.query(
+      `SELECT metadata FROM ${schema}.codeclip_youtube_websub_subscriptions WHERE callback_id = $1`,
+      ["yt_pg_concurrency"]
+    )).rows[0].metadata.dispatch;
+    assert.equal(afterLosingResult.attemptId, winningAttemptId);
+    assert.equal(afterLosingResult.status, "started");
+  } finally {
+    clientA.release();
+    clientB.release();
+    await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    await pool.end();
   }
 });
 

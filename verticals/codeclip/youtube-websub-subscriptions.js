@@ -29,13 +29,19 @@ const VALID_AUDIT_ACTIONS = new Set([
   "subscription_requested",
   "renewal_requested",
   "unsubscribe_requested",
+  "subscribe_dispatch_started",
+  "subscribe_dispatch_accepted",
+  "subscribe_dispatch_failed",
   "hub_request_accepted",
   "hub_request_failed",
 ]);
 const CALLBACK_ID_MAX_LENGTH = 160;
+const DISPATCH_ATTEMPT_ID_MAX_LENGTH = 120;
 const SECRET_VERSION_MAX_LENGTH = 40;
 const VIDEO_ID_MAX_LENGTH = 80;
 const RESULT_CODE_MAX_LENGTH = 80;
+const DEFAULT_DISPATCH_STALE_AFTER_SECONDS = 5 * 60;
+const MAX_DISPATCH_STALE_AFTER_SECONDS = 60 * 60;
 
 class CodeClipYouTubeWebSubSubscriptionError extends Error {
   constructor(code, message, details = {}) {
@@ -113,6 +119,20 @@ function normalizeCallbackId(value) {
   return normalized;
 }
 
+function normalizeDispatchAttemptId(value) {
+  const normalized = normalizeRequiredString(
+    value,
+    "attemptId",
+    DISPATCH_ATTEMPT_ID_MAX_LENGTH
+  );
+  if (!/^[A-Za-z0-9_-]+$/.test(normalized)) {
+    throw subscriptionInputError("attemptId must be opaque URL-safe text", {
+      fieldName: "attemptId",
+    });
+  }
+  return normalized;
+}
+
 function normalizeStatus(value) {
   const normalized = normalizeRequiredString(value, "status", 40).toLowerCase();
   if (!VALID_STATUSES.has(normalized)) {
@@ -154,6 +174,23 @@ function normalizeHubHttpStatus(value) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 100 || parsed > 599) {
     throw subscriptionInputError("hubHttpStatus is invalid", { fieldName: "hubHttpStatus" });
+  }
+  return parsed;
+}
+
+function normalizeDispatchStaleAfterSeconds(
+  value = DEFAULT_DISPATCH_STALE_AFTER_SECONDS
+) {
+  const parsed = Number(value);
+  if (
+    !Number.isInteger(parsed) ||
+    parsed <= 0 ||
+    parsed > MAX_DISPATCH_STALE_AFTER_SECONDS
+  ) {
+    throw subscriptionInputError("dispatch stale timeout is invalid", {
+      fieldName: "staleAfterSeconds",
+      max: MAX_DISPATCH_STALE_AFTER_SECONDS,
+    });
   }
   return parsed;
 }
@@ -244,6 +281,9 @@ function sanitizeAuditMetadata(value) {
   }
   if (metadata.operationSource === "operator_key") {
     sanitized.operationSource = "operator_key";
+  }
+  if (["started", "accepted", "failed"].includes(metadata.dispatchStatus)) {
+    sanitized.dispatchStatus = metadata.dispatchStatus;
   }
   if (typeof metadata.previousStatus === "string" && VALID_STATUSES.has(metadata.previousStatus)) {
     sanitized.previousStatus = metadata.previousStatus;
@@ -522,6 +562,171 @@ async function getCodeClipYouTubeWebSubSubscriptionByProviderAccountId(
       LIMIT 1
     `,
     [normalizedProviderAccountId]
+  );
+  return mapSubscriptionRow(result.rows?.[0] || null);
+}
+
+async function claimCodeClipYouTubeWebSubSubscribeDispatch(
+  callbackId,
+  { attemptId, leaseSeconds, staleAfterSeconds, nowEpochMs, queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  const normalizedCallbackId = normalizeCallbackId(callbackId);
+  const normalizedAttemptId = normalizeDispatchAttemptId(attemptId);
+  const normalizedStaleAfterSeconds = normalizeDispatchStaleAfterSeconds(staleAfterSeconds);
+  const requestedLeaseSeconds =
+    Number.isSafeInteger(leaseSeconds) && leaseSeconds > 0 ? leaseSeconds : null;
+  const comparisonEpochMs =
+    nowEpochMs === undefined || nowEpochMs === null || nowEpochMs === ""
+      ? null
+      : Number(nowEpochMs);
+  if (
+    comparisonEpochMs !== null &&
+    (!Number.isSafeInteger(comparisonEpochMs) || comparisonEpochMs < 0)
+  ) {
+    throw subscriptionInputError("nowEpochMs is invalid", { fieldName: "nowEpochMs" });
+  }
+
+  const result = await client.query(
+    `
+      UPDATE codeclip_youtube_websub_subscriptions
+      SET
+        metadata = jsonb_set(
+          metadata,
+          '{dispatch}',
+          jsonb_build_object(
+            'attemptId', $2::text,
+            'attemptNumber',
+              CASE
+                WHEN metadata ? 'dispatch'
+                  AND jsonb_typeof(metadata->'dispatch') = 'object'
+                  AND jsonb_typeof(metadata->'dispatch'->'attemptNumber') = 'number'
+                  AND (metadata->'dispatch'->>'attemptNumber') ~ '^[0-9]{1,9}$'
+                  AND (metadata->'dispatch'->>'attemptNumber')::bigint < 2147483647
+                  THEN (metadata->'dispatch'->>'attemptNumber')::integer + 1
+                ELSE 1
+              END,
+            'previousAttemptCount',
+              CASE
+                WHEN metadata ? 'dispatch'
+                  AND jsonb_typeof(metadata->'dispatch') = 'object'
+                  AND jsonb_typeof(metadata->'dispatch'->'attemptNumber') = 'number'
+                  AND (metadata->'dispatch'->>'attemptNumber') ~ '^[0-9]{1,9}$'
+                  AND (metadata->'dispatch'->>'attemptNumber')::bigint < 2147483647
+                  THEN (metadata->'dispatch'->>'attemptNumber')::integer
+                ELSE 0
+              END,
+            'status', 'started',
+            'mode', 'subscribe',
+            'startedAt', NOW(),
+            'staleAfterEpochMs',
+              FLOOR(EXTRACT(EPOCH FROM NOW()) * 1000)::bigint + ($4::integer * 1000),
+            'requestedLeaseSeconds', $3::integer,
+            'retryEligible', false
+          ),
+          true
+        ),
+        updated_at = NOW()
+      WHERE callback_id = $1
+        AND vertical = 'codeclip'
+        AND provider = 'youtube'
+        AND channel = 'youtube'
+        AND status = 'pending_subscribe'
+        AND pending_mode = 'subscribe'
+        AND (
+          NOT (metadata ? 'dispatch')
+          OR metadata->'dispatch' = 'null'::jsonb
+          OR (
+            jsonb_typeof(metadata->'dispatch') = 'object'
+            AND metadata->'dispatch'->>'status' = 'failed'
+            AND metadata->'dispatch'->>'mode' = 'subscribe'
+            AND metadata->'dispatch'->>'retryEligible' = 'true'
+            AND jsonb_typeof(metadata->'dispatch'->'attemptNumber') = 'number'
+            AND (metadata->'dispatch'->>'attemptNumber') ~ '^[0-9]{1,9}$'
+            AND (metadata->'dispatch'->>'attemptNumber')::bigint < 2147483647
+          )
+          OR (
+            jsonb_typeof(metadata->'dispatch') = 'object'
+            AND metadata->'dispatch'->>'status' = 'started'
+            AND metadata->'dispatch'->>'mode' = 'subscribe'
+            AND jsonb_typeof(metadata->'dispatch'->'attemptNumber') = 'number'
+            AND (metadata->'dispatch'->>'attemptNumber') ~ '^[0-9]{1,9}$'
+            AND (metadata->'dispatch'->>'attemptNumber')::bigint < 2147483647
+            AND jsonb_typeof(metadata->'dispatch'->'staleAfterEpochMs') = 'number'
+            AND (metadata->'dispatch'->>'staleAfterEpochMs') ~ '^[0-9]{1,16}$'
+            AND (metadata->'dispatch'->>'staleAfterEpochMs')::numeric <=
+              COALESCE($5::numeric, FLOOR(EXTRACT(EPOCH FROM NOW()) * 1000)::numeric)
+          )
+        )
+      RETURNING *
+    `,
+    [
+      normalizedCallbackId,
+      normalizedAttemptId,
+      requestedLeaseSeconds,
+      normalizedStaleAfterSeconds,
+      comparisonEpochMs,
+    ]
+  );
+  return mapSubscriptionRow(result.rows?.[0] || null);
+}
+
+async function recordCodeClipYouTubeWebSubSubscribeDispatchResult(
+  callbackId,
+  { attemptId, resultCode, hubHttpStatus, retryable, queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  const normalizedCallbackId = normalizeCallbackId(callbackId);
+  const normalizedAttemptId = normalizeDispatchAttemptId(attemptId);
+  const normalizedResultCode = normalizeResultCode(resultCode || "hub_request_failed");
+  const normalizedHubHttpStatus = normalizeHubHttpStatus(hubHttpStatus);
+  const accepted = normalizedResultCode === "hub_request_accepted";
+  const dispatchStatus = accepted ? "accepted" : "failed";
+  const retryEligible = accepted ? false : Boolean(retryable);
+
+  const result = await client.query(
+    `
+      UPDATE codeclip_youtube_websub_subscriptions
+      SET
+        metadata = jsonb_set(
+          metadata,
+          '{dispatch}',
+          COALESCE(metadata->'dispatch', '{}'::jsonb) ||
+          jsonb_build_object(
+            'attemptId', $2::text,
+            'status', $3::text,
+            'mode', 'subscribe',
+            'resultCode', $4::text,
+            'hubHttpStatus', $5::integer,
+            'retryEligible', $6::boolean,
+            'completedAt', NOW()
+          ),
+          true
+        ),
+        updated_at = NOW()
+      WHERE callback_id = $1
+        AND vertical = 'codeclip'
+        AND provider = 'youtube'
+        AND channel = 'youtube'
+        AND metadata ? 'dispatch'
+        AND jsonb_typeof(metadata->'dispatch') = 'object'
+        AND metadata->'dispatch'->>'attemptId' = $2
+        AND metadata->'dispatch'->>'status' = 'started'
+        AND metadata->'dispatch'->>'mode' = 'subscribe'
+        AND (
+          (status = 'pending_subscribe' AND pending_mode = 'subscribe')
+          OR (status = 'active' AND pending_mode IS NULL)
+        )
+      RETURNING *
+    `,
+    [
+      normalizedCallbackId,
+      normalizedAttemptId,
+      dispatchStatus,
+      normalizedResultCode,
+      normalizedHubHttpStatus,
+      retryEligible,
+    ]
   );
   return mapSubscriptionRow(result.rows?.[0] || null);
 }
@@ -808,6 +1013,7 @@ module.exports = {
   CodeClipYouTubeWebSubSubscriptionError,
   PENDING_MODES,
   SUBSCRIPTION_STATUSES,
+  claimCodeClipYouTubeWebSubSubscribeDispatch,
   createPendingCodeClipYouTubeWebSubSubscription,
   disableCodeClipYouTubeWebSubSubscription,
   getCodeClipYouTubeWebSubSubscriptionByCallbackId,
@@ -822,6 +1028,7 @@ module.exports = {
   markCodeClipYouTubeWebSubSubscriptionVerified,
   normalizeCallbackId,
   normalizeSubscriptionInput,
+  recordCodeClipYouTubeWebSubSubscribeDispatchResult,
   recordCodeClipYouTubeWebSubSubscriptionAudit,
   recordCodeClipYouTubeWebSubFirstActivatedVideo,
   toInternalCodeClipYouTubeWebSubSubscription,

@@ -14,6 +14,7 @@ const {
 const {
   PENDING_MODES,
   SUBSCRIPTION_STATUSES,
+  claimCodeClipYouTubeWebSubSubscribeDispatch,
   createPendingCodeClipYouTubeWebSubSubscription,
   getCodeClipYouTubeWebSubSubscriptionByCallbackId,
   getCodeClipYouTubeWebSubSubscriptionByProviderAccountId,
@@ -22,6 +23,7 @@ const {
   markCodeClipYouTubeWebSubSubscriptionRenewalPending,
   markCodeClipYouTubeWebSubSubscriptionUnsubscribePending,
   normalizeCallbackId,
+  recordCodeClipYouTubeWebSubSubscribeDispatchResult,
   recordCodeClipYouTubeWebSubSubscriptionAudit,
   toInternalCodeClipYouTubeWebSubSubscription,
 } = require("./youtube-websub-subscriptions");
@@ -129,6 +131,10 @@ function normalizePublicBaseUrl(env = process.env) {
 
 function buildCallbackId() {
   return `yt_${crypto.randomBytes(18).toString("base64url")}`;
+}
+
+function buildDispatchAttemptId() {
+  return `attempt_${crypto.randomBytes(18).toString("base64url")}`;
 }
 
 function buildTopic(providerAccountId) {
@@ -334,7 +340,7 @@ async function auditHubResult({
         mode,
         resultCode: hubResult.code,
         hubHttpStatus: hubResult.status || null,
-        retryable: !hubResult.ok,
+        retryable: hubResult.retryable === undefined ? !hubResult.ok : Boolean(hubResult.retryable),
         metadata: {
           operationSource: "operator_key",
           resultingStatus: subscription.status,
@@ -351,6 +357,115 @@ async function auditHubResult({
       error: error?.name || "Error",
     });
   }
+}
+
+function isRetryableHubResult(hubResult = {}) {
+  if (hubResult.ok) return false;
+  if (hubResult.retryable === false) return false;
+  if (hubResult.retryable === true) return true;
+  const status = Number(hubResult.status || 0);
+  if (status === 0 || status === 408 || status === 425 || status === 429) return true;
+  return status >= 500 && status <= 599;
+}
+
+async function runSubscribeDispatch({
+  subscription,
+  eventCode,
+  leaseSeconds,
+  rootSecret,
+  publicBaseUrl,
+  queryClient,
+  options = {},
+}) {
+  const attemptId = (options.generateDispatchAttemptId || buildDispatchAttemptId)();
+  const claim = await (
+    options.claimSubscribeDispatch || claimCodeClipYouTubeWebSubSubscribeDispatch
+  )(
+    subscription.callbackId,
+    {
+      attemptId,
+      leaseSeconds,
+      staleAfterSeconds: options.dispatchStaleAfterSeconds,
+      nowEpochMs: options.dispatchNowEpochMs,
+      queryClient,
+    }
+  );
+
+  if (!claim) {
+    return {
+      ok: true,
+      code: "subscription_pending",
+      status: subscription.status,
+      dispatchClaimed: false,
+      subscription: toPublicSubscriptionStatus(subscription),
+    };
+  }
+
+  let hubResult;
+  try {
+    const derivedSecret = deriveSubscriptionSecret({ rootSecret, subscription: claim });
+    hubResult = await (options.requestSubscription || requestSubscription)({
+      mode: "subscribe",
+      callbackUrl: buildCallbackUrl(publicBaseUrl, claim.callbackId),
+      topic: claim.topic,
+      secret: derivedSecret,
+      leaseSeconds,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs,
+    });
+  } catch {
+    hubResult = {
+      ok: false,
+      code: "hub_request_failed",
+      status: 0,
+      retryable: true,
+      mode: "subscribe",
+    };
+  }
+
+  const retryable = isRetryableHubResult(hubResult);
+  hubResult = { ...hubResult, retryable };
+  const recorded = await (
+    options.recordSubscribeDispatchResult || recordCodeClipYouTubeWebSubSubscribeDispatchResult
+  )(
+    claim.callbackId,
+    {
+      attemptId,
+      resultCode: hubResult.ok ? "hub_request_accepted" : hubResult.code,
+      hubHttpStatus: hubResult.status || null,
+      retryable,
+      queryClient,
+    }
+  );
+  const resultSubscription = recorded || claim;
+
+  await auditHubResult({
+    subscription: resultSubscription,
+    eventCode,
+    mode: "subscribe",
+    hubResult,
+    queryClient,
+    recordAudit: options.recordAudit,
+  });
+
+  if (!hubResult.ok) {
+    return {
+      ok: false,
+      code: hubResult.code,
+      status: resultSubscription.status,
+      retryable,
+      dispatchClaimed: true,
+      subscription: toPublicSubscriptionStatus(resultSubscription),
+    };
+  }
+
+  return {
+    ok: true,
+    code: "subscription_pending",
+    status: resultSubscription.status,
+    dispatchClaimed: true,
+    subscription: toPublicSubscriptionStatus(resultSubscription),
+  };
 }
 
 async function resolveEligibleBindingAndEpisode({
@@ -408,6 +523,23 @@ async function createCodeClipYouTubeWebSubSubscriptionOperation(input = {}, opti
       options.getOpenSubscriptionByProviderAccountId || options.getSubscriptionByProviderAccountId,
   });
   if (existing) {
+    if (existing.status === SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE) {
+      const dispatchResult = await runSubscribeDispatch({
+        subscription: existing,
+        eventCode,
+        leaseSeconds,
+        rootSecret,
+        publicBaseUrl,
+        queryClient,
+        options,
+      });
+
+      return {
+        ...dispatchResult,
+        bindingId: binding.id,
+      };
+    }
+
     return {
       ok: true,
       code: "subscription_already_exists",
@@ -465,6 +597,23 @@ async function createCodeClipYouTubeWebSubSubscriptionOperation(input = {}, opti
         options.getOpenSubscriptionByProviderAccountId || options.getSubscriptionByProviderAccountId,
     });
     if (!conflicted) throw error;
+    if (conflicted.status === SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE) {
+      const dispatchResult = await runSubscribeDispatch({
+        subscription: conflicted,
+        eventCode,
+        leaseSeconds,
+        rootSecret,
+        publicBaseUrl,
+        queryClient,
+        options,
+      });
+
+      return {
+        ...dispatchResult,
+        bindingId: binding.id,
+      };
+    }
+
     return {
       ok: true,
       code: "subscription_already_exists",
@@ -474,40 +623,19 @@ async function createCodeClipYouTubeWebSubSubscriptionOperation(input = {}, opti
     };
   }
 
-  const derivedSecret = deriveSubscriptionSecret({ rootSecret, subscription });
-  const hubResult = await (options.requestSubscription || requestSubscription)({
-    mode: "subscribe",
-    callbackUrl: buildCallbackUrl(publicBaseUrl, subscription.callbackId),
-    topic,
-    secret: derivedSecret,
-    leaseSeconds,
-    fetchImpl: options.fetchImpl,
-    timeoutMs: options.timeoutMs,
-  });
-  await auditHubResult({
+  const dispatchResult = await runSubscribeDispatch({
     subscription,
     eventCode,
-    mode: "subscribe",
-    hubResult,
+    leaseSeconds,
+    rootSecret,
+    publicBaseUrl,
     queryClient,
-    recordAudit: options.recordAudit,
+    options,
   });
 
-  if (!hubResult.ok) {
-    return {
-      ok: false,
-      code: hubResult.code,
-      status: subscription.status,
-      retryable: true,
-      subscription: toPublicSubscriptionStatus(subscription),
-    };
-  }
-
   return {
-    ok: true,
-    code: "subscription_pending",
-    status: subscription.status,
-    subscription: toPublicSubscriptionStatus(subscription),
+    ...dispatchResult,
+    bindingId: binding.id,
   };
 }
 
