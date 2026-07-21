@@ -465,6 +465,32 @@ async function resolveCodePodKeywordEvent(eventCode) {
   return { eventId: null, event: null };
 }
 
+async function overlayMutableCodeClipCampaignReadback(eventCode, meta, {
+  requestedVertical = "",
+  explicitVertical = false,
+} = {}) {
+  const normalizedEventCode = String(eventCode || "").trim();
+  if (!normalizedEventCode || !meta || !getCampaignByCode) return meta;
+
+  const normalizedRequestedVertical = normalizeVerticalName(requestedVertical);
+  const metaVertical = normalizeVerticalName(meta?.vertical);
+  if (explicitVertical && normalizedRequestedVertical !== "codeclip") return meta;
+  if (!explicitVertical && metaVertical !== "codeclip") return meta;
+  if (metaVertical && metaVertical !== "codeclip") return meta;
+
+  const campaign = await getCampaignByCode(normalizedEventCode);
+  const rawEvent = campaign?.raw_event || null;
+  const campaignVertical = normalizeVerticalName(campaign?.vertical || rawEvent?.vertical);
+  if (!campaign || !rawEvent || campaignVertical !== "codeclip") return meta;
+
+  return {
+    ...(meta || {}),
+    activationMethod: rawEvent.activationMethod,
+    activationChannels: rawEvent.activationChannels,
+    activationEvent: rawEvent.activationEvent,
+  };
+}
+
 async function refreshCodePodGoldXtraRedisToken(token, row) {
   if (!process.env.REDIS_URL || !token || !row) return;
 
@@ -1367,6 +1393,11 @@ if (!meta || !meta.id) {
     eventId = meta.id || campaign.id || eventId;
   }
 }
+
+meta = await overlayMutableCodeClipCampaignReadback(requestedEventId, meta, {
+  requestedVertical,
+  explicitVertical: hasExplicitVertical,
+});
 
 if (!meta || !meta.id) {
   return res.status(404).json({

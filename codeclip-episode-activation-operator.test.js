@@ -3,8 +3,11 @@ const assert = require("node:assert/strict");
 const { Readable, Writable } = require("node:stream");
 
 const dbModulePath = require.resolve("./db");
+const redisModulePath = require.resolve("./redis");
 const serverModulePath = require.resolve("./server");
 const originalDb = require(dbModulePath);
+const originalRedisCacheEntry = require.cache[redisModulePath];
+const { createRedisStub } = require("./test-helpers/redis-stub");
 const {
   updateCodeClipEventActivationConfig,
 } = originalDb;
@@ -145,12 +148,14 @@ const routeState = {
   campaigns: new Map(),
   updateCalls: [],
   failUpdate: false,
+  redis: createRedisStub(),
 };
 
 function resetRouteState() {
   routeState.campaigns.clear();
   routeState.updateCalls.length = 0;
   routeState.failUpdate = false;
+  routeState.redis = createRedisStub();
 }
 
 async function getCampaignByCode(eventCode) {
@@ -216,6 +221,12 @@ function installRouteDbStub() {
       ensureEventRegistrationsTable: async () => null,
     },
   };
+  require.cache[redisModulePath] = {
+    id: redisModulePath,
+    filename: redisModulePath,
+    loaded: true,
+    exports: routeState.redis,
+  };
   return require("./server").app;
 }
 
@@ -233,22 +244,30 @@ async function withServer(options = {}, run) {
     options = {};
   }
   const adminKey = Object.hasOwn(options, "adminKey") ? options.adminKey : ADMIN_KEY;
+  const redisUrl = Object.hasOwn(options, "redisUrl") ? options.redisUrl : undefined;
   resetRouteState();
   const originalAdminKey = process.env.CODECLIP_ADMIN_KEY;
+  const originalRedisUrl = process.env.REDIS_URL;
   restoreEnv("CODECLIP_ADMIN_KEY", adminKey);
+  restoreEnv("REDIS_URL", redisUrl);
   const app = installRouteDbStub();
   try {
     await run(app);
   } finally {
     restoreEnv("CODECLIP_ADMIN_KEY", originalAdminKey);
+    restoreEnv("REDIS_URL", originalRedisUrl);
     delete require.cache[serverModulePath];
     delete require.cache[dbModulePath];
+    delete require.cache[redisModulePath];
     require.cache[dbModulePath] = {
       id: dbModulePath,
       filename: dbModulePath,
       loaded: true,
       exports: originalDb,
     };
+    if (originalRedisCacheEntry) {
+      require.cache[redisModulePath] = originalRedisCacheEntry;
+    }
   }
 }
 
@@ -442,6 +461,154 @@ test("activation update route updates only activation config and is idempotent",
     assert.equal(routeState.updateCalls.length, 2);
     assert.equal(first.text.includes(ADMIN_KEY), false);
     assert.equal(first.text.includes("secret"), false);
+  });
+});
+
+test("event readback overlays codeClip activation config from PostgreSQL over stale Redis meta", async () => {
+  await withServer({ redisUrl: "redis://codeclip-activation-readback-test" }, async (baseUrl) => {
+    const row = campaignRow({
+      eventCode: "CC-CACHED",
+      activationMethod: "provider",
+      activationChannels: ["youtube"],
+      activationEvent: "published_video",
+      name: "codeClip cached activation readback",
+    });
+    routeState.campaigns.set("CC-CACHED", row);
+    routeState.redis.strings.set("eventcode:codeclip:CC-CACHED", "event-CC-CACHED");
+    routeState.redis.hashes.set("event:event-CC-CACHED:meta", {
+      id: "event-CC-CACHED",
+      code: "CC-CACHED",
+      vertical: "codeclip",
+      name: "codeClip cached activation readback",
+      status: "active",
+      startAt: "2099-01-01T10:00:00.000Z",
+      unlockAt: "2099-01-01T10:00:00.000Z",
+      endAt: "2099-01-01T11:00:00.000Z",
+      activationMethod: "keyword",
+      activationChannels: JSON.stringify(["sms"]),
+      activationEvent: "",
+      preservedField: "cached-public-field",
+    });
+
+    const response = await callApp(baseUrl, {
+      path: "/event/CC-CACHED?vertical=codeclip",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.id, "event-CC-CACHED");
+    assert.equal(response.body.code, "CC-CACHED");
+    assert.equal(response.body.name, "codeClip cached activation readback");
+    assert.equal(response.body.status, "active");
+    assert.equal(response.body.startAt, "2099-01-01T10:00:00.000Z");
+    assert.equal(response.body.unlockAt, "2099-01-01T10:00:00.000Z");
+    assert.equal(response.body.endAt, "2099-01-01T11:00:00.000Z");
+    assert.equal(response.body.activationMethod, "provider");
+    assert.deepEqual(response.body.activationChannels, ["youtube"]);
+    assert.equal(response.body.activationEvent, "published_video");
+    assert.equal(response.body.preservedField, undefined);
+    assert.equal(routeState.updateCalls.length, 0);
+    assert.equal(routeState.redis.calls.some((call) => call.method === "set" || call.method === "hset"), false);
+  });
+});
+
+test("activation patch is reflected by subsequent event readback without mutating unrelated state", async () => {
+  await withServer({ redisUrl: "redis://codeclip-activation-readback-test" }, async (baseUrl) => {
+    const row = campaignRow({
+      eventCode: "CC-PATCH-READBACK",
+      name: "codeClip patch readback",
+    });
+    routeState.campaigns.set("CC-PATCH-READBACK", row);
+    routeState.redis.strings.set("eventcode:codeclip:CC-PATCH-READBACK", "event-CC-PATCH-READBACK");
+    routeState.redis.hashes.set("event:event-CC-PATCH-READBACK:meta", {
+      id: "event-CC-PATCH-READBACK",
+      code: "CC-PATCH-READBACK",
+      vertical: "codeclip",
+      name: "codeClip patch readback",
+      status: "active",
+      startAt: "2099-01-01T10:00:00.000Z",
+      unlockAt: "2099-01-01T10:00:00.000Z",
+      endAt: "2099-01-01T11:00:00.000Z",
+      activationMethod: "keyword",
+      activationChannels: JSON.stringify(["sms"]),
+      activationEvent: "",
+    });
+
+    const first = await patchActivation(baseUrl, "CC-PATCH-READBACK", {
+      activationMethod: "provider",
+      activationChannels: ["youtube"],
+      activationEvent: "published_video",
+    });
+    const second = await patchActivation(baseUrl, "CC-PATCH-READBACK", {
+      activationMethod: "provider",
+      activationChannels: ["youtube"],
+      activationEvent: "published_video",
+    });
+    const readback = await callApp(baseUrl, {
+      path: "/event/CC-PATCH-READBACK?vertical=codeclip",
+    });
+
+    assert.equal(first.status, 200);
+    assert.equal(first.body.changed, true);
+    assert.equal(second.status, 200);
+    assert.equal(second.body.changed, false);
+    assert.equal(readback.status, 200);
+    assert.equal(readback.body.id, "event-CC-PATCH-READBACK");
+    assert.equal(readback.body.code, "CC-PATCH-READBACK");
+    assert.equal(readback.body.name, "codeClip patch readback");
+    assert.equal(readback.body.status, "active");
+    assert.equal(readback.body.startAt, "2099-01-01T10:00:00.000Z");
+    assert.equal(readback.body.unlockAt, "2099-01-01T10:00:00.000Z");
+    assert.equal(readback.body.endAt, "2099-01-01T11:00:00.000Z");
+    assert.equal(readback.body.activationMethod, "provider");
+    assert.deepEqual(readback.body.activationChannels, ["youtube"]);
+    assert.equal(readback.body.activationEvent, "published_video");
+    assert.equal(row.id, "event-CC-PATCH-READBACK");
+    assert.equal(row.event_code, "CC-PATCH-READBACK");
+    assert.equal(row.raw_event.preservedField, "must-stay");
+    assert.equal(routeState.updateCalls.length, 2);
+    assert.equal(routeState.redis.calls.some((call) => call.method === "set" || call.method === "hset"), false);
+  });
+});
+
+test("event readback falls back to PostgreSQL when codeClip cache entry is absent or malformed", async () => {
+  await withServer({ redisUrl: "redis://codeclip-activation-readback-test" }, async (baseUrl) => {
+    const absent = campaignRow({
+      eventCode: "CC-NO-CACHE",
+      activationMethod: "provider",
+      activationChannels: ["youtube"],
+      activationEvent: "published_video",
+    });
+    const malformed = campaignRow({
+      eventCode: "CC-MALFORMED-CACHE",
+      activationMethod: "provider",
+      activationChannels: ["youtube"],
+      activationEvent: "published_video",
+    });
+    routeState.campaigns.set("CC-NO-CACHE", absent);
+    routeState.campaigns.set("CC-MALFORMED-CACHE", malformed);
+    routeState.redis.strings.set("eventcode:codeclip:CC-MALFORMED-CACHE", "event-CC-MALFORMED-CACHE");
+    routeState.redis.hashes.set("event:event-CC-MALFORMED-CACHE:meta", {
+      activationMethod: "keyword",
+      activationChannels: JSON.stringify(["sms"]),
+      activationEvent: "",
+    });
+
+    const noCache = await callApp(baseUrl, {
+      path: "/event/CC-NO-CACHE?vertical=codeclip",
+    });
+    const malformedCache = await callApp(baseUrl, {
+      path: "/event/CC-MALFORMED-CACHE?vertical=codeclip",
+    });
+
+    for (const response of [noCache, malformedCache]) {
+      assert.equal(response.status, 200);
+      assert.equal(response.body.activationMethod, "provider");
+      assert.deepEqual(response.body.activationChannels, ["youtube"]);
+      assert.equal(response.body.activationEvent, "published_video");
+      assert.equal(response.body.preservedField, undefined);
+    }
+    assert.equal(routeState.updateCalls.length, 0);
+    assert.equal(routeState.redis.calls.some((call) => call.method === "set" || call.method === "hset"), false);
   });
 });
 
