@@ -20,6 +20,7 @@ const {
   testDbConnection,
   saveCampaign,
   getCampaignByCode,
+  updateCodeClipEventActivationConfig,
   saveEventScan,
   saveEventRegistration,
   getEventRegistrations,
@@ -6673,6 +6674,150 @@ async function getCodeClipOperatorEventByCode(eventCode) {
   if (!event || !isCodeClipEventRecord(event)) return null;
   return event;
 }
+
+const CODECLIP_ACTIVATION_UPDATE_FIELDS = new Set([
+  "activationMethod",
+  "activationChannels",
+  "activationEvent",
+]);
+
+function getPublicCodeClipEventActivationConfig(row = null) {
+  const rawEvent = row?.raw_event || row || {};
+  return {
+    eventCode: row?.event_code || rawEvent.code || null,
+    vertical: row?.vertical || rawEvent.vertical || "codeclip",
+    activationMethod: normalizeActivationMethod(rawEvent.activationMethod),
+    activationChannels: normalizeActivationChannels(rawEvent.activationChannels),
+    activationEvent: String(rawEvent.activationEvent || "").trim().toLowerCase(),
+    updatedAt: row?.updated_at || rawEvent.updatedAt || null,
+  };
+}
+
+function sendCodeClipActivationUpdateError(res, status, code, message) {
+  return res
+    .status(status)
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      error: {
+        code,
+        message,
+      },
+    });
+}
+
+app.patch("/internal/codeclip/events/:eventCode/activation", requireCodeClipAdmin, async (req, res) => {
+  const eventCode = String(req.params.eventCode || "").trim();
+  const body = req.body || {};
+  const keys = Object.keys(body);
+  const requiredKeys = ["activationMethod", "activationChannels", "activationEvent"];
+
+  if (!eventCode) {
+    return sendCodeClipActivationUpdateError(
+      res,
+      400,
+      "VALIDATION_ERROR",
+      "Invalid activation update request."
+    );
+  }
+
+  if (
+    !body ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    keys.some((key) => !CODECLIP_ACTIVATION_UPDATE_FIELDS.has(key)) ||
+    requiredKeys.some((key) => !Object.hasOwn(body, key))
+  ) {
+    return sendCodeClipActivationUpdateError(
+      res,
+      400,
+      "VALIDATION_ERROR",
+      "Invalid activation update request."
+    );
+  }
+
+  let activationConfig;
+  try {
+    activationConfig = normalizeEventActivationConfig({
+      isCodeClipEvent: true,
+      activationMethod: body.activationMethod,
+      activationChannels: body.activationChannels,
+      activationEvent: body.activationEvent,
+    });
+  } catch (error) {
+    if (error instanceof EventActivationConfigError) {
+      return sendCodeClipActivationUpdateError(
+        res,
+        400,
+        error.code,
+        "Invalid activation configuration."
+      );
+    }
+    throw error;
+  }
+
+  try {
+    const existing = await getCampaignByCode(eventCode);
+    if (!existing) {
+      return sendCodeClipActivationUpdateError(
+        res,
+        404,
+        "EPISODE_NOT_FOUND",
+        "Episode not found."
+      );
+    }
+    if (!isCodeClipEventRecord(existing)) {
+      return sendCodeClipActivationUpdateError(
+        res,
+        409,
+        "EPISODE_VERTICAL_CONFLICT",
+        "Episode is not a codeClip episode."
+      );
+    }
+
+    const result = await updateCodeClipEventActivationConfig(eventCode, activationConfig, {
+      queryClient: database.pool,
+    });
+    if (result.status === "not_found") {
+      return sendCodeClipActivationUpdateError(
+        res,
+        404,
+        "EPISODE_NOT_FOUND",
+        "Episode not found."
+      );
+    }
+    if (result.status === "wrong_vertical") {
+      return sendCodeClipActivationUpdateError(
+        res,
+        409,
+        "EPISODE_VERTICAL_CONFLICT",
+        "Episode is not a codeClip episode."
+      );
+    }
+
+    return res
+      .status(200)
+      .set("Cache-Control", "no-store")
+      .json({
+        ok: true,
+        changed: result.changed === true,
+        event: getPublicCodeClipEventActivationConfig(result.row),
+      });
+  } catch (error) {
+    console.warn("codeClip episode activation update failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/events/:eventCode/activation",
+      operationalEvent: "episode_activation_update_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipActivationUpdateError(
+      res,
+      503,
+      "ACTIVATION_UPDATE_UNAVAILABLE",
+      "Episode activation update unavailable."
+    );
+  }
+});
 
 function getCodeClipDashboardKeyFromEvent(event = {}) {
   return String(

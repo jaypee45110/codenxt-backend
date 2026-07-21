@@ -196,6 +196,114 @@ async function getCampaignByCode(eventCode) {
   return result.rows[0] || null;
 }
 
+async function updateCodeClipEventActivationConfig(
+  eventCode,
+  { activationMethod, activationChannels, activationEvent } = {},
+  { queryClient = pool } = {}
+) {
+  if (!queryClient || typeof queryClient.query !== 'function') {
+    const error = new Error('codeClip event activation update requires PostgreSQL client');
+    error.code = 'DATABASE_UNAVAILABLE';
+    throw error;
+  }
+
+  const normalizedEventCode = String(eventCode || '').trim();
+  if (!normalizedEventCode) {
+    const error = new Error('eventCode is required');
+    error.code = 'INVALID_EVENT_CODE';
+    throw error;
+  }
+
+  const existing = await queryClient.query(
+    'SELECT * FROM campaigns WHERE event_code = $1 LIMIT 1',
+    [normalizedEventCode]
+  );
+  const current = existing.rows?.[0] || null;
+  if (!current) {
+    return { status: 'not_found', changed: false, row: null };
+  }
+
+  const rawEvent = current.raw_event || {};
+  const vertical = String(current.vertical || rawEvent.vertical || '').trim().toLowerCase();
+  if (vertical !== 'codeclip') {
+    return { status: 'wrong_vertical', changed: false, row: current };
+  }
+
+  const nextConfig = {
+    activationMethod,
+    activationChannels,
+    activationEvent,
+  };
+  const previousConfig = {
+    activationMethod: String(rawEvent.activationMethod || '').trim().toLowerCase(),
+    activationChannels: Array.isArray(rawEvent.activationChannels)
+      ? rawEvent.activationChannels
+      : [],
+    activationEvent: String(rawEvent.activationEvent || '').trim().toLowerCase(),
+  };
+  const changed =
+    previousConfig.activationMethod !== nextConfig.activationMethod ||
+    previousConfig.activationEvent !== nextConfig.activationEvent ||
+    JSON.stringify(previousConfig.activationChannels) !== JSON.stringify(nextConfig.activationChannels);
+
+  if (!changed) {
+    return {
+      status: 'unchanged',
+      changed: false,
+      row: current,
+      previousActivationConfig: previousConfig,
+      activationConfig: nextConfig,
+    };
+  }
+
+  const updated = await queryClient.query(
+    `
+      UPDATE campaigns
+      SET
+        raw_event = jsonb_set(
+          jsonb_set(
+            jsonb_set(
+              COALESCE(raw_event, '{}'::jsonb),
+              '{activationMethod}',
+              to_jsonb($2::text),
+              true
+            ),
+            '{activationChannels}',
+            $3::jsonb,
+            true
+          ),
+          '{activationEvent}',
+          to_jsonb($4::text),
+          true
+        ),
+        updated_at = NOW()
+      WHERE event_code = $1
+        AND vertical = 'codeclip'
+      RETURNING *
+    `,
+    [
+      normalizedEventCode,
+      nextConfig.activationMethod,
+      JSON.stringify(nextConfig.activationChannels),
+      nextConfig.activationEvent,
+    ]
+  );
+
+  if ((updated.rows || []).length !== 1) {
+    const error = new Error('codeClip event activation update did not confirm one row');
+    error.code = 'WRITE_CONFIRMATION_FAILED';
+    throw error;
+  }
+
+  return {
+    status: 'updated',
+    changed: true,
+    row: updated.rows[0],
+    previousActivationConfig: previousConfig,
+    activationConfig: nextConfig,
+  };
+}
+
 async function ensureEventScansTable() {
   if (!pool) return;
 
@@ -3349,6 +3457,7 @@ module.exports = {
   ensureCampaignsTable,
   saveCampaign,
   getCampaignByCode,
+  updateCodeClipEventActivationConfig,
   ensureEventScansTable,
   saveEventScan,
   getEventScanSummary,
