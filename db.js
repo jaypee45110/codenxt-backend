@@ -1619,6 +1619,93 @@ async function ensureCodeClipProviderAccountBindingsTable(queryClient = pool) {
   `);
 }
 
+const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_CONSTRAINT =
+  'codeclip_youtube_websub_subscription_audit_mode_check';
+const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_LOCK_CLASS = 2036220848;
+const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_LOCK_ID = 20260721;
+const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODES = Object.freeze([
+  'subscribe',
+  'renew',
+  'unsubscribe',
+]);
+
+function codeClipYouTubeWebSubAuditModeConstraintIsCurrent(definition = '') {
+  const normalizedDefinition = String(definition || '').toLowerCase();
+  if (!normalizedDefinition.includes('mode') || !normalizedDefinition.includes('is null')) {
+    return false;
+  }
+  const allowedModes = new Set(
+    [...normalizedDefinition.matchAll(/'([^']+)'(?:::[a-z_]+)?/g)]
+      .map((match) => match[1])
+  );
+  return (
+    allowedModes.size === CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODES.length &&
+    CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODES.every((mode) => allowedModes.has(mode))
+  );
+}
+
+async function withSchemaClientTransaction(queryClient, work) {
+  if (typeof queryClient.connect === 'function') {
+    const client = await queryClient.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await work(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  await queryClient.query('BEGIN');
+  try {
+    const result = await work(queryClient);
+    await queryClient.query('COMMIT');
+    return result;
+  } catch (error) {
+    await queryClient.query('ROLLBACK');
+    throw error;
+  }
+}
+
+async function ensureCodeClipYouTubeWebSubAuditModeConstraint(queryClient) {
+  await withSchemaClientTransaction(queryClient, async (client) => {
+    await client.query(
+      'SELECT pg_advisory_xact_lock($1, $2)',
+      [
+        CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_LOCK_CLASS,
+        CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_LOCK_ID,
+      ]
+    );
+
+    const existing = await client.query(
+      `
+        SELECT pg_get_constraintdef(c.oid) AS definition
+        FROM pg_constraint c
+        WHERE c.conrelid = 'codeclip_youtube_websub_subscription_audit'::regclass
+          AND c.conname = $1
+        LIMIT 1
+      `,
+      [CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_CONSTRAINT]
+    );
+    const definition = existing.rows?.[0]?.definition || '';
+    if (codeClipYouTubeWebSubAuditModeConstraintIsCurrent(definition)) return;
+
+    await client.query(`
+      ALTER TABLE codeclip_youtube_websub_subscription_audit
+      DROP CONSTRAINT IF EXISTS codeclip_youtube_websub_subscription_audit_mode_check
+    `);
+    await client.query(`
+      ALTER TABLE codeclip_youtube_websub_subscription_audit
+      ADD CONSTRAINT codeclip_youtube_websub_subscription_audit_mode_check
+      CHECK (mode IS NULL OR mode IN ('subscribe', 'renew', 'unsubscribe'))
+    `);
+  });
+}
+
 async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool) {
   if (!queryClient) return;
 
@@ -1721,9 +1808,12 @@ async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool)
         'hub_request_accepted',
         'hub_request_failed'
       )),
-      CHECK (mode IS NULL OR mode IN ('subscribe', 'unsubscribe'))
+      CONSTRAINT codeclip_youtube_websub_subscription_audit_mode_check
+        CHECK (mode IS NULL OR mode IN ('subscribe', 'renew', 'unsubscribe'))
     )
   `);
+
+  await ensureCodeClipYouTubeWebSubAuditModeConstraint(queryClient);
 
   await queryClient.query(`
     CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_subscription_audit_callback_idx

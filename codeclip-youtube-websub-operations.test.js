@@ -11,6 +11,9 @@ const {
   buildCallbackUrl,
   toPublicSubscriptionStatus,
 } = require("./verticals/codeclip/youtube-websub-operations");
+const {
+  recordCodeClipYouTubeWebSubSubscriptionAudit,
+} = require("./verticals/codeclip/youtube-websub-subscriptions");
 
 const CHANNEL_ID = "UCaaaaaaaaaaaaaaaaaaaaaa";
 const EVENT_CODE = "CC-YOUTUBE-OPS";
@@ -833,6 +836,85 @@ test("YouTube WebSub renew preserves boundary and keeps status pending until cha
     "hub_request_accepted",
   ]);
   assert.deepEqual(state.auditRows.map((row) => row.mode), ["renew", "renew"]);
+});
+
+test("YouTube WebSub renew accepts production active state with real audit mode validation", async () => {
+  const { state, options } = baseOptions({
+    state: {
+      existingByCallback: subscription({
+        status: "active",
+        pendingMode: null,
+        activationBoundaryAt: "2026-07-21T11:13:50.828Z",
+        leaseStartedAt: "2026-07-21T11:13:50.828Z",
+        leaseExpiresAt: "2026-07-31T11:13:50.828Z",
+        metadata: {
+          dispatch: {
+            mode: "subscribe",
+            status: "accepted",
+            resultCode: "hub_request_accepted",
+            attemptNumber: 1,
+          },
+        },
+      }),
+    },
+  });
+  options.recordAudit = async (input) => {
+    state.calls.push(["realAudit", input]);
+    const audit = await recordCodeClipYouTubeWebSubSubscriptionAudit(input, {
+      queryClient: {
+        query: async (_sql, params) => ({
+          rows: [{
+            id: String(state.auditRows.length + 1),
+            vertical: "codeclip",
+            provider: "youtube",
+            callback_id: params[0],
+            provider_account_id: params[1],
+            event_code: params[2],
+            action: params[3],
+            mode: params[4],
+            result_code: params[5],
+            hub_http_status: params[6],
+            retryable: params[7],
+            metadata: JSON.parse(params[8]),
+            created_at: "2026-07-21T11:13:51.000Z",
+          }],
+        }),
+      },
+    });
+    state.auditRows.push(audit);
+    return audit;
+  };
+
+  const result = await renewCodeClipYouTubeWebSubSubscriptionOperation(
+    "yt_callback_1",
+    {},
+    options
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "renewal_pending");
+  assert.equal(result.dispatchClaimed, true);
+  assert.equal(state.calls.some((call) => call[0] === "renewPending"), true);
+  assert.equal(state.calls.some((call) => call[0] === "claimDispatch" && call[1] === "renew"), true);
+  assert.equal(state.calls.find((call) => call[0] === "hub")[1].mode, "subscribe");
+
+  const realAuditCalls = state.calls.filter((call) => call[0] === "realAudit");
+  assert.equal(realAuditCalls.length, 2);
+  assert.equal(realAuditCalls[0][1].action, "renewal_requested");
+  assert.equal(realAuditCalls[0][1].mode, "renew");
+  assert.equal(realAuditCalls[1][1].action, "hub_request_accepted");
+  assert.equal(realAuditCalls[1][1].mode, "renew");
+  assert.deepEqual(state.auditRows.map((row) => row.action), [
+    "renewal_requested",
+    "hub_request_accepted",
+  ]);
+  assert.deepEqual(state.auditRows.map((row) => row.mode), ["renew", "renew"]);
+  assert.deepEqual(
+    state.calls
+      .filter((call) => ["BEGIN", "renewPending", "realAudit", "COMMIT", "claimDispatch", "hub"].includes(call[0]))
+      .map((call) => call[0]),
+    ["BEGIN", "renewPending", "realAudit", "COMMIT", "claimDispatch", "hub", "realAudit"]
+  );
 });
 
 test("YouTube WebSub renew duplicate, retry, stale and failure dispatch states are handled", async () => {

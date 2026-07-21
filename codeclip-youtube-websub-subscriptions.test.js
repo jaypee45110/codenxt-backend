@@ -345,16 +345,102 @@ function createSubscriptionClient() {
   };
 }
 
-test("YouTube WebSub subscription schema ensure is idempotent and preserves data", async () => {
-  const existingRow = row({ callback_id: "existing_cb" });
-  const client = {
-    calls: [],
-    rows: [clone(existingRow)],
+const CURRENT_AUDIT_MODE_CONSTRAINT =
+  "CHECK (((mode IS NULL) OR (mode = ANY (ARRAY['subscribe'::text, 'renew'::text, 'unsubscribe'::text]))))";
+const OLD_AUDIT_MODE_CONSTRAINT =
+  "CHECK (((mode IS NULL) OR (mode = ANY (ARRAY['subscribe'::text, 'unsubscribe'::text]))))";
+
+function isAuditConstraintInspect(sql) {
+  return /pg_get_constraintdef/.test(sql) &&
+    /codeclip_youtube_websub_subscription_audit/.test(sql);
+}
+
+function isAuditConstraintDdl(sql) {
+  return /ALTER TABLE codeclip_youtube_websub_subscription_audit/.test(sql) &&
+    /codeclip_youtube_websub_subscription_audit_mode_check/.test(sql);
+}
+
+function createSchemaEnsureClient({ constraintDefinition = CURRENT_AUDIT_MODE_CONSTRAINT } = {}) {
+  const calls = [];
+  let definition = constraintDefinition;
+  return {
+    calls,
+    rows: [],
     async query(sql, params = []) {
-      this.calls.push({ sql, params });
+      calls.push({ sql, params });
+      if (isAuditConstraintInspect(sql)) {
+        return { rows: definition ? [{ definition }] : [] };
+      }
+      if (/ADD CONSTRAINT codeclip_youtube_websub_subscription_audit_mode_check/.test(sql)) {
+        definition = CURRENT_AUDIT_MODE_CONSTRAINT;
+      }
       return { rows: [] };
     },
   };
+}
+
+function createConcurrentSchemaEnsurePool({ constraintDefinition = OLD_AUDIT_MODE_CONSTRAINT } = {}) {
+  const calls = [];
+  let definition = constraintDefinition;
+  let locked = false;
+  const waiters = [];
+
+  async function acquireLock() {
+    if (!locked) {
+      locked = true;
+      return;
+    }
+    await new Promise((resolve) => waiters.push(resolve));
+  }
+
+  function releaseLock() {
+    const next = waiters.shift();
+    if (next) {
+      next();
+      return;
+    }
+    locked = false;
+  }
+
+  function createClient(clientId) {
+    return {
+      async query(sql, params = []) {
+        calls.push({ clientId, sql, params });
+        if (/pg_advisory_xact_lock/.test(sql)) {
+          await acquireLock();
+          return { rows: [] };
+        }
+        if (isAuditConstraintInspect(sql)) {
+          return { rows: definition ? [{ definition }] : [] };
+        }
+        if (/ADD CONSTRAINT codeclip_youtube_websub_subscription_audit_mode_check/.test(sql)) {
+          definition = CURRENT_AUDIT_MODE_CONSTRAINT;
+        }
+        if (sql === "COMMIT" || sql === "ROLLBACK") {
+          releaseLock();
+        }
+        return { rows: [] };
+      },
+      release() {},
+    };
+  }
+
+  return {
+    calls,
+    async query(sql, params = []) {
+      calls.push({ clientId: "pool", sql, params });
+      return { rows: [] };
+    },
+    async connect() {
+      return createClient(calls.filter((call) => call.sql === "BEGIN").length + 1);
+    },
+  };
+}
+
+test("YouTube WebSub subscription schema ensure is idempotent and preserves data", async () => {
+  const existingRow = row({ callback_id: "existing_cb" });
+  const client = createSchemaEnsureClient();
+  client.rows = [clone(existingRow)];
 
   await ensureCodeClipYouTubeWebSubSubscriptionsTable(client);
   await ensureCodeClipYouTubeWebSubSubscriptionsTable(client);
@@ -386,9 +472,44 @@ test("YouTube WebSub subscription schema ensure is idempotent and preserves data
   assert.match(sql, /unsubscribe_requested/);
   assert.match(sql, /hub_request_accepted/);
   assert.match(sql, /hub_request_failed/);
+  assert.match(sql, /pg_advisory_xact_lock/);
+  assert.match(sql, /pg_get_constraintdef/);
+  assert.match(sql, /codeclip_youtube_websub_subscription_audit_mode_check/);
+  assert.match(sql, /'renew'/);
   assert.match(sql, /codeclip_youtube_websub_subscription_audit_callback_idx/);
   assert.match(sql, /codeclip_youtube_websub_subscription_audit_account_idx/);
+  assert.equal(client.calls.filter((call) => isAuditConstraintDdl(call.sql)).length, 0);
   assert.deepEqual(client.rows, [existingRow]);
+});
+
+test("YouTube WebSub audit mode constraint is upgraded only when missing or stale", async () => {
+  const missing = createSchemaEnsureClient({ constraintDefinition: null });
+  await ensureCodeClipYouTubeWebSubSubscriptionsTable(missing);
+  assert.equal(missing.calls.filter((call) => isAuditConstraintDdl(call.sql)).length, 2);
+
+  const stale = createSchemaEnsureClient({ constraintDefinition: OLD_AUDIT_MODE_CONSTRAINT });
+  await ensureCodeClipYouTubeWebSubSubscriptionsTable(stale);
+  await ensureCodeClipYouTubeWebSubSubscriptionsTable(stale);
+  assert.equal(stale.calls.filter((call) => isAuditConstraintDdl(call.sql)).length, 2);
+
+  const current = createSchemaEnsureClient({ constraintDefinition: CURRENT_AUDIT_MODE_CONSTRAINT });
+  await ensureCodeClipYouTubeWebSubSubscriptionsTable(current);
+  await ensureCodeClipYouTubeWebSubSubscriptionsTable(current);
+  assert.equal(current.calls.filter((call) => isAuditConstraintDdl(call.sql)).length, 0);
+});
+
+test("YouTube WebSub audit mode constraint upgrade is advisory-lock serialized", async () => {
+  const pool = createConcurrentSchemaEnsurePool({
+    constraintDefinition: OLD_AUDIT_MODE_CONSTRAINT,
+  });
+  await Promise.all([
+    ensureCodeClipYouTubeWebSubSubscriptionsTable(pool),
+    ensureCodeClipYouTubeWebSubSubscriptionsTable(pool),
+  ]);
+
+  assert.equal(pool.calls.filter((call) => /pg_advisory_xact_lock/.test(call.sql)).length, 2);
+  assert.equal(pool.calls.filter((call) => isAuditConstraintInspect(call.sql)).length, 2);
+  assert.equal(pool.calls.filter((call) => isAuditConstraintDdl(call.sql)).length, 2);
 });
 
 test("YouTube WebSub subscription input validation accepts canonical channel IDs", () => {
@@ -1218,6 +1339,48 @@ test("YouTube WebSub subscription audit is parameterized and stores only allowli
   assert.equal(serialized.includes("Bearer"), false);
   assert.equal(serialized.includes("<xml"), false);
   assert.equal(serialized.includes("sha256="), false);
+});
+
+test("YouTube WebSub audit mode accepts lifecycle modes and keeps pending mode strict", async () => {
+  for (const mode of ["subscribe", "renew", "unsubscribe"]) {
+    const client = createSubscriptionClient();
+    const audit = await recordCodeClipYouTubeWebSubSubscriptionAudit(
+      {
+        callbackId: "yt_cb_123",
+        providerAccountId: CHANNEL_ID,
+        action: mode === "renew" ? "renewal_requested" : "hub_request_accepted",
+        mode,
+        resultCode: `${mode}_accepted`,
+      },
+      { queryClient: client }
+    );
+    assert.equal(audit.mode, mode);
+  }
+
+  await assert.rejects(
+    () => recordCodeClipYouTubeWebSubSubscriptionAudit(
+      {
+        callbackId: "yt_cb_123",
+        providerAccountId: CHANNEL_ID,
+        action: "hub_request_accepted",
+        mode: "refresh",
+        resultCode: "hub_request_accepted",
+      },
+      { queryClient: createSubscriptionClient() }
+    ),
+    (error) =>
+      error instanceof CodeClipYouTubeWebSubSubscriptionError &&
+      error.code === "INVALID_YOUTUBE_WEBSUB_SUBSCRIPTION" &&
+      error.details?.fieldName === "auditMode"
+  );
+
+  assert.throws(
+    () => normalizeSubscriptionInput(validInput({ pendingMode: "renew" })),
+    (error) =>
+      error instanceof CodeClipYouTubeWebSubSubscriptionError &&
+      error.code === "INVALID_YOUTUBE_WEBSUB_SUBSCRIPTION" &&
+      error.details?.fieldName === "pendingMode"
+  );
 });
 
 test("YouTube WebSub verified transition sets lease and preserves activation boundary on renewal", async () => {

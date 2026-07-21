@@ -23,8 +23,15 @@ const PENDING_MODES = Object.freeze({
   UNSUBSCRIBE: "unsubscribe",
 });
 
+const AUDIT_MODES = Object.freeze({
+  SUBSCRIBE: "subscribe",
+  RENEW: "renew",
+  UNSUBSCRIBE: "unsubscribe",
+});
+
 const VALID_STATUSES = new Set(Object.values(SUBSCRIPTION_STATUSES));
 const VALID_PENDING_MODES = new Set(Object.values(PENDING_MODES));
+const VALID_AUDIT_MODES = new Set(Object.values(AUDIT_MODES));
 const VALID_AUDIT_ACTIONS = new Set([
   "subscription_requested",
   "renewal_requested",
@@ -154,6 +161,15 @@ function normalizeAuditAction(value) {
   const normalized = normalizeRequiredString(value, "action", 80).toLowerCase();
   if (!VALID_AUDIT_ACTIONS.has(normalized)) {
     throw subscriptionInputError("action is not valid", { fieldName: "action" });
+  }
+  return normalized;
+}
+
+function normalizeAuditMode(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const normalized = normalizeRequiredString(value, "auditMode", 40).toLowerCase();
+  if (!VALID_AUDIT_MODES.has(normalized)) {
+    throw subscriptionInputError("audit mode is not valid", { fieldName: "auditMode" });
   }
   return normalized;
 }
@@ -516,7 +532,7 @@ async function recordCodeClipYouTubeWebSubSubscriptionAudit(input = {}, { queryC
       providerAccountId,
       normalizeEventCode(input.eventCode || input.event_code),
       normalizeAuditAction(input.action),
-      normalizePendingMode(input.mode),
+      normalizeAuditMode(input.mode),
       normalizeResultCode(input.resultCode || input.result_code),
       normalizeHubHttpStatus(input.hubHttpStatus || input.hub_http_status),
       Boolean(input.retryable),
