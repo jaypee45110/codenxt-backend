@@ -374,6 +374,34 @@ function isRetryableHubResult(hubResult = {}) {
   return status >= 500 && status <= 599;
 }
 
+function normalizeRenewDispatchNowEpochMs(value) {
+  const candidate =
+    value === undefined || value === null || value === ""
+      ? new Date().getTime()
+      : Number(value);
+  if (!Number.isSafeInteger(candidate) || candidate < 0) {
+    throw operationError("validation_error", "dispatchNowEpochMs is invalid", {
+      fieldName: "dispatchNowEpochMs",
+    });
+  }
+  return candidate;
+}
+
+function isSameActiveRenewDispatchAttempt(dispatch = {}, { attemptId, nowEpochMs } = {}) {
+  return (
+    dispatch &&
+    typeof dispatch === "object" &&
+    !Array.isArray(dispatch) &&
+    dispatch.mode === "renew" &&
+    dispatch.status === "started" &&
+    dispatch.attemptId === attemptId &&
+    Number.isSafeInteger(dispatch.attemptNumber) &&
+    dispatch.attemptNumber >= 0 &&
+    Number.isSafeInteger(dispatch.staleAfterEpochMs) &&
+    dispatch.staleAfterEpochMs > nowEpochMs
+  );
+}
+
 const DISPATCH_OPERATIONS = Object.freeze({
   subscribe: Object.freeze({
     hubMode: "subscribe",
@@ -416,6 +444,10 @@ async function runLifecycleDispatch({
     throw operationError("validation_error", "YouTube WebSub dispatch mode is invalid");
   }
   const attemptId = (options.generateDispatchAttemptId || buildDispatchAttemptId)();
+  const dispatchNowEpochMs =
+    dispatchMode === "renew"
+      ? normalizeRenewDispatchNowEpochMs(options.dispatchNowEpochMs)
+      : options.dispatchNowEpochMs;
   const claim = await (
     options[operation.claimOption] || operation.claim
   )(
@@ -424,12 +456,36 @@ async function runLifecycleDispatch({
       attemptId,
       leaseSeconds,
       staleAfterSeconds: options.dispatchStaleAfterSeconds,
-      nowEpochMs: options.dispatchNowEpochMs,
+      nowEpochMs: dispatchNowEpochMs,
       queryClient,
     }
   );
 
   if (!claim) {
+    if (dispatchMode === "renew") {
+      const current = await (
+        options.getSubscriptionByCallbackId || getCodeClipYouTubeWebSubSubscriptionByCallbackId
+      )(subscription.callbackId, { queryClient });
+      if (!isSameActiveRenewDispatchAttempt(current?.metadata?.dispatch, {
+        attemptId,
+        nowEpochMs: dispatchNowEpochMs,
+      })) {
+        return {
+          ok: false,
+          code: "subscription_state_conflict",
+          status: current?.status || subscription.status,
+          dispatchClaimed: false,
+          subscription: toPublicSubscriptionStatus(current || subscription),
+        };
+      }
+      return {
+        ok: true,
+        code: operation.successCode,
+        status: current.status,
+        dispatchClaimed: false,
+        subscription: toPublicSubscriptionStatus(current),
+      };
+    }
     return {
       ok: true,
       code: operation.successCode,

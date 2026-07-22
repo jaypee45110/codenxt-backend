@@ -82,9 +82,8 @@ function isSafeAttemptNumber(value) {
 function claimableDispatch(dispatch, nowEpochMs, expectedMode = "subscribe") {
   if (dispatch === undefined || dispatch === null) return true;
   if (typeof dispatch !== "object" || Array.isArray(dispatch)) return false;
-  if (dispatch.status === "failed") {
+  if (dispatch.status === "failed" && dispatch.mode === expectedMode) {
     return (
-      dispatch.mode === expectedMode &&
       dispatch.retryEligible === true &&
       isSafeAttemptNumber(dispatch.attemptNumber)
     );
@@ -96,6 +95,16 @@ function claimableDispatch(dispatch, nowEpochMs, expectedMode = "subscribe") {
       Number.isSafeInteger(dispatch.staleAfterEpochMs) &&
       dispatch.staleAfterEpochMs >= 0 &&
       dispatch.staleAfterEpochMs <= nowEpochMs
+    );
+  }
+  if (
+    expectedMode === "renew" &&
+    dispatch.mode === "subscribe" &&
+    isSafeAttemptNumber(dispatch.attemptNumber)
+  ) {
+    return (
+      dispatch.status === "accepted" ||
+      (dispatch.status === "failed" && dispatch.retryEligible === false)
     );
   }
   return false;
@@ -754,6 +763,155 @@ test("YouTube WebSub subscribe dispatch claim rejects terminal success and non-r
     assert.equal(client.rows[0].metadata.dispatch.attemptId, "attempt_1");
     assert.equal(client.rows[0].metadata.dispatch.status, dispatch.status);
   }
+});
+
+test("YouTube WebSub renew dispatch recovers existing pending renewal after terminal subscribe dispatch", async () => {
+  const client = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+      pendingMode: PENDING_MODES.SUBSCRIBE,
+      metadata: {
+        dispatch: {
+          attemptId: "attempt_subscribe_accepted",
+          attemptNumber: 1,
+          status: "accepted",
+          mode: "subscribe",
+          resultCode: "hub_request_accepted",
+          hubHttpStatus: 202,
+          retryEligible: false,
+          completedAt: "2026-07-21T11:13:50.914Z",
+        },
+      },
+    }),
+    { queryClient: client }
+  );
+
+  const claimed = await claimCodeClipYouTubeWebSubRenewDispatch("yt_cb_123", {
+    attemptId: "attempt_renew_1",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: client,
+  });
+
+  assert.ok(claimed, "existing pending_renewal with terminal subscribe dispatch should be recoverable");
+  assert.equal(claimed.metadata.dispatch.attemptId, "attempt_renew_1");
+  assert.equal(claimed.metadata.dispatch.mode, "renew");
+  assert.equal(claimed.metadata.dispatch.status, "started");
+  assert.equal(claimed.metadata.dispatch.attemptNumber, 2);
+  assert.equal(claimed.metadata.dispatch.previousAttemptCount, 1);
+});
+
+test("YouTube WebSub renew dispatch fails closed for retryable and malformed other lifecycle dispatch", async (t) => {
+  const cases = [
+    {
+      name: "retryable failed subscribe is non-terminal and remains owned by subscribe",
+      dispatch: {
+        attemptId: "attempt_subscribe_retryable",
+        attemptNumber: 1,
+        status: "failed",
+        mode: "subscribe",
+        resultCode: "hub_request_timeout",
+        retryEligible: true,
+      },
+    },
+    {
+      name: "missing mode remains fail-closed",
+      dispatch: {
+        attemptId: "attempt_subscribe_missing_mode",
+        attemptNumber: 1,
+        status: "accepted",
+        resultCode: "hub_request_accepted",
+        retryEligible: false,
+      },
+    },
+    {
+      name: "missing status remains fail-closed",
+      dispatch: {
+        attemptId: "attempt_subscribe_missing_status",
+        attemptNumber: 1,
+        mode: "subscribe",
+        resultCode: "hub_request_accepted",
+        retryEligible: false,
+      },
+    },
+    {
+      name: "malformed attemptNumber remains fail-closed",
+      dispatch: {
+        attemptId: "attempt_subscribe_bad_attempt",
+        attemptNumber: "1",
+        status: "accepted",
+        mode: "subscribe",
+        resultCode: "hub_request_accepted",
+        retryEligible: false,
+      },
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const client = createSubscriptionClient();
+      await createPendingCodeClipYouTubeWebSubSubscription(
+        validInput({
+          status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+          pendingMode: PENDING_MODES.SUBSCRIBE,
+          metadata: { dispatch: item.dispatch },
+        }),
+        { queryClient: client }
+      );
+      const before = clone(client.rows[0].metadata.dispatch);
+
+      const claimed = await claimCodeClipYouTubeWebSubRenewDispatch("yt_cb_123", {
+        attemptId: "attempt_renew_rejected",
+        leaseSeconds: 864000,
+        staleAfterSeconds: 60,
+        nowEpochMs: 1_800_000_000_000,
+        queryClient: client,
+      });
+
+      assert.equal(claimed, null);
+      assert.deepEqual(client.rows[0].metadata.dispatch, before);
+    });
+  }
+});
+
+test("YouTube WebSub renew dispatch explicitly replaces terminal failed subscribe dispatch", async () => {
+  const client = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(
+    validInput({
+      status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL,
+      pendingMode: PENDING_MODES.SUBSCRIBE,
+      metadata: {
+        dispatch: {
+          attemptId: "attempt_subscribe_terminal_failure",
+          attemptNumber: 1,
+          status: "failed",
+          mode: "subscribe",
+          resultCode: "hub_request_rejected",
+          hubHttpStatus: 400,
+          retryEligible: false,
+          completedAt: "2026-07-21T11:13:50.914Z",
+        },
+      },
+    }),
+    { queryClient: client }
+  );
+
+  const claimed = await claimCodeClipYouTubeWebSubRenewDispatch("yt_cb_123", {
+    attemptId: "attempt_renew_after_terminal_failure",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: client,
+  });
+
+  assert.ok(claimed, "terminal non-retryable subscribe failure should not block a new renew lifecycle");
+  assert.equal(claimed.metadata.dispatch.attemptId, "attempt_renew_after_terminal_failure");
+  assert.equal(claimed.metadata.dispatch.mode, "renew");
+  assert.equal(claimed.metadata.dispatch.status, "started");
+  assert.equal(claimed.metadata.dispatch.attemptNumber, 2);
+  assert.equal(claimed.metadata.dispatch.previousAttemptCount, 1);
 });
 
 test("YouTube WebSub subscribe dispatch claim supports numeric stale reclaim and rejects fresh claims", async () => {

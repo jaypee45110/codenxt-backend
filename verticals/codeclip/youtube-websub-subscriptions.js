@@ -711,6 +711,21 @@ async function claimCodeClipYouTubeWebSubDispatch(
             AND (metadata->'dispatch'->>'staleAfterEpochMs')::numeric <=
               COALESCE($5::numeric, FLOOR(EXTRACT(EPOCH FROM NOW()) * 1000)::numeric)
           )
+          OR (
+            $6 = 'renew'
+            AND jsonb_typeof(metadata->'dispatch') = 'object'
+            AND metadata->'dispatch'->>'mode' = 'subscribe'
+            AND jsonb_typeof(metadata->'dispatch'->'attemptNumber') = 'number'
+            AND (metadata->'dispatch'->>'attemptNumber') ~ '^[0-9]{1,9}$'
+            AND (metadata->'dispatch'->>'attemptNumber')::bigint < 2147483647
+            AND (
+              metadata->'dispatch'->>'status' = 'accepted'
+              OR (
+                metadata->'dispatch'->>'status' = 'failed'
+                AND metadata->'dispatch'->>'retryEligible' = 'false'
+              )
+            )
+          )
         )
       RETURNING *
     `,

@@ -325,6 +325,29 @@ test("YouTube WebSub renew and unsubscribe routes call operation without exposin
   assertNoSecretLeak(unsubscribe);
 });
 
+test("YouTube WebSub renew route maps missing dispatch claim to conflict", async () => {
+  reset({
+    renew: {
+      ok: false,
+      code: "subscription_state_conflict",
+      status: "pending_renewal",
+      dispatchClaimed: false,
+      subscription: { callbackId: "yt_route_cb", providerAccountId: "UCrouteSafeChannel123456789" },
+    },
+  });
+  const response = await callApp({
+    method: "POST",
+    path: "/internal/codeclip/youtube-websub/subscriptions/yt_route_cb/renew",
+    body: {},
+  });
+
+  assert.equal(response.status, 409);
+  assert.equal(response.body.ok, false);
+  assert.equal(response.body.code, "subscription_state_conflict");
+  assert.equal(calls[0][0], "renew");
+  assertNoSecretLeak(response);
+});
+
 test("YouTube WebSub operator routes map public-safe operation errors", async () => {
   reset();
   operationError = new StubOperationError("authentication_unavailable");
