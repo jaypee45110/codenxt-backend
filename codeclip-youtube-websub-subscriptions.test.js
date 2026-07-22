@@ -717,6 +717,45 @@ test("YouTube WebSub subscribe dispatch claim supports retryable failed subscrib
   }
 });
 
+test("YouTube WebSub subscribe dispatch claim rejects terminal success and non-retryable failure", async () => {
+  for (const dispatch of [
+    {
+      attemptId: "attempt_1",
+      attemptNumber: 1,
+      status: "accepted",
+      mode: "subscribe",
+      retryEligible: false,
+      resultCode: "hub_request_accepted",
+    },
+    {
+      attemptId: "attempt_1",
+      attemptNumber: 1,
+      status: "failed",
+      mode: "subscribe",
+      retryEligible: false,
+      resultCode: "hub_request_rejected",
+    },
+  ]) {
+    const client = createSubscriptionClient();
+    await createPendingCodeClipYouTubeWebSubSubscription(
+      validInput({ metadata: { dispatch } }),
+      { queryClient: client }
+    );
+
+    const claimed = await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+      attemptId: "attempt_2",
+      leaseSeconds: 864000,
+      staleAfterSeconds: 60,
+      nowEpochMs: 1_800_000_000_000,
+      queryClient: client,
+    });
+
+    assert.equal(claimed, null);
+    assert.equal(client.rows[0].metadata.dispatch.attemptId, "attempt_1");
+    assert.equal(client.rows[0].metadata.dispatch.status, dispatch.status);
+  }
+});
+
 test("YouTube WebSub subscribe dispatch claim supports numeric stale reclaim and rejects fresh claims", async () => {
   const stale = createSubscriptionClient();
   await createPendingCodeClipYouTubeWebSubSubscription(
@@ -834,6 +873,58 @@ test("YouTube WebSub subscribe dispatch result is owned by exact attempt and pre
   assert.equal(accepted.metadata.dispatch.status, "accepted");
   assert.equal(accepted.metadata.dispatch.retryEligible, false);
   assert.equal(accepted.lastVerifiedAt, null);
+});
+
+test("YouTube WebSub subscribe dispatch result records retryable and terminal failures", async () => {
+  const retryable = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(validInput(), { queryClient: retryable });
+  await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_retryable_failure",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: retryable,
+  });
+  const retryableFailure = await recordCodeClipYouTubeWebSubSubscribeDispatchResult("yt_cb_123", {
+    attemptId: "attempt_retryable_failure",
+    resultCode: "hub_request_timeout",
+    hubHttpStatus: 503,
+    retryable: true,
+    queryClient: retryable,
+  });
+  assert.equal(retryableFailure.status, SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE);
+  assert.equal(retryableFailure.pendingMode, PENDING_MODES.SUBSCRIBE);
+  assert.equal(retryableFailure.metadata.dispatch.status, "failed");
+  assert.equal(retryableFailure.metadata.dispatch.mode, "subscribe");
+  assert.equal(retryableFailure.metadata.dispatch.resultCode, "hub_request_timeout");
+  assert.equal(retryableFailure.metadata.dispatch.hubHttpStatus, 503);
+  assert.equal(retryableFailure.metadata.dispatch.retryEligible, true);
+  assert.equal(retryableFailure.metadata.dispatch.completedAt, "2026-07-17T00:00:02.000Z");
+
+  const terminal = createSubscriptionClient();
+  await createPendingCodeClipYouTubeWebSubSubscription(validInput(), { queryClient: terminal });
+  await claimCodeClipYouTubeWebSubSubscribeDispatch("yt_cb_123", {
+    attemptId: "attempt_terminal_failure",
+    leaseSeconds: 864000,
+    staleAfterSeconds: 60,
+    nowEpochMs: 1_800_000_000_000,
+    queryClient: terminal,
+  });
+  const terminalFailure = await recordCodeClipYouTubeWebSubSubscribeDispatchResult("yt_cb_123", {
+    attemptId: "attempt_terminal_failure",
+    resultCode: "hub_request_rejected",
+    hubHttpStatus: 400,
+    retryable: false,
+    queryClient: terminal,
+  });
+  assert.equal(terminalFailure.status, SUBSCRIPTION_STATUSES.PENDING_SUBSCRIBE);
+  assert.equal(terminalFailure.pendingMode, PENDING_MODES.SUBSCRIBE);
+  assert.equal(terminalFailure.metadata.dispatch.status, "failed");
+  assert.equal(terminalFailure.metadata.dispatch.mode, "subscribe");
+  assert.equal(terminalFailure.metadata.dispatch.resultCode, "hub_request_rejected");
+  assert.equal(terminalFailure.metadata.dispatch.hubHttpStatus, 400);
+  assert.equal(terminalFailure.metadata.dispatch.retryEligible, false);
+  assert.equal(terminalFailure.metadata.dispatch.completedAt, "2026-07-17T00:00:02.000Z");
 });
 
 test("YouTube WebSub late result cannot overwrite a reclaimed attempt", async () => {
