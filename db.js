@@ -1621,12 +1621,24 @@ async function ensureCodeClipProviderAccountBindingsTable(queryClient = pool) {
 
 const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_CONSTRAINT =
   'codeclip_youtube_websub_subscription_audit_mode_check';
+const CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTION_CONSTRAINT =
+  'codeclip_youtube_websub_subscription_audit_action_check';
 const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_LOCK_CLASS = 2036220848;
 const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_LOCK_ID = 20260721;
+const CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTION_LOCK_CLASS = 2036220848;
+const CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTION_LOCK_ID = 20260723;
 const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODES = Object.freeze([
   'subscribe',
   'renew',
   'unsubscribe',
+]);
+const CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTIONS = Object.freeze([
+  'subscription_requested',
+  'renewal_requested',
+  'renewal_conflict_recovered',
+  'unsubscribe_requested',
+  'hub_request_accepted',
+  'hub_request_failed',
 ]);
 
 function codeClipYouTubeWebSubAuditModeConstraintIsCurrent(definition = '') {
@@ -1641,6 +1653,19 @@ function codeClipYouTubeWebSubAuditModeConstraintIsCurrent(definition = '') {
   return (
     allowedModes.size === CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODES.length &&
     CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODES.every((mode) => allowedModes.has(mode))
+  );
+}
+
+function codeClipYouTubeWebSubAuditActionConstraintIsCurrent(definition = '') {
+  const normalizedDefinition = String(definition || '').toLowerCase();
+  if (!normalizedDefinition.includes('action')) return false;
+  const allowedActions = new Set(
+    [...normalizedDefinition.matchAll(/'([^']+)'(?:::[a-z_]+)?/g)]
+      .map((match) => match[1])
+  );
+  return (
+    allowedActions.size === CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTIONS.length &&
+    CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTIONS.every((action) => allowedActions.has(action))
   );
 }
 
@@ -1702,6 +1727,51 @@ async function ensureCodeClipYouTubeWebSubAuditModeConstraint(queryClient) {
       ALTER TABLE codeclip_youtube_websub_subscription_audit
       ADD CONSTRAINT codeclip_youtube_websub_subscription_audit_mode_check
       CHECK (mode IS NULL OR mode IN ('subscribe', 'renew', 'unsubscribe'))
+    `);
+  });
+}
+
+async function ensureCodeClipYouTubeWebSubAuditActionConstraint(queryClient) {
+  await withSchemaClientTransaction(queryClient, async (client) => {
+    await client.query(
+      'SELECT pg_advisory_xact_lock($1, $2)',
+      [
+        CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTION_LOCK_CLASS,
+        CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTION_LOCK_ID,
+      ]
+    );
+
+    const existing = await client.query(
+      `
+        SELECT pg_get_constraintdef(c.oid) AS definition
+        FROM pg_constraint c
+        WHERE c.conrelid = 'codeclip_youtube_websub_subscription_audit'::regclass
+          AND c.contype = 'c'
+          AND c.conname = $1
+        LIMIT 1
+      `,
+      [CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTION_CONSTRAINT]
+    );
+    const definition = existing.rows?.[0]?.definition || '';
+    if (codeClipYouTubeWebSubAuditActionConstraintIsCurrent(definition)) return;
+
+    if (definition) {
+      await client.query(`
+        ALTER TABLE codeclip_youtube_websub_subscription_audit
+        DROP CONSTRAINT IF EXISTS codeclip_youtube_websub_subscription_audit_action_check
+      `);
+    }
+    await client.query(`
+      ALTER TABLE codeclip_youtube_websub_subscription_audit
+      ADD CONSTRAINT codeclip_youtube_websub_subscription_audit_action_check
+      CHECK (action IN (
+        'subscription_requested',
+        'renewal_requested',
+        'renewal_conflict_recovered',
+        'unsubscribe_requested',
+        'hub_request_accepted',
+        'hub_request_failed'
+      ))
     `);
   });
 }
@@ -1801,9 +1871,11 @@ async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool)
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       CHECK (vertical = 'codeclip'),
       CHECK (provider = 'youtube'),
+      CONSTRAINT codeclip_youtube_websub_subscription_audit_action_check
       CHECK (action IN (
         'subscription_requested',
         'renewal_requested',
+        'renewal_conflict_recovered',
         'unsubscribe_requested',
         'hub_request_accepted',
         'hub_request_failed'
@@ -1814,6 +1886,7 @@ async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool)
   `);
 
   await ensureCodeClipYouTubeWebSubAuditModeConstraint(queryClient);
+  await ensureCodeClipYouTubeWebSubAuditActionConstraint(queryClient);
 
   await queryClient.query(`
     CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_subscription_audit_callback_idx

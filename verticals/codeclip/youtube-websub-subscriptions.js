@@ -35,6 +35,7 @@ const VALID_AUDIT_MODES = new Set(Object.values(AUDIT_MODES));
 const VALID_AUDIT_ACTIONS = new Set([
   "subscription_requested",
   "renewal_requested",
+  "renewal_conflict_recovered",
   "unsubscribe_requested",
   "subscribe_dispatch_started",
   "subscribe_dispatch_accepted",
@@ -714,7 +715,7 @@ async function claimCodeClipYouTubeWebSubDispatch(
           OR (
             $6 = 'renew'
             AND jsonb_typeof(metadata->'dispatch') = 'object'
-            AND metadata->'dispatch'->>'mode' = 'subscribe'
+            AND metadata->'dispatch'->>'mode' IN ('subscribe', 'renew')
             AND jsonb_typeof(metadata->'dispatch'->'attemptNumber') = 'number'
             AND (metadata->'dispatch'->>'attemptNumber') ~ '^[0-9]{1,9}$'
             AND (metadata->'dispatch'->>'attemptNumber')::bigint < 2147483647
@@ -738,6 +739,61 @@ async function claimCodeClipYouTubeWebSubDispatch(
       mode,
       contract.status,
       contract.pendingMode,
+    ]
+  );
+  return mapSubscriptionRow(result.rows?.[0] || null);
+}
+
+async function recoverCodeClipYouTubeWebSubRenewalPendingConflict(
+  callbackId,
+  { previousSubscription, pendingSubscription, queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  const normalizedCallbackId = normalizeCallbackId(callbackId);
+  const previous = toInternalCodeClipYouTubeWebSubSubscription(previousSubscription);
+  const pending = toInternalCodeClipYouTubeWebSubSubscription(pendingSubscription);
+
+  if (
+    !previous ||
+    !pending ||
+    previous.callbackId !== normalizedCallbackId ||
+    pending.callbackId !== normalizedCallbackId ||
+    previous.status !== SUBSCRIPTION_STATUSES.ACTIVE ||
+    previous.pendingMode !== null ||
+    pending.status !== SUBSCRIPTION_STATUSES.PENDING_RENEWAL ||
+    pending.pendingMode !== PENDING_MODES.SUBSCRIBE ||
+    !pending.updatedAt
+  ) {
+    return null;
+  }
+
+  const result = await client.query(
+    `
+      UPDATE codeclip_youtube_websub_subscriptions
+      SET
+        status = 'active',
+        pending_mode = NULL,
+        updated_at = NOW()
+      WHERE callback_id = $1
+        AND vertical = 'codeclip'
+        AND provider = 'youtube'
+        AND channel = 'youtube'
+        AND status = 'pending_renewal'
+        AND pending_mode = 'subscribe'
+        AND updated_at IS NOT DISTINCT FROM $2::timestamptz
+        AND metadata->'dispatch' IS NOT DISTINCT FROM $3::jsonb
+        AND lease_started_at IS NOT DISTINCT FROM $4::timestamptz
+        AND lease_expires_at IS NOT DISTINCT FROM $5::timestamptz
+        AND last_verified_at IS NOT DISTINCT FROM $6::timestamptz
+      RETURNING *
+    `,
+    [
+      normalizedCallbackId,
+      pending.updatedAt,
+      JSON.stringify(pending.metadata?.dispatch ?? null),
+      pending.leaseStartedAt,
+      pending.leaseExpiresAt,
+      pending.lastVerifiedAt,
     ]
   );
   return mapSubscriptionRow(result.rows?.[0] || null);
@@ -1008,11 +1064,26 @@ async function markCodeClipYouTubeWebSubSubscriptionVerified(
 }
 
 async function markCodeClipYouTubeWebSubSubscriptionRenewalPending(callbackId, options = {}) {
-  return updateStatusByCallbackId(
-    callbackId,
-    { status: SUBSCRIPTION_STATUSES.PENDING_RENEWAL, pendingMode: PENDING_MODES.SUBSCRIBE },
-    options
+  const client = requireQueryClient(options.queryClient);
+  const normalizedCallbackId = normalizeCallbackId(callbackId);
+  const result = await client.query(
+    `
+      UPDATE codeclip_youtube_websub_subscriptions
+      SET
+        status = 'pending_renewal',
+        pending_mode = 'subscribe',
+        updated_at = NOW()
+      WHERE callback_id = $1
+        AND vertical = 'codeclip'
+        AND provider = 'youtube'
+        AND channel = 'youtube'
+        AND status = 'active'
+        AND pending_mode IS NULL
+      RETURNING *
+    `,
+    [normalizedCallbackId]
   );
+  return mapSubscriptionRow(result.rows?.[0] || null);
 }
 
 async function markCodeClipYouTubeWebSubSubscriptionUnsubscribePending(callbackId, options = {}) {
@@ -1141,6 +1212,7 @@ module.exports = {
   recordCodeClipYouTubeWebSubUnsubscribeDispatchResult,
   recordCodeClipYouTubeWebSubSubscriptionAudit,
   recordCodeClipYouTubeWebSubFirstActivatedVideo,
+  recoverCodeClipYouTubeWebSubRenewalPendingConflict,
   toInternalCodeClipYouTubeWebSubSubscription,
   updateCodeClipYouTubeWebSubSubscriptionLease,
 };

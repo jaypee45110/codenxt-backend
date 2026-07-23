@@ -29,6 +29,7 @@ const {
   recordCodeClipYouTubeWebSubSubscribeDispatchResult,
   recordCodeClipYouTubeWebSubUnsubscribeDispatchResult,
   recordCodeClipYouTubeWebSubSubscriptionAudit,
+  recoverCodeClipYouTubeWebSubRenewalPendingConflict,
   toInternalCodeClipYouTubeWebSubSubscription,
 } = require("./youtube-websub-subscriptions");
 const {
@@ -768,41 +769,109 @@ async function renewCodeClipYouTubeWebSubSubscriptionOperation(callbackId, input
     throw operationError("subscription_state_conflict", "Subscription cannot be renewed");
   }
 
-  const pending = await runLocalSubscriptionTransaction(options, queryClient, async ({ queryClient: txClient }) => {
-    const updated = existing.status === SUBSCRIPTION_STATUSES.PENDING_RENEWAL
-      ? existing
-      : await (options.markRenewalPending || markCodeClipYouTubeWebSubSubscriptionRenewalPending)(
-          normalizedCallbackId,
-          { queryClient: txClient }
-        );
-    await recordSubscriptionAudit(
-      {
-        callbackId: updated.callbackId,
-        providerAccountId: updated.providerAccountId,
-        action: "renewal_requested",
-        mode: "renew",
-        resultCode: "renewal_pending",
-        retryable: false,
-        metadata: {
-          requestedLeaseSeconds: leaseSeconds,
-          operationSource: "operator_key",
-          previousStatus: existing.status,
-          resultingStatus: updated.status,
-        },
-      },
-      { queryClient: txClient, recordAudit: options.recordAudit }
-    );
-    return updated;
-  });
+  const transition = await runLocalSubscriptionTransaction(
+    options,
+    queryClient,
+    async ({ queryClient: txClient }) => {
+      if (existing.status === SUBSCRIPTION_STATUSES.PENDING_RENEWAL) {
+        return { subscription: existing, transitioned: false };
+      }
 
-  return runRenewDispatch({
-    subscription: pending,
+      const updated = await (
+        options.markRenewalPending || markCodeClipYouTubeWebSubSubscriptionRenewalPending
+      )(
+        normalizedCallbackId,
+        { queryClient: txClient }
+      );
+      if (!updated) {
+        const current = await (
+          options.getSubscriptionByCallbackId || getCodeClipYouTubeWebSubSubscriptionByCallbackId
+        )(normalizedCallbackId, { queryClient: txClient });
+        return { subscription: current || existing, transitioned: false };
+      }
+
+      await recordSubscriptionAudit(
+        {
+          callbackId: updated.callbackId,
+          providerAccountId: updated.providerAccountId,
+          action: "renewal_requested",
+          mode: "renew",
+          resultCode: "renewal_pending",
+          retryable: false,
+          metadata: {
+            requestedLeaseSeconds: leaseSeconds,
+            operationSource: "operator_key",
+            previousStatus: existing.status,
+            resultingStatus: updated.status,
+          },
+        },
+        { queryClient: txClient, recordAudit: options.recordAudit }
+      );
+      return { subscription: updated, transitioned: true };
+    }
+  );
+
+  const dispatchResult = await runRenewDispatch({
+    subscription: transition.subscription,
     leaseSeconds,
     rootSecret,
     publicBaseUrl,
     queryClient,
     options,
   });
+
+  if (
+    dispatchResult.ok === false &&
+    dispatchResult.code === "subscription_state_conflict" &&
+    dispatchResult.dispatchClaimed === false &&
+    transition.transitioned === true
+  ) {
+    const recovered = await runLocalSubscriptionTransaction(
+      options,
+      queryClient,
+      async ({ queryClient: txClient }) => {
+        const restored = await (
+          options.recoverRenewalPendingConflict ||
+          recoverCodeClipYouTubeWebSubRenewalPendingConflict
+        )(
+          normalizedCallbackId,
+          {
+            previousSubscription: existing,
+            pendingSubscription: transition.subscription,
+            queryClient: txClient,
+          }
+        );
+        if (!restored) return null;
+        await recordSubscriptionAudit(
+          {
+            callbackId: restored.callbackId,
+            providerAccountId: restored.providerAccountId,
+            action: "renewal_conflict_recovered",
+            mode: "renew",
+            resultCode: "subscription_state_conflict",
+            retryable: false,
+            metadata: {
+              requestedLeaseSeconds: leaseSeconds,
+              operationSource: "operator_key",
+              previousStatus: transition.subscription.status,
+              resultingStatus: restored.status,
+            },
+          },
+          { queryClient: txClient, recordAudit: options.recordAudit }
+        );
+        return restored;
+      }
+    );
+    if (recovered) {
+      return {
+        ...dispatchResult,
+        status: recovered.status,
+        subscription: toPublicSubscriptionStatus(recovered),
+      };
+    }
+  }
+
+  return dispatchResult;
 }
 
 async function unsubscribeCodeClipYouTubeWebSubSubscriptionOperation(callbackId, input = {}, options = {}) {
