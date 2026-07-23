@@ -276,6 +276,9 @@ test("YouTube WebSub create validates episode and binding, creates pending recor
   assert.equal(recordCall[3].resultCode, "hub_request_accepted");
   assert.equal(recordCall[3].retryable, false);
   assert.equal(hubCall.mode, "subscribe");
+  assert.equal(hubCall.operationMode, "subscribe");
+  assert.equal(hubCall.attemptId, claimCall[3].attemptId);
+  assert.equal(hubCall.attemptNumber, 1);
   assert.equal(hubCall.callbackUrl, buildCallbackUrl("https://backend.example.test", "yt_callback_1"));
   assert.equal(hubCall.topic, buildTopic(CHANNEL_ID));
   assert.equal(hubCall.leaseSeconds, 864000);
@@ -938,6 +941,30 @@ test("YouTube WebSub ordinary renew after terminal subscribe dispatch claims and
       }),
     },
   });
+  options.claimRenewDispatch = async (callbackId, input) => {
+    state.calls.push(["claimDispatch", "renew", callbackId, input]);
+    const claimed = subscription({
+      ...state.existingByCallback,
+      callbackId,
+      status: "pending_renewal",
+      pendingMode: "subscribe",
+      metadata: {
+        ...(state.existingByCallback.metadata || {}),
+        dispatch: {
+          attemptId: input.attemptId,
+          attemptNumber: 2,
+          previousAttemptCount: 1,
+          status: "started",
+          mode: "renew",
+          startedAt: "2026-07-18T00:00:01.000Z",
+          requestedLeaseSeconds: input.leaseSeconds,
+          retryEligible: false,
+        },
+      },
+    });
+    state.claimed = claimed;
+    return claimed;
+  };
 
   const result = await renewCodeClipYouTubeWebSubSubscriptionOperation(
     "yt_callback_1",
@@ -951,8 +978,14 @@ test("YouTube WebSub ordinary renew after terminal subscribe dispatch claims and
   assert.equal(result.subscription.status, "pending_renewal");
   assert.equal(result.subscription.pendingMode, "subscribe");
   assert.equal(result.dispatchClaimed, true);
+  const claimCall = state.calls.find((call) => call[0] === "claimDispatch" && call[1] === "renew");
+  const hubCall = state.calls.find((call) => call[0] === "hub");
   assert.equal(state.calls.filter((call) => call[0] === "claimDispatch" && call[1] === "renew").length, 1);
   assert.equal(state.calls.filter((call) => call[0] === "hub").length, 1);
+  assert.equal(hubCall[1].operationMode, "renew");
+  assert.equal(hubCall[1].mode, "subscribe");
+  assert.equal(hubCall[1].attemptId, claimCall[3].attemptId);
+  assert.equal(hubCall[1].attemptNumber, 2);
 });
 
 test("YouTube WebSub renew resumes production pending renewal after terminal subscribe dispatch", async () => {
@@ -1229,8 +1262,13 @@ test("YouTube WebSub unsubscribe marks pending and leaves binding lifecycle unto
   assert.equal(result.ok, true);
   assert.equal(result.code, "unsubscribe_pending");
   assert.equal(result.subscription.status, "pending_unsubscribe");
-  assert.equal(state.calls.find((call) => call[0] === "hub")[1].mode, "unsubscribe");
-  assert.equal(state.calls.find((call) => call[0] === "claimDispatch")[1], "unsubscribe");
+  const hubCall = state.calls.find((call) => call[0] === "hub");
+  const claimCall = state.calls.find((call) => call[0] === "claimDispatch");
+  assert.equal(hubCall[1].mode, "unsubscribe");
+  assert.equal(hubCall[1].operationMode, "unsubscribe");
+  assert.equal(hubCall[1].attemptId, claimCall[3].attemptId);
+  assert.equal(hubCall[1].attemptNumber, 1);
+  assert.equal(claimCall[1], "unsubscribe");
   assert.equal(state.calls.find((call) => call[0] === "recordDispatch")[1], "unsubscribe");
   assert.equal(state.calls.some((call) => call[0] === "binding"), false);
   assert.deepEqual(state.auditRows.map((row) => row.action), [

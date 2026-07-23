@@ -500,9 +500,12 @@ async function runLifecycleDispatch({
     const derivedSecret = deriveSubscriptionSecret({ rootSecret, subscription: claim });
     hubResult = await (options.requestSubscription || requestSubscription)({
       mode: operation.hubMode,
+      operationMode: dispatchMode,
       callbackUrl: buildCallbackUrl(publicBaseUrl, claim.callbackId),
       topic: claim.topic,
       secret: derivedSecret,
+      attemptId,
+      attemptNumber: claim.metadata?.dispatch?.attemptNumber,
       ...(operation.hubMode === "subscribe" ? { leaseSeconds } : {}),
       fetchImpl: options.fetchImpl,
       timeoutMs: options.timeoutMs,
