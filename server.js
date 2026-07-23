@@ -4592,6 +4592,94 @@ async function handleCodeClipYouTubeWebSubVerificationRoute(req, res) {
   }
 }
 
+const CODECLIP_YOUTUBE_WEBSUB_CALLBACK_ROUTE = "/api/codeclip/providers/youtube/websub/:callbackId";
+
+function maskCodeClipYouTubeWebSubIngressCallbackId(callbackId) {
+  const value = String(callbackId || "").trim();
+  if (!value) return null;
+  if (value.length === 1) return "*";
+  if (value.length <= 6) return `${value.slice(0, 1)}...${value.slice(-1)}`;
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+function normalizeCodeClipYouTubeWebSubIngressContentType(value) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const normalized = String(raw || "").split(";")[0].trim().toLowerCase();
+  return normalized || null;
+}
+
+function normalizeCodeClipYouTubeWebSubIngressContentLength(value) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (raw === undefined || raw === null || raw === "") return null;
+  const normalized = Number(String(raw).trim());
+  return Number.isSafeInteger(normalized) && normalized >= 0 ? normalized : null;
+}
+
+function getCodeClipYouTubeWebSubIngressOutcome(statusCode) {
+  if (statusCode >= 200 && statusCode < 300) return "accepted";
+  if (statusCode >= 400 && statusCode < 500) return "rejected";
+  if (statusCode >= 500 && statusCode < 600) return "failed";
+  return "completed";
+}
+
+function buildCodeClipYouTubeWebSubIngressBase(req) {
+  return {
+    eventName: "codeclip_youtube_websub_ingress",
+    timestamp: new Date().toISOString(),
+    method: String(req?.method || "").toUpperCase(),
+    route: CODECLIP_YOUTUBE_WEBSUB_CALLBACK_ROUTE,
+    callbackId: maskCodeClipYouTubeWebSubIngressCallbackId(req?.params?.callbackId),
+    contentType: normalizeCodeClipYouTubeWebSubIngressContentType(req?.headers?.["content-type"]),
+    contentLength: normalizeCodeClipYouTubeWebSubIngressContentLength(
+      req?.headers?.["content-length"]
+    ),
+  };
+}
+
+function logCodeClipYouTubeWebSubIngress(base, phase, extra = {}) {
+  try {
+    console.log("codeClip YouTube WebSub ingress", {
+      ...base,
+      phase,
+      ...extra,
+    });
+  } catch {
+    // Observability must never alter callback response semantics.
+  }
+}
+
+function observeCodeClipYouTubeWebSubIngress(req, res, next) {
+  if (req.codeClipYouTubeWebSubIngressObserved) return next();
+  req.codeClipYouTubeWebSubIngressObserved = true;
+  const ingressLogBase = buildCodeClipYouTubeWebSubIngressBase(req);
+  logCodeClipYouTubeWebSubIngress(ingressLogBase, "ingress_received");
+
+  let completed = false;
+  const complete = (completion) => {
+    if (completed) return;
+    completed = true;
+
+    if (completion === "close") {
+      logCodeClipYouTubeWebSubIngress(ingressLogBase, "ingress_completed", {
+        completion: "close",
+        statusCode: null,
+        outcome: "aborted",
+      });
+      return;
+    }
+
+    logCodeClipYouTubeWebSubIngress(ingressLogBase, "ingress_completed", {
+      completion: "finish",
+      statusCode: res.statusCode,
+      outcome: getCodeClipYouTubeWebSubIngressOutcome(res.statusCode),
+    });
+  };
+
+  res.once("finish", () => complete("finish"));
+  res.once("close", () => complete("close"));
+  return next();
+}
+
 const codeClipYouTubeWebSubRawParser = express.raw({
   type: ["application/atom+xml", "application/xml", "text/xml"],
   limit: "256kb",
@@ -4681,11 +4769,13 @@ function handleCodeClipYouTubeWebSubParserError(error, req, res, next) {
 
 app.get("/codeclip/provider/meta/keyword", handleCodeClipMetaProviderChallengeRoute);
 app.get(
-  "/api/codeclip/providers/youtube/websub/:callbackId",
+  CODECLIP_YOUTUBE_WEBSUB_CALLBACK_ROUTE,
+  observeCodeClipYouTubeWebSubIngress,
   handleCodeClipYouTubeWebSubVerificationRoute
 );
 app.post(
-  "/api/codeclip/providers/youtube/websub/:callbackId",
+  CODECLIP_YOUTUBE_WEBSUB_CALLBACK_ROUTE,
+  observeCodeClipYouTubeWebSubIngress,
   codeClipYouTubeWebSubRawParser,
   handleCodeClipYouTubeWebSubNotificationRoute
 );
