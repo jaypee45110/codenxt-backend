@@ -13,7 +13,9 @@ const {
   applyDiagnosticNotificationObservation,
   applyDiagnosticDispatchFailureTransition,
   applyDiagnosticUnsubscribeTransition,
+  buildDiagnosticObservationIdentity,
   serializeDiagnosticProbePublic,
+  maskDiagnosticIdentifier,
 } = require("./youtube-websub-diagnostic-probe");
 
 const PROBE_ID_CONSTRAINT = "codeclip_youtube_websub_diagnostic_probes_probe_id_key";
@@ -22,6 +24,7 @@ const OPEN_TOPIC_CONSTRAINT = "codeclip_youtube_websub_diagnostic_open_topic_uid
 const UNIQUE_VIOLATION = "23505";
 const CREATE_SAVEPOINT = "codeclip_youtube_websub_diagnostic_create";
 const LIFECYCLE_SAVEPOINT = "codeclip_youtube_websub_diagnostic_lifecycle";
+const OBSERVATION_SAVEPOINT = "codeclip_youtube_websub_diagnostic_observation";
 const READ_COMMITTED = "read committed";
 const CURSOR_VERSION = 1;
 const DEFAULT_LIST_LIMIT = 25;
@@ -537,6 +540,462 @@ async function listCodeClipYouTubeWebSubDiagnosticProbes(filters = {}, { queryCl
 }
 
 
+const OBSERVATION_STATUS = Object.freeze({
+  RECORDED: "recorded",
+  DUPLICATE: "duplicate",
+  UPDATED: "updated",
+});
+
+function normalizeOptionalText(value, fieldName, maxLength = 256) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") {
+    throw repositoryError("validation_error", `${fieldName} is invalid`, { fieldName });
+  }
+  const normalized = value.trim();
+  if (normalized !== value || !normalized || normalized.length > maxLength) {
+    throw repositoryError("validation_error", `${fieldName} is invalid`, { fieldName });
+  }
+  return normalized;
+}
+
+function normalizeOptionalHash(value, fieldName) {
+  if (value === undefined || value === null || value === "") return null;
+  const normalized = normalizeOptionalText(value, fieldName, 128);
+  if (!/^[A-Fa-f0-9]{8,128}$/.test(normalized)) {
+    throw repositoryError("validation_error", `${fieldName} is invalid`, { fieldName });
+  }
+  return normalized.toLowerCase();
+}
+
+function normalizeVideoId(value) {
+  const normalized = normalizeOptionalText(value, "videoId", 64);
+  if (!normalized || !/^[A-Za-z0-9_-]{6,64}$/.test(normalized)) {
+    throw repositoryError("validation_error", "videoId is invalid", { fieldName: "videoId" });
+  }
+  return normalized;
+}
+
+function normalizeObservationMetadata(value) {
+  const metadata = normalizeJsonObject(value, "diagnosticMetadata");
+  const allowed = new Set(["latest", "replay"]);
+  for (const key of Object.keys(metadata)) {
+    if (!allowed.has(key)) {
+      throw repositoryError("invalid_repository_row", "observation metadata contains unsupported field", {
+        fieldName: "diagnosticMetadata",
+      });
+    }
+  }
+  const serialized = JSON.stringify(metadata);
+  if (Buffer.byteLength(serialized, "utf8") > 16 * 1024) {
+    throw repositoryError("invalid_repository_row", "observation metadata is too large", {
+      fieldName: "diagnosticMetadata",
+    });
+  }
+  return JSON.parse(serialized);
+}
+
+function normalizeDiagnosticObservationInput(input = {}, probe) {
+  const channelId = normalizeYouTubeDiagnosticChannelId(input.channelId);
+  if (channelId !== probe.channelId) {
+    throw repositoryError("state_conflict", "observation channel does not match diagnostic probe");
+  }
+  let topic = probe.topic;
+  if (input.topic) {
+    try {
+      topic = normalizeYouTubeDiagnosticTopic(input.topic, channelId);
+    } catch (error) {
+      if (error?.name !== "CodeClipYouTubeWebSubDiagnosticProbeError" || error?.code !== "validation_error") {
+        throw error;
+      }
+      throw repositoryError("state_conflict", "observation topic does not match diagnostic probe", {
+        causeCode: error.code,
+      });
+    }
+  }
+  if (topic !== probe.topic) {
+    throw repositoryError("state_conflict", "observation topic does not match diagnostic probe");
+  }
+  const videoId = normalizeVideoId(input.videoId);
+  const publishedAt = normalizeRequiredIsoTimestamp(input.publishedAt, "publishedAt");
+  const entryUpdatedAt = normalizeRequiredIsoTimestamp(input.updatedAt || input.entryUpdatedAt, "updatedAt");
+  const observedAt = normalizeRequiredIsoTimestamp(input.observedAt, "observedAt");
+  const observationIdentity = buildDiagnosticObservationIdentity({ channelId, videoId, publishedAt });
+  return {
+    probeId: probe.probeId,
+    observedCallbackId: input.observedCallbackId ? normalizeDiagnosticCallbackId(input.observedCallbackId) : (input.callbackId ? normalizeDiagnosticCallbackId(input.callbackId) : null),
+    provider: DIAGNOSTIC_PROVIDER,
+    channel: DIAGNOSTIC_CHANNEL,
+    channelId,
+    topic,
+    observationIdentity,
+    entryId: normalizeOptionalText(input.entryId, "entryId", 256),
+    videoId,
+    publishedAt,
+    entryUpdatedAt,
+    observedAt,
+    notificationHash: normalizeOptionalHash(input.notificationHash, "notificationHash"),
+    titleHash: normalizeOptionalHash(input.titleHash, "titleHash"),
+    contentType: normalizeOptionalText(input.contentType, "contentType", 128),
+  };
+}
+
+function buildDiagnosticObservationMetadata(input, { duplicate = false } = {}) {
+  return {
+    latest: {
+      observationIdentity: input.observationIdentity,
+      channelId: input.channelId,
+      videoId: input.videoId,
+      publishedAt: input.publishedAt,
+      updatedAt: input.entryUpdatedAt,
+      observedAt: input.observedAt,
+      titleHash: input.titleHash,
+      duplicate,
+    },
+  };
+}
+
+function mapDiagnosticObservationRow(row) {
+  if (!row) return null;
+  const metadata = normalizeObservationMetadata(row.diagnostic_metadata);
+  const probeId = normalizeDiagnosticProbeId(row.probe_id);
+  const observedCallbackId = row.observed_callback_id ? normalizeDiagnosticCallbackId(row.observed_callback_id) : null;
+  const provider = String(row.provider || "");
+  const channel = String(row.channel || "");
+  if (provider !== DIAGNOSTIC_PROVIDER || channel !== DIAGNOSTIC_CHANNEL) {
+    throw repositoryError("invalid_repository_row", "observation provider/channel is invalid");
+  }
+  const channelId = normalizeYouTubeDiagnosticChannelId(row.channel_id);
+  const topic = normalizeYouTubeDiagnosticTopic(row.topic, channelId);
+  const videoId = normalizeVideoId(row.video_id);
+  const publishedAt = normalizeRequiredIsoTimestamp(row.published_at, "publishedAt");
+  const identity = buildDiagnosticObservationIdentity({ channelId, videoId, publishedAt });
+  if (row.observation_identity !== identity) {
+    throw repositoryError("invalid_repository_row", "observation identity is invalid", { fieldName: "observationIdentity" });
+  }
+  const firstObservedAt = normalizeRequiredIsoTimestamp(row.first_observed_at, "firstObservedAt");
+  const lastObservedAt = normalizeRequiredIsoTimestamp(row.last_observed_at, "lastObservedAt");
+  const entryUpdatedAt = normalizeRequiredIsoTimestamp(row.entry_updated_at, "entryUpdatedAt");
+  const createdAt = normalizeRequiredIsoTimestamp(row.created_at, "createdAt");
+  const updatedAt = normalizeRequiredIsoTimestamp(row.updated_at, "updatedAt");
+  const seenCount = Number.parseInt(String(row.seen_count), 10);
+  if (!Number.isSafeInteger(seenCount) || seenCount < 1) {
+    throw repositoryError("invalid_repository_row", "seenCount is invalid", { fieldName: "seenCount" });
+  }
+  if (Date.parse(lastObservedAt) < Date.parse(firstObservedAt) || Date.parse(updatedAt) < Date.parse(createdAt)) {
+    throw repositoryError("invalid_repository_row", "observation timestamps are invalid");
+  }
+  return {
+    id: row.id === undefined || row.id === null ? null : String(row.id),
+    probeId,
+    observedCallbackId,
+    provider,
+    channel,
+    channelId,
+    topic,
+    observationIdentity: identity,
+    entryId: row.entry_id ? normalizeOptionalText(row.entry_id, "entryId", 256) : null,
+    videoId,
+    publishedAt,
+    entryUpdatedAt,
+    firstObservedAt,
+    lastObservedAt,
+    seenCount,
+    notificationHash: row.notification_hash ? normalizeOptionalHash(row.notification_hash, "notificationHash") : null,
+    titleHash: row.title_hash ? normalizeOptionalHash(row.title_hash, "titleHash") : null,
+    contentType: row.content_type ? normalizeOptionalText(row.content_type, "contentType", 128) : null,
+    diagnosticMetadata: metadata,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function serializeDiagnosticObservationPublic(row) {
+  const observation = mapDiagnosticObservationRow({
+    id: row.id,
+    probe_id: row.probeId || row.probe_id,
+    observed_callback_id: row.observedCallbackId || row.observed_callback_id,
+    provider: row.provider,
+    channel: row.channel,
+    channel_id: row.channelId || row.channel_id,
+    topic: row.topic,
+    observation_identity: row.observationIdentity || row.observation_identity,
+    entry_id: row.entryId || row.entry_id,
+    video_id: row.videoId || row.video_id,
+    published_at: row.publishedAt || row.published_at,
+    entry_updated_at: row.entryUpdatedAt || row.entry_updated_at,
+    first_observed_at: row.firstObservedAt || row.first_observed_at,
+    last_observed_at: row.lastObservedAt || row.last_observed_at,
+    seen_count: row.seenCount || row.seen_count,
+    notification_hash: row.notificationHash || row.notification_hash,
+    title_hash: row.titleHash || row.title_hash,
+    content_type: row.contentType || row.content_type,
+    diagnostic_metadata: row.diagnosticMetadata || row.diagnostic_metadata || {},
+    created_at: row.createdAt || row.created_at,
+    updated_at: row.updatedAt || row.updated_at,
+  });
+  return {
+    observationId: observation.id,
+    probeId: maskDiagnosticIdentifier(observation.probeId),
+    observedCallbackId: observation.observedCallbackId ? maskDiagnosticIdentifier(observation.observedCallbackId) : null,
+    provider: observation.provider,
+    channel: observation.channel,
+    channelId: observation.channelId,
+    topic: observation.topic,
+    observationIdentity: maskDiagnosticIdentifier(observation.observationIdentity),
+    videoId: maskDiagnosticIdentifier(observation.videoId),
+    publishedAt: observation.publishedAt,
+    entryUpdatedAt: observation.entryUpdatedAt,
+    firstObservedAt: observation.firstObservedAt,
+    lastObservedAt: observation.lastObservedAt,
+    seenCount: observation.seenCount,
+    duplicate: observation.seenCount > 1,
+    contentType: observation.contentType,
+    titleHash: observation.titleHash,
+    createdAt: observation.createdAt,
+    updatedAt: observation.updatedAt,
+  };
+}
+
+function observationInsertParams(input, now) {
+  const metadata = buildDiagnosticObservationMetadata(input);
+  return [
+    input.probeId,
+    input.observedCallbackId,
+    input.provider,
+    input.channel,
+    input.channelId,
+    input.topic,
+    input.observationIdentity,
+    input.entryId,
+    input.videoId,
+    input.publishedAt,
+    input.entryUpdatedAt,
+    input.observedAt,
+    input.observedAt,
+    1,
+    input.notificationHash,
+    input.titleHash,
+    input.contentType,
+    JSON.stringify(metadata),
+    now,
+    now,
+  ];
+}
+
+async function findDiagnosticObservationForUpdate(client, probeId, observationIdentity) {
+  const result = await client.query(
+    `
+      SELECT *
+      FROM codeclip_youtube_websub_diagnostic_observations
+      WHERE probe_id = $1 AND observation_identity = $2
+      FOR UPDATE
+    `,
+    [probeId, observationIdentity]
+  );
+  if ((result.rows || []).length > 1) {
+    throw repositoryError("repository_state_conflict", "diagnostic observation identity matched multiple rows");
+  }
+  return result.rows?.[0] ? mapDiagnosticObservationRow(result.rows[0]) : null;
+}
+
+function validateExistingObservation(existing, input) {
+  if (existing.provider !== input.provider || existing.channel !== input.channel || existing.channelId !== input.channelId || existing.topic !== input.topic || existing.videoId !== input.videoId || existing.publishedAt !== input.publishedAt) {
+    throw repositoryError("repository_state_conflict", "diagnostic observation immutable identity mismatch");
+  }
+  if (existing.entryId && input.entryId && existing.entryId !== input.entryId) {
+    throw repositoryError("state_conflict", "diagnostic observation entry identity conflicts");
+  }
+  if (existing.notificationHash && input.notificationHash && existing.notificationHash !== input.notificationHash) {
+    throw repositoryError("state_conflict", "diagnostic observation notification hash conflicts");
+  }
+}
+
+function classifyExistingObservation(existing, input) {
+  const observedCompare = Date.parse(input.observedAt) - Date.parse(existing.lastObservedAt);
+  const entryCompare = Date.parse(input.entryUpdatedAt) - Date.parse(existing.entryUpdatedAt);
+  if (observedCompare > 0 || entryCompare > 0) return OBSERVATION_STATUS.UPDATED;
+  if (observedCompare === 0 && entryCompare === 0) {
+    const titleMatches = (existing.titleHash || null) === (input.titleHash || null);
+    const contentTypeMatches = (existing.contentType || null) === (input.contentType || null);
+    const entryMatches = (existing.entryId || null) === (input.entryId || null);
+    if (titleMatches && contentTypeMatches && entryMatches) return OBSERVATION_STATUS.DUPLICATE;
+    throw repositoryError("state_conflict", "diagnostic observation conflicts at the same timestamp");
+  }
+  return OBSERVATION_STATUS.DUPLICATE;
+}
+
+async function insertDiagnosticObservation(client, input, now) {
+  const result = await client.query(
+    `
+      INSERT INTO codeclip_youtube_websub_diagnostic_observations (
+        probe_id,
+        observed_callback_id,
+        provider,
+        channel,
+        channel_id,
+        topic,
+        observation_identity,
+        entry_id,
+        video_id,
+        published_at,
+        entry_updated_at,
+        first_observed_at,
+        last_observed_at,
+        seen_count,
+        notification_hash,
+        title_hash,
+        content_type,
+        diagnostic_metadata,
+        created_at,
+        updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20
+      )
+      RETURNING *
+    `,
+    observationInsertParams(input, now)
+  );
+  if ((result.rows || []).length !== 1) {
+    throw repositoryError("repository_state_conflict", "diagnostic observation insert did not return exactly one row");
+  }
+  return mapDiagnosticObservationRow(result.rows[0]);
+}
+
+async function updateDiagnosticObservationReplay(client, existing, input, status, now) {
+  const isUpdated = status === OBSERVATION_STATUS.UPDATED;
+  const nextLastObservedAt = Date.parse(input.observedAt) > Date.parse(existing.lastObservedAt) ? input.observedAt : existing.lastObservedAt;
+  const nextEntryUpdatedAt = Date.parse(input.entryUpdatedAt) > Date.parse(existing.entryUpdatedAt) ? input.entryUpdatedAt : existing.entryUpdatedAt;
+  const metadata = isUpdated
+    ? buildDiagnosticObservationMetadata({ ...input, observedAt: nextLastObservedAt, entryUpdatedAt: nextEntryUpdatedAt }, { duplicate: false })
+    : existing.diagnosticMetadata;
+  const result = await client.query(
+    `
+      UPDATE codeclip_youtube_websub_diagnostic_observations
+      SET
+        observed_callback_id = COALESCE(observed_callback_id, $2),
+        entry_id = COALESCE(entry_id, $3),
+        entry_updated_at = $4,
+        last_observed_at = $5,
+        seen_count = seen_count + 1,
+        notification_hash = COALESCE(notification_hash, $6),
+        title_hash = CASE WHEN $10::boolean THEN $7 ELSE title_hash END,
+        content_type = CASE WHEN $10::boolean THEN $8 ELSE content_type END,
+        diagnostic_metadata = $9::jsonb,
+        updated_at = GREATEST(updated_at, $11)
+      WHERE id = $1
+      RETURNING *
+    `,
+    [
+      existing.id,
+      input.observedCallbackId,
+      input.entryId,
+      nextEntryUpdatedAt,
+      nextLastObservedAt,
+      input.notificationHash,
+      input.titleHash,
+      input.contentType,
+      JSON.stringify(metadata),
+      isUpdated,
+      now,
+    ]
+  );
+  if ((result.rows || []).length !== 1) {
+    throw repositoryError("repository_state_conflict", "diagnostic observation update did not return exactly one row");
+  }
+  return mapDiagnosticObservationRow(result.rows[0]);
+}
+
+function probeSummaryObservation(input) {
+  return {
+    observationIdentity: input.observationIdentity,
+    channelId: input.channelId,
+    videoId: input.videoId,
+    publishedAt: input.publishedAt,
+    updatedAt: input.entryUpdatedAt,
+    observedAt: input.observedAt,
+    titleHash: input.titleHash,
+  };
+}
+
+function applyProbeObservationSummary(record, input, status) {
+  if (status === OBSERVATION_STATUS.DUPLICATE) return record;
+  const existingObservedAt = record.lastNotificationAt;
+  if (existingObservedAt && Date.parse(input.observedAt) < Date.parse(existingObservedAt)) return record;
+  if (existingObservedAt && Date.parse(input.observedAt) === Date.parse(existingObservedAt)) {
+    const previous = record.diagnosticMetadata?.lastNotification || null;
+    if (!previous || isSameNotificationObservation(previous, probeSummaryObservation(input))) return record;
+    throw repositoryError("state_conflict", "diagnostic notification summary conflicts at the same timestamp");
+  }
+  return applyDiagnosticNotificationObservation(record, {
+    channelId: input.channelId,
+    videoId: input.videoId,
+    publishedAt: input.publishedAt,
+    updatedAt: input.entryUpdatedAt,
+    observedAt: input.observedAt,
+    titleHash: input.titleHash,
+  });
+}
+
+async function createObservationSavepoint(client) {
+  try {
+    await client.query(`SAVEPOINT ${OBSERVATION_SAVEPOINT}`);
+  } catch (error) {
+    throw repositoryError("transaction_required", "diagnostic observation persistence requires an active transaction", {
+      causeCode: error?.code || null,
+    });
+  }
+}
+
+async function releaseObservationSavepoint(client) {
+  await client.query(`RELEASE SAVEPOINT ${OBSERVATION_SAVEPOINT}`);
+}
+
+async function rollbackObservationSavepoint(client) {
+  try {
+    await client.query(`ROLLBACK TO SAVEPOINT ${OBSERVATION_SAVEPOINT}`);
+    await client.query(`RELEASE SAVEPOINT ${OBSERVATION_SAVEPOINT}`);
+  } catch {
+    // The outer owned transaction will roll back. Supplied transactions keep repository-owned savepoint isolation.
+  }
+}
+
+async function recordCodeClipYouTubeWebSubDiagnosticNotificationObservation(input = {}, { queryClient } = {}) {
+  return withRepositoryTransaction(queryClient, async (client) => {
+    await createObservationSavepoint(client);
+    try {
+      const locked = await lockDiagnosticProbe(client, input);
+      requireStatus(locked.row, [DIAGNOSTIC_PROBE_STATUSES.ACTIVE]);
+      const observationInput = normalizeDiagnosticObservationInput(input, locked.row);
+      const now = normalizeRequiredIsoTimestamp(input.now || input.observedAt, "now");
+      const existing = await findDiagnosticObservationForUpdate(client, observationInput.probeId, observationInput.observationIdentity);
+      let status = OBSERVATION_STATUS.RECORDED;
+      let observation;
+      if (!existing) {
+        observation = await insertDiagnosticObservation(client, observationInput, now);
+      } else {
+        validateExistingObservation(existing, observationInput);
+        status = classifyExistingObservation(existing, observationInput);
+        observation = await updateDiagnosticObservationReplay(client, existing, observationInput, status, now);
+      }
+      const nextProbe = normalizeDiagnosticProbeRecord(applyProbeObservationSummary(locked.row, observationInput, status));
+      const probe = await updateLockedProbe(client, locked.id, nextProbe);
+      await releaseObservationSavepoint(client);
+      return {
+        status,
+        probe,
+        publicProbe: publicProbe(probe),
+        observation,
+        publicObservation: serializeDiagnosticObservationPublic(observation),
+      };
+    } catch (error) {
+      await rollbackObservationSavepoint(client);
+      throw error;
+    }
+  });
+}
+
+
 function normalizeOperationTimestamp(value, fieldName) {
   return normalizeRequiredIsoTimestamp(value, fieldName);
 }
@@ -1045,7 +1504,9 @@ module.exports = {
   markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched,
   markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted,
   markCodeClipYouTubeWebSubDiagnosticVerificationReceived,
-  markCodeClipYouTubeWebSubDiagnosticNotificationObserved,
+  recordCodeClipYouTubeWebSubDiagnosticNotificationObservation,
+  serializeDiagnosticObservationPublic,
+  buildDiagnosticObservationIdentity,
   markCodeClipYouTubeWebSubDiagnosticSubscribeFailed,
   markCodeClipYouTubeWebSubDiagnosticUnsubscribeDispatched,
   markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted,

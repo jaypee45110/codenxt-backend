@@ -1627,6 +1627,17 @@ const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_LOCK_CLASS = 2036220848;
 const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODE_LOCK_ID = 20260721;
 const CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTION_LOCK_CLASS = 2036220848;
 const CODECLIP_YOUTUBE_WEBSUB_AUDIT_ACTION_LOCK_ID = 20260723;
+const CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_SCHEMA_LOCK_CLASS = 2036220848;
+const CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_SCHEMA_LOCK_ID = 20260724;
+const CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_OBSERVATION_CONSTRAINTS = Object.freeze({
+  provider: 'codeclip_youtube_websub_diagnostic_observations_provider_check',
+  channel: 'codeclip_youtube_websub_diagnostic_observations_channel_check',
+  metadata: 'codeclip_youtube_websub_diagnostic_observations_metadata_object_check',
+  seenCount: 'codeclip_youtube_websub_diagnostic_observations_seen_count_check',
+  observedTime: 'codeclip_youtube_websub_diagnostic_observations_observed_time_check',
+  updated: 'codeclip_youtube_websub_diagnostic_observations_updated_check',
+  unique: 'codeclip_youtube_websub_diagnostic_observations_unique',
+});
 const CODECLIP_YOUTUBE_WEBSUB_AUDIT_MODES = Object.freeze([
   'subscribe',
   'renew',
@@ -1776,6 +1787,144 @@ async function ensureCodeClipYouTubeWebSubAuditActionConstraint(queryClient) {
   });
 }
 
+function normalizeCodeClipYouTubeWebSubConstraintDefinition(definition = '') {
+  return String(definition || '')
+    .toLowerCase()
+    .replace(/::[a-z0-9_]+/g, '')
+    .replace(/[()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function codeClipYouTubeWebSubDiagnosticObservationCheckMatches(kind, definition = '') {
+  const normalized = normalizeCodeClipYouTubeWebSubConstraintDefinition(definition);
+  if (!normalized.startsWith('check ')) return false;
+  if (/\bis\s+null\b|\bor\b|<>|!=/.test(normalized)) return false;
+  const predicate = normalized.replace(/^check\s+/, '');
+
+  switch (kind) {
+    case 'provider':
+      return predicate === "provider = 'youtube'";
+    case 'channel':
+      return predicate === "channel = 'youtube'";
+    case 'metadata':
+      return predicate === "jsonb_typeof diagnostic_metadata = 'object'";
+    case 'seenCount':
+      return predicate === 'seen_count >= 1';
+    case 'observedTime':
+      return predicate === 'last_observed_at >= first_observed_at';
+    case 'updated':
+      return predicate === 'updated_at >= created_at';
+    default:
+      return false;
+  }
+}
+
+async function codeClipYouTubeWebSubDiagnosticObservationCheckExists(
+  queryClient,
+  kind
+) {
+  const result = await queryClient.query(`
+    SELECT c.conname, pg_get_constraintdef(c.oid) AS definition
+    FROM pg_constraint c
+    WHERE c.conrelid = 'codeclip_youtube_websub_diagnostic_observations'::regclass
+      AND c.contype = 'c'
+  `);
+  return (result.rows || []).some((row) =>
+    codeClipYouTubeWebSubDiagnosticObservationCheckMatches(kind, row.definition)
+  );
+}
+
+async function codeClipYouTubeWebSubDiagnosticCanonicalConstraintExists(
+  queryClient,
+  constraintName
+) {
+  const result = await queryClient.query(
+    `
+      SELECT c.conname
+      FROM pg_constraint c
+      WHERE c.conrelid = 'codeclip_youtube_websub_diagnostic_observations'::regclass
+        AND c.conname = $1
+      LIMIT 1
+    `,
+    [constraintName]
+  );
+  return Boolean(result.rows?.[0]);
+}
+
+async function ensureCodeClipYouTubeWebSubDiagnosticObservationCheckConstraint(
+  queryClient,
+  constraintName,
+  kind,
+  addConstraintSql
+) {
+  if (await codeClipYouTubeWebSubDiagnosticObservationCheckExists(queryClient, kind)) {
+    return;
+  }
+  if (await codeClipYouTubeWebSubDiagnosticCanonicalConstraintExists(queryClient, constraintName)) {
+    await queryClient.query(`
+      ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      DROP CONSTRAINT ${constraintName}
+    `);
+  }
+  await queryClient.query(addConstraintSql);
+}
+
+async function codeClipYouTubeWebSubDiagnosticObservationUniqueExists(queryClient) {
+  const result = await queryClient.query(`
+    SELECT
+      i.indisunique,
+      i.indisvalid,
+      i.indisready,
+      i.indpred IS NOT NULL AS is_partial,
+      i.indexprs IS NOT NULL AS is_expression,
+      i.indnkeyatts,
+      i.indnatts,
+      array_agg(a.attname ORDER BY key.key_ordinal) AS columns,
+      bool_or(key.attnum <= 0 OR a.attisdropped) AS has_invalid_attribute
+    FROM pg_index i
+    JOIN pg_class t ON t.oid = i.indrelid
+    JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key(attnum, key_ordinal) ON TRUE
+    LEFT JOIN pg_attribute a ON a.attrelid = t.oid
+      AND a.attnum = key.attnum
+    WHERE t.oid = 'codeclip_youtube_websub_diagnostic_observations'::regclass
+    GROUP BY i.indexrelid
+  `);
+  return (result.rows || []).some((row) => {
+    const columns = Array.isArray(row.columns) ? row.columns : [];
+    return row.indisunique === true &&
+      row.indisvalid === true &&
+      row.indisready === true &&
+      row.is_partial === false &&
+      row.is_expression === false &&
+      Number(row.indnkeyatts) === 2 &&
+      Number(row.indnatts) === 2 &&
+      row.has_invalid_attribute !== true &&
+      columns.length === 2 &&
+      columns[0] === 'probe_id' &&
+      columns[1] === 'observation_identity';
+  });
+}
+
+async function ensureCodeClipYouTubeWebSubDiagnosticObservationUniqueConstraint(queryClient) {
+  if (await codeClipYouTubeWebSubDiagnosticObservationUniqueExists(queryClient)) {
+    return;
+  }
+  if (await codeClipYouTubeWebSubDiagnosticCanonicalConstraintExists(
+    queryClient,
+    CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_OBSERVATION_CONSTRAINTS.unique
+  )) {
+    await queryClient.query(`
+      ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      DROP CONSTRAINT ${CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_OBSERVATION_CONSTRAINTS.unique}
+    `);
+  }
+  await queryClient.query(`
+    ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+    ADD CONSTRAINT codeclip_youtube_websub_diagnostic_observations_unique UNIQUE (probe_id, observation_identity)
+  `);
+}
+
 async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool) {
   if (!queryClient) return;
 
@@ -1903,6 +2052,15 @@ async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool)
 async function ensureCodeClipYouTubeWebSubDiagnosticProbeTables(queryClient = pool) {
   if (!queryClient) return;
 
+  return withSchemaClientTransaction(queryClient, async (queryClient) => {
+  await queryClient.query(
+    'SELECT pg_advisory_xact_lock($1, $2)',
+    [
+      CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_SCHEMA_LOCK_CLASS,
+      CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_SCHEMA_LOCK_ID,
+    ]
+  );
+
   await queryClient.query(`
     CREATE TABLE IF NOT EXISTS codeclip_youtube_websub_diagnostic_probes (
       id BIGSERIAL PRIMARY KEY,
@@ -2010,40 +2168,254 @@ async function ensureCodeClipYouTubeWebSubDiagnosticProbeTables(queryClient = po
     CREATE TABLE IF NOT EXISTS codeclip_youtube_websub_diagnostic_observations (
       id BIGSERIAL PRIMARY KEY,
       probe_id TEXT NOT NULL REFERENCES codeclip_youtube_websub_diagnostic_probes(probe_id) ON DELETE RESTRICT,
-      observation_identity TEXT NOT NULL,
+      observed_callback_id TEXT,
       provider TEXT NOT NULL DEFAULT 'youtube',
       channel TEXT NOT NULL DEFAULT 'youtube',
       channel_id TEXT NOT NULL,
+      topic TEXT NOT NULL,
+      observation_identity TEXT NOT NULL,
+      entry_id TEXT,
       video_id TEXT NOT NULL,
       published_at TIMESTAMPTZ NOT NULL,
-      updated_at_entry TIMESTAMPTZ,
-      first_seen_at TIMESTAMPTZ NOT NULL,
-      last_seen_at TIMESTAMPTZ NOT NULL,
+      entry_updated_at TIMESTAMPTZ NOT NULL,
+      first_observed_at TIMESTAMPTZ NOT NULL,
+      last_observed_at TIMESTAMPTZ NOT NULL,
       seen_count INTEGER NOT NULL DEFAULT 1,
-      sanitized_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      notification_hash TEXT,
+      title_hash TEXT,
+      content_type TEXT,
+      diagnostic_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       CONSTRAINT codeclip_youtube_websub_diagnostic_observations_provider_check CHECK (provider = 'youtube'),
       CONSTRAINT codeclip_youtube_websub_diagnostic_observations_channel_check CHECK (channel = 'youtube'),
       CONSTRAINT codeclip_youtube_websub_diagnostic_observations_metadata_object_check CHECK (
-        jsonb_typeof(sanitized_metadata) = 'object'
+        jsonb_typeof(diagnostic_metadata) = 'object'
       ),
       CONSTRAINT codeclip_youtube_websub_diagnostic_observations_seen_count_check CHECK (seen_count >= 1),
-      CONSTRAINT codeclip_youtube_websub_diagnostic_observations_seen_time_check CHECK (last_seen_at >= first_seen_at),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_observations_observed_time_check CHECK (last_observed_at >= first_observed_at),
       CONSTRAINT codeclip_youtube_websub_diagnostic_observations_updated_check CHECK (updated_at >= created_at),
       CONSTRAINT codeclip_youtube_websub_diagnostic_observations_unique UNIQUE (probe_id, observation_identity)
     )
   `);
 
   await queryClient.query(`
+    ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      ADD COLUMN IF NOT EXISTS observed_callback_id TEXT,
+      ADD COLUMN IF NOT EXISTS entry_updated_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS first_observed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS last_observed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS notification_hash TEXT,
+      ADD COLUMN IF NOT EXISTS title_hash TEXT,
+      ADD COLUMN IF NOT EXISTS content_type TEXT,
+      ADD COLUMN IF NOT EXISTS diagnostic_metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+  `);
+
+  await queryClient.query(`
+    DO $$
+    DECLARE
+      first_seen_expr TEXT := 'NULL';
+      last_seen_expr TEXT := 'NULL';
+      entry_updated_expr TEXT := 'NULL';
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'codeclip_youtube_websub_diagnostic_observations'
+          AND column_name = 'first_seen_at'
+      ) THEN
+        first_seen_expr := 'first_seen_at';
+        ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+          ALTER COLUMN first_seen_at DROP NOT NULL;
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'codeclip_youtube_websub_diagnostic_observations'
+          AND column_name = 'last_seen_at'
+      ) THEN
+        last_seen_expr := 'last_seen_at';
+        ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+          ALTER COLUMN last_seen_at DROP NOT NULL;
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'codeclip_youtube_websub_diagnostic_observations'
+          AND column_name = 'updated_at_entry'
+      ) THEN
+        entry_updated_expr := 'updated_at_entry';
+      END IF;
+
+      EXECUTE format(
+        $migration$
+          UPDATE codeclip_youtube_websub_diagnostic_observations
+          SET
+            provider = COALESCE(provider, 'youtube'),
+            channel = COALESCE(channel, 'youtube'),
+            diagnostic_metadata = COALESCE(diagnostic_metadata, '{}'::jsonb),
+            seen_count = GREATEST(COALESCE(seen_count, 1), 1),
+            created_at = COALESCE(created_at, NOW()),
+            updated_at = GREATEST(COALESCE(updated_at, created_at, NOW()), COALESCE(created_at, NOW())),
+            first_observed_at = COALESCE(first_observed_at, %1$s, created_at, NOW()),
+            last_observed_at = COALESCE(last_observed_at, %2$s, first_observed_at, %1$s, created_at, NOW()),
+            entry_updated_at = COALESCE(entry_updated_at, %3$s, published_at, last_observed_at, %2$s, first_observed_at, %1$s, created_at, NOW()),
+            observation_identity = COALESCE(
+              observation_identity,
+              'youtube:' || channel_id || ':' || video_id || ':published:' ||
+                to_char(published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            )
+        $migration$,
+        first_seen_expr,
+        last_seen_expr,
+        entry_updated_expr
+      );
+
+      IF EXISTS (
+        SELECT 1
+        FROM codeclip_youtube_websub_diagnostic_observations
+        WHERE provider IS NULL
+          OR channel IS NULL
+          OR channel_id IS NULL
+          OR topic IS NULL
+          OR observation_identity IS NULL
+          OR video_id IS NULL
+          OR published_at IS NULL
+          OR entry_updated_at IS NULL
+          OR first_observed_at IS NULL
+          OR last_observed_at IS NULL
+          OR seen_count IS NULL
+          OR diagnostic_metadata IS NULL
+          OR created_at IS NULL
+          OR updated_at IS NULL
+      ) THEN
+        RAISE EXCEPTION 'codeclip_youtube_websub_diagnostic_observations contains rows that cannot be migrated to B4 schema';
+      END IF;
+
+      IF EXISTS (
+        SELECT 1
+        FROM codeclip_youtube_websub_diagnostic_observations
+        WHERE provider <> 'youtube'
+          OR channel <> 'youtube'
+          OR jsonb_typeof(diagnostic_metadata) <> 'object'
+          OR seen_count < 1
+          OR last_observed_at < first_observed_at
+          OR updated_at < created_at
+          OR observation_identity <> (
+            'youtube:' || channel_id || ':' || video_id || ':published:' ||
+              to_char(published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+          )
+      ) THEN
+        RAISE EXCEPTION 'codeclip_youtube_websub_diagnostic_observations contains rows that violate B4 diagnostic observation invariants';
+      END IF;
+
+      IF EXISTS (
+        SELECT 1
+        FROM (
+          SELECT probe_id, observation_identity, COUNT(*) AS duplicate_count
+          FROM codeclip_youtube_websub_diagnostic_observations
+          GROUP BY probe_id, observation_identity
+          HAVING COUNT(*) > 1
+        ) duplicate_observations
+      ) THEN
+        RAISE EXCEPTION 'codeclip_youtube_websub_diagnostic_observations contains duplicate B4 observation identities';
+      END IF;
+    END $$
+  `);
+
+  await queryClient.query(`
+    ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      ALTER COLUMN provider SET NOT NULL,
+      ALTER COLUMN channel SET NOT NULL,
+      ALTER COLUMN channel_id SET NOT NULL,
+      ALTER COLUMN topic SET NOT NULL,
+      ALTER COLUMN observation_identity SET NOT NULL,
+      ALTER COLUMN video_id SET NOT NULL,
+      ALTER COLUMN published_at SET NOT NULL,
+      ALTER COLUMN entry_updated_at SET NOT NULL,
+      ALTER COLUMN first_observed_at SET NOT NULL,
+      ALTER COLUMN last_observed_at SET NOT NULL,
+      ALTER COLUMN seen_count SET NOT NULL,
+      ALTER COLUMN diagnostic_metadata SET DEFAULT '{}'::jsonb,
+      ALTER COLUMN diagnostic_metadata SET NOT NULL,
+      ALTER COLUMN created_at SET NOT NULL,
+      ALTER COLUMN updated_at SET NOT NULL
+  `);
+
+  await ensureCodeClipYouTubeWebSubDiagnosticObservationCheckConstraint(
+    queryClient,
+    CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_OBSERVATION_CONSTRAINTS.provider,
+    'provider',
+    `
+      ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      ADD CONSTRAINT codeclip_youtube_websub_diagnostic_observations_provider_check CHECK (provider = 'youtube')
+    `
+  );
+
+  await ensureCodeClipYouTubeWebSubDiagnosticObservationCheckConstraint(
+    queryClient,
+    CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_OBSERVATION_CONSTRAINTS.channel,
+    'channel',
+    `
+      ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      ADD CONSTRAINT codeclip_youtube_websub_diagnostic_observations_channel_check CHECK (channel = 'youtube')
+    `
+  );
+
+  await ensureCodeClipYouTubeWebSubDiagnosticObservationCheckConstraint(
+    queryClient,
+    CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_OBSERVATION_CONSTRAINTS.metadata,
+    'metadata',
+    `
+      ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      ADD CONSTRAINT codeclip_youtube_websub_diagnostic_observations_metadata_object_check CHECK (
+        jsonb_typeof(diagnostic_metadata) = 'object'
+      )
+    `
+  );
+
+  await ensureCodeClipYouTubeWebSubDiagnosticObservationCheckConstraint(
+    queryClient,
+    CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_OBSERVATION_CONSTRAINTS.seenCount,
+    'seenCount',
+    `
+      ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      ADD CONSTRAINT codeclip_youtube_websub_diagnostic_observations_seen_count_check CHECK (seen_count >= 1)
+    `
+  );
+
+  await ensureCodeClipYouTubeWebSubDiagnosticObservationCheckConstraint(
+    queryClient,
+    CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_OBSERVATION_CONSTRAINTS.observedTime,
+    'observedTime',
+    `
+      ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      ADD CONSTRAINT codeclip_youtube_websub_diagnostic_observations_observed_time_check CHECK (last_observed_at >= first_observed_at)
+    `
+  );
+
+  await ensureCodeClipYouTubeWebSubDiagnosticObservationCheckConstraint(
+    queryClient,
+    CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_OBSERVATION_CONSTRAINTS.updated,
+    'updated',
+    `
+      ALTER TABLE codeclip_youtube_websub_diagnostic_observations
+      ADD CONSTRAINT codeclip_youtube_websub_diagnostic_observations_updated_check CHECK (updated_at >= created_at)
+    `
+  );
+
+  await ensureCodeClipYouTubeWebSubDiagnosticObservationUniqueConstraint(queryClient);
+
+  await queryClient.query(`
     CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_diagnostic_observations_probe_seen_idx
-    ON codeclip_youtube_websub_diagnostic_observations (probe_id, last_seen_at DESC, id DESC)
+    ON codeclip_youtube_websub_diagnostic_observations (probe_id, last_observed_at DESC, id DESC)
   `);
 
   await queryClient.query(`
     CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_diagnostic_observations_video_idx
-    ON codeclip_youtube_websub_diagnostic_observations (channel_id, video_id)
+    ON codeclip_youtube_websub_diagnostic_observations (channel_id, video_id, published_at)
   `);
+  });
 }
 
 async function ensureCodeClipYouTubeOAuthStatesTable(queryClient = pool) {
