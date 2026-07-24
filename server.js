@@ -86,6 +86,7 @@ async function initializeCodeClipStartup({
   await databaseClient.ensureCodeClipProviderAccountBindingAuditTable();
   await databaseClient.ensureCodeClipProviderDeliveriesTable();
   await databaseClient.ensureCodeClipYouTubeWebSubSubscriptionsTable();
+  await databaseClient.ensureCodeClipYouTubeWebSubDiagnosticProbeTables();
   await databaseClient.ensureCodeClipYouTubeOAuthStatesTable();
 }
 
@@ -4767,6 +4768,97 @@ function handleCodeClipYouTubeWebSubParserError(error, req, res, next) {
     });
 }
 
+const CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_CALLBACK_ROUTE = "/api/codeclip/diagnostics/youtube/websub/:callbackId";
+
+const codeClipYouTubeWebSubDiagnosticRawParser = express.raw({
+  type: ["application/atom+xml", "application/xml", "text/xml"],
+  limit: "256kb",
+  verify: captureCodeClipProviderWebhookRawBody,
+});
+
+function isCodeClipYouTubeWebSubDiagnosticRoute(req) {
+  return (
+    req?.method === "POST" &&
+    /^\/api\/codeclip\/diagnostics\/youtube\/websub\/[^/]+$/.test(
+      String(req.path || "").replace(/\/+$/, "")
+    )
+  );
+}
+
+async function handleCodeClipYouTubeWebSubDiagnosticVerificationRoute(req, res) {
+  try {
+    const {
+      verifyCodeClipYouTubeWebSubDiagnosticCallback,
+    } = require("./verticals/codeclip/youtube-websub-diagnostic-callback");
+    const result = await verifyCodeClipYouTubeWebSubDiagnosticCallback(
+      {
+        callbackId: req.params.callbackId,
+        query: req.query || {},
+      },
+      { queryClient: database.pool }
+    );
+    res.set("Cache-Control", "no-store");
+    if (result.accepted) {
+      return res.status(result.httpStatus).type("text/plain").send(result.challenge);
+    }
+    return res.status(result.httpStatus).json(result.publicBody);
+  } catch (error) {
+    console.warn("codeClip diagnostic YouTube WebSub verification failed", {
+      vertical: "codeclip",
+      provider: "youtube",
+      route: CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_CALLBACK_ROUTE,
+      error: error?.name || "Error",
+    });
+    return res.status(503).set("Cache-Control", "no-store").json({
+      ok: false,
+      error: "Diagnostic WebSub callback rejected",
+    });
+  }
+}
+
+async function handleCodeClipYouTubeWebSubDiagnosticNotificationRoute(req, res) {
+  try {
+    const {
+      processCodeClipYouTubeWebSubDiagnosticNotification,
+    } = require("./verticals/codeclip/youtube-websub-diagnostic-callback");
+    const rawBody = req.codeClipRawBody || (Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0));
+    const result = await processCodeClipYouTubeWebSubDiagnosticNotification(
+      {
+        callbackId: req.params.callbackId,
+        headers: req.headers || {},
+        rawBody,
+      },
+      { queryClient: database.pool }
+    );
+    if (result.accepted && result.httpStatus === 204) {
+      return res.status(204).set("Cache-Control", "no-store").end();
+    }
+    return res.status(result.httpStatus).set("Cache-Control", "no-store").json(result.publicBody);
+  } catch (error) {
+    console.warn("codeClip diagnostic YouTube WebSub notification failed", {
+      vertical: "codeclip",
+      provider: "youtube",
+      route: CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_CALLBACK_ROUTE,
+      error: error?.name || "Error",
+    });
+    return res.status(503).set("Cache-Control", "no-store").json({
+      ok: false,
+      error: "Diagnostic WebSub callback rejected",
+    });
+  }
+}
+
+function handleCodeClipYouTubeWebSubDiagnosticParserError(error, req, res, next) {
+  if (!isCodeClipYouTubeWebSubDiagnosticRoute(req)) return next(error);
+  return res
+    .status(error?.type === "entity.too.large" ? 413 : 400)
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      error: "Diagnostic WebSub callback rejected",
+    });
+}
+
 app.get("/codeclip/provider/meta/keyword", handleCodeClipMetaProviderChallengeRoute);
 app.get(
   CODECLIP_YOUTUBE_WEBSUB_CALLBACK_ROUTE,
@@ -4780,6 +4872,22 @@ app.post(
   handleCodeClipYouTubeWebSubNotificationRoute
 );
 app.use(handleCodeClipYouTubeWebSubParserError);
+app.get(
+  CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_CALLBACK_ROUTE,
+  handleCodeClipYouTubeWebSubDiagnosticVerificationRoute
+);
+app.post(
+  CODECLIP_YOUTUBE_WEBSUB_DIAGNOSTIC_CALLBACK_ROUTE,
+  codeClipYouTubeWebSubDiagnosticRawParser,
+  handleCodeClipYouTubeWebSubDiagnosticNotificationRoute
+);
+app.use(handleCodeClipYouTubeWebSubDiagnosticParserError);
+app.all(/^\/api\/codeclip\/diagnostics\/youtube\/websub\/.+\/.+$/, (_req, res) => {
+  return res.status(404).set("Cache-Control", "no-store").json({
+    ok: false,
+    error: "Not found",
+  });
+});
 app.post("/codeclip/provider/:provider/keyword", handleCodeClipProviderKeywordRoute);
 
 app.get("/report/:eventCode", requireCodePerksAdmin, async (req, res) => {
@@ -8079,6 +8187,109 @@ function sendCodeClipYouTubeWebSubOperationError(res, error) {
       code,
     });
 }
+
+function mapCodeClipYouTubeWebSubDiagnosticOperationStatus(code) {
+  if (code === "validation_error") return 400;
+  if (code === "probe_not_found") return 404;
+  if (code === "public_base_url_unavailable" || code === "authentication_unavailable" || code === "persistence_failed") return 503;
+  if (code === "hub_request_timeout" || code === "hub_request_failed") return 502;
+  if (code === "diagnostic_cleanup_required") return 503;
+  return 500;
+}
+
+function mapCodeClipYouTubeWebSubDiagnosticOperationSuccessStatus(result) {
+  if (result?.code === "diagnostic_probe_exists" || result?.code === "diagnostic_unsubscribed") return 200;
+  return 202;
+}
+
+function sendCodeClipYouTubeWebSubDiagnosticOperationError(res, error) {
+  const code = error?.code || "internal_error";
+  return res
+    .status(mapCodeClipYouTubeWebSubDiagnosticOperationStatus(code))
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      error: "Diagnostic YouTube WebSub operation failed",
+      code,
+    });
+}
+
+app.post("/internal/codeclip/youtube-websub/diagnostic-probes", requireCodeClipAdmin, async (req, res) => {
+  const {
+    CodeClipYouTubeWebSubDiagnosticOperationError,
+    createCodeClipYouTubeWebSubDiagnosticProbeOperation,
+  } = require("./verticals/codeclip/youtube-websub-diagnostic-operations");
+  try {
+    const result = await createCodeClipYouTubeWebSubDiagnosticProbeOperation(req.body || {}, {
+      queryClient: database.pool,
+    });
+    return res
+      .status(result.ok ? mapCodeClipYouTubeWebSubDiagnosticOperationSuccessStatus(result) : mapCodeClipYouTubeWebSubDiagnosticOperationStatus(result.code))
+      .set("Cache-Control", "no-store")
+      .json(result);
+  } catch (error) {
+    if (error instanceof CodeClipYouTubeWebSubDiagnosticOperationError) {
+      return sendCodeClipYouTubeWebSubDiagnosticOperationError(res, error);
+    }
+    console.warn("codeClip diagnostic YouTube WebSub probe start failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/youtube-websub/diagnostic-probes",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeWebSubDiagnosticOperationError(res, { code: "internal_error" });
+  }
+});
+
+app.get("/internal/codeclip/youtube-websub/diagnostic-probes/:probeId", requireCodeClipAdmin, async (req, res) => {
+  const {
+    CodeClipYouTubeWebSubDiagnosticOperationError,
+    getCodeClipYouTubeWebSubDiagnosticProbeStatus,
+  } = require("./verticals/codeclip/youtube-websub-diagnostic-operations");
+  try {
+    const result = await getCodeClipYouTubeWebSubDiagnosticProbeStatus(req.params.probeId, {
+      queryClient: database.pool,
+    });
+    return res.set("Cache-Control", "no-store").json(result);
+  } catch (error) {
+    if (error instanceof CodeClipYouTubeWebSubDiagnosticOperationError) {
+      return sendCodeClipYouTubeWebSubDiagnosticOperationError(res, error);
+    }
+    console.warn("codeClip diagnostic YouTube WebSub probe status failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/youtube-websub/diagnostic-probes/:probeId",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeWebSubDiagnosticOperationError(res, { code: "internal_error" });
+  }
+});
+
+app.post("/internal/codeclip/youtube-websub/diagnostic-probes/:probeId/unsubscribe", requireCodeClipAdmin, async (req, res) => {
+  const {
+    CodeClipYouTubeWebSubDiagnosticOperationError,
+    unsubscribeCodeClipYouTubeWebSubDiagnosticProbeOperation,
+  } = require("./verticals/codeclip/youtube-websub-diagnostic-operations");
+  try {
+    const result = await unsubscribeCodeClipYouTubeWebSubDiagnosticProbeOperation(
+      req.params.probeId,
+      req.body || {},
+      { queryClient: database.pool }
+    );
+    return res
+      .status(result.ok ? mapCodeClipYouTubeWebSubDiagnosticOperationSuccessStatus(result) : mapCodeClipYouTubeWebSubDiagnosticOperationStatus(result.code))
+      .set("Cache-Control", "no-store")
+      .json(result);
+  } catch (error) {
+    if (error instanceof CodeClipYouTubeWebSubDiagnosticOperationError) {
+      return sendCodeClipYouTubeWebSubDiagnosticOperationError(res, error);
+    }
+    console.warn("codeClip diagnostic YouTube WebSub probe cleanup failed", {
+      vertical: "codeclip",
+      route: "/internal/codeclip/youtube-websub/diagnostic-probes/:probeId/unsubscribe",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeWebSubDiagnosticOperationError(res, { code: "internal_error" });
+  }
+});
 
 app.post("/internal/codeclip/youtube-websub/subscriptions", requireCodeClipAdmin, async (req, res) => {
   const {

@@ -19,6 +19,7 @@ const CODECLIP_STARTUP_ENSURES = [
   ["ensureCodeClipProviderAccountBindingAuditTable", "ensure-codeclip-provider-binding-audit"],
   ["ensureCodeClipProviderDeliveriesTable", "ensure-codeclip-provider-deliveries"],
   ["ensureCodeClipYouTubeWebSubSubscriptionsTable", "ensure-codeclip-youtube-websub-subscriptions"],
+  ["ensureCodeClipYouTubeWebSubDiagnosticProbeTables", "ensure-codeclip-youtube-websub-diagnostic-probes"],
   ["ensureCodeClipYouTubeOAuthStatesTable", "ensure-codeclip-youtube-oauth-states"],
 ];
 

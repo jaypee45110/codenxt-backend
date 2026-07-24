@@ -433,6 +433,39 @@ async function getCodeClipYouTubeWebSubDiagnosticProbeByCallbackId(callbackId, {
   return row ? { row, public: publicProbe(row) } : null;
 }
 
+async function getCodeClipYouTubeWebSubDiagnosticObservationSummary(probeId, { queryClient, limit = 10 } = {}) {
+  const normalizedProbeId = normalizeDiagnosticProbeId(probeId);
+  const client = requireQueryClient(queryClient || database.pool);
+  const normalizedLimit = Math.min(
+    Math.max(Number.parseInt(String(limit || 10), 10) || 10, 0),
+    25
+  );
+  const countResult = await client.query(
+    `
+      SELECT COUNT(*) AS count
+      FROM codeclip_youtube_websub_diagnostic_observations
+      WHERE probe_id = $1
+    `,
+    [normalizedProbeId]
+  );
+  const rowsResult = normalizedLimit > 0
+    ? await client.query(
+        `
+          SELECT *
+          FROM codeclip_youtube_websub_diagnostic_observations
+          WHERE probe_id = $1
+          ORDER BY last_observed_at DESC, id DESC
+          LIMIT $2
+        `,
+        [normalizedProbeId, normalizedLimit]
+      )
+    : { rows: [] };
+  return {
+    count: Number.parseInt(String(countResult.rows?.[0]?.count || 0), 10) || 0,
+    items: (rowsResult.rows || []).map(serializeDiagnosticObservationPublic),
+  };
+}
+
 function encodeDiagnosticProbeCursor(row) {
   if (!row) return null;
   const createdAt = normalizeRequiredIsoTimestamp(row.created_at, "createdAt");
@@ -1498,6 +1531,7 @@ module.exports = {
   createCodeClipYouTubeWebSubDiagnosticProbe,
   getCodeClipYouTubeWebSubDiagnosticProbeByProbeId,
   getCodeClipYouTubeWebSubDiagnosticProbeByCallbackId,
+  getCodeClipYouTubeWebSubDiagnosticObservationSummary,
   listCodeClipYouTubeWebSubDiagnosticProbes,
   encodeDiagnosticProbeCursor,
   decodeDiagnosticProbeCursor,
