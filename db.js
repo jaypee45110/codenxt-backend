@@ -1899,6 +1899,153 @@ async function ensureCodeClipYouTubeWebSubSubscriptionsTable(queryClient = pool)
   `);
 }
 
+
+async function ensureCodeClipYouTubeWebSubDiagnosticProbeTables(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_youtube_websub_diagnostic_probes (
+      id BIGSERIAL PRIMARY KEY,
+      probe_id TEXT NOT NULL,
+      callback_id TEXT NOT NULL,
+      provider TEXT NOT NULL DEFAULT 'youtube',
+      channel TEXT NOT NULL DEFAULT 'youtube',
+      channel_id TEXT NOT NULL,
+      topic TEXT NOT NULL,
+      status TEXT NOT NULL,
+      pending_mode TEXT,
+      secret_version TEXT,
+      lease_expires_at TIMESTAMPTZ,
+      verified_at TIMESTAMPTZ,
+      first_verified_at TIMESTAMPTZ,
+      last_notification_at TIMESTAMPTZ,
+      unsubscribed_at TIMESTAMPTZ,
+      cleanup_required BOOLEAN NOT NULL DEFAULT FALSE,
+      subscription_may_exist BOOLEAN NOT NULL DEFAULT FALSE,
+      failed_operation TEXT,
+      failed_reason_code TEXT,
+      diagnostic_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_probe_id_key UNIQUE (probe_id),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_callback_id_key UNIQUE (callback_id),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_provider_check CHECK (provider = 'youtube'),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_channel_check CHECK (channel = 'youtube'),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_status_check CHECK (status IN (
+        'pending_subscribe',
+        'active',
+        'pending_unsubscribe',
+        'unsubscribed',
+        'failed'
+      )),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_pending_mode_check CHECK (
+        (status = 'pending_subscribe' AND pending_mode = 'subscribe') OR
+        (status = 'pending_unsubscribe' AND pending_mode = 'unsubscribe') OR
+        (status IN ('active', 'unsubscribed', 'failed') AND pending_mode IS NULL)
+      ),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_metadata_object_check CHECK (
+        jsonb_typeof(diagnostic_metadata) = 'object'
+      ),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_time_order_check CHECK (updated_at >= created_at),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_active_check CHECK (
+        status <> 'active' OR (
+          verified_at IS NOT NULL AND
+          first_verified_at IS NOT NULL AND
+          lease_expires_at IS NOT NULL AND
+          lease_expires_at > verified_at
+        )
+      ),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_unsubscribed_check CHECK (
+        (status = 'unsubscribed' AND unsubscribed_at IS NOT NULL) OR
+        (status <> 'unsubscribed' AND unsubscribed_at IS NULL)
+      ),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_pending_subscribe_check CHECK (
+        status <> 'pending_subscribe' OR (
+          verified_at IS NULL AND
+          first_verified_at IS NULL AND
+          unsubscribed_at IS NULL
+        )
+      ),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_pending_unsubscribe_check CHECK (
+        status <> 'pending_unsubscribe' OR (
+          verified_at IS NOT NULL OR
+          (cleanup_required = TRUE AND subscription_may_exist = TRUE)
+        )
+      ),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_failed_check CHECK (
+        status <> 'failed' OR (
+          failed_operation IN ('subscribe', 'unsubscribe', 'verification', 'notification') AND
+          failed_reason_code ~ '^[a-z0-9_]{2,80}$'
+        )
+      ),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_probes_cleanup_check CHECK (
+        cleanup_required = FALSE OR status IN ('failed', 'pending_unsubscribe')
+      )
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS codeclip_youtube_websub_diagnostic_open_topic_uidx
+    ON codeclip_youtube_websub_diagnostic_probes (provider, channel, channel_id, topic)
+    WHERE
+      status IN ('pending_subscribe', 'active', 'pending_unsubscribe')
+      OR (
+        status = 'failed'
+        AND cleanup_required = TRUE
+        AND subscription_may_exist = TRUE
+      )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_diagnostic_probes_status_idx
+    ON codeclip_youtube_websub_diagnostic_probes (status, updated_at DESC, id DESC)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_diagnostic_probes_channel_idx
+    ON codeclip_youtube_websub_diagnostic_probes (channel_id, updated_at DESC, id DESC)
+  `);
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_youtube_websub_diagnostic_observations (
+      id BIGSERIAL PRIMARY KEY,
+      probe_id TEXT NOT NULL REFERENCES codeclip_youtube_websub_diagnostic_probes(probe_id) ON DELETE RESTRICT,
+      observation_identity TEXT NOT NULL,
+      provider TEXT NOT NULL DEFAULT 'youtube',
+      channel TEXT NOT NULL DEFAULT 'youtube',
+      channel_id TEXT NOT NULL,
+      video_id TEXT NOT NULL,
+      published_at TIMESTAMPTZ NOT NULL,
+      updated_at_entry TIMESTAMPTZ,
+      first_seen_at TIMESTAMPTZ NOT NULL,
+      last_seen_at TIMESTAMPTZ NOT NULL,
+      seen_count INTEGER NOT NULL DEFAULT 1,
+      sanitized_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_observations_provider_check CHECK (provider = 'youtube'),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_observations_channel_check CHECK (channel = 'youtube'),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_observations_metadata_object_check CHECK (
+        jsonb_typeof(sanitized_metadata) = 'object'
+      ),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_observations_seen_count_check CHECK (seen_count >= 1),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_observations_seen_time_check CHECK (last_seen_at >= first_seen_at),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_observations_updated_check CHECK (updated_at >= created_at),
+      CONSTRAINT codeclip_youtube_websub_diagnostic_observations_unique UNIQUE (probe_id, observation_identity)
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_diagnostic_observations_probe_seen_idx
+    ON codeclip_youtube_websub_diagnostic_observations (probe_id, last_seen_at DESC, id DESC)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_websub_diagnostic_observations_video_idx
+    ON codeclip_youtube_websub_diagnostic_observations (channel_id, video_id)
+  `);
+}
+
 async function ensureCodeClipYouTubeOAuthStatesTable(queryClient = pool) {
   if (!queryClient) return;
 
@@ -3579,6 +3726,7 @@ module.exports = {
   ensureCodeClipProviderAccountBindingsTable,
   ensureCodeClipProviderAccountBindingAuditTable,
   ensureCodeClipYouTubeWebSubSubscriptionsTable,
+  ensureCodeClipYouTubeWebSubDiagnosticProbeTables,
   ensureCodeClipYouTubeOAuthStatesTable,
   ensureCodeClipProviderDeliveriesTable,
   recordCodeClipYouTubeOAuthState,
