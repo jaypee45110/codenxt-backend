@@ -2,6 +2,7 @@ const database = require("../../db");
 const {
   DIAGNOSTIC_PROVIDER,
   DIAGNOSTIC_CHANNEL,
+  CodeClipYouTubeWebSubDiagnosticProbeError,
   DIAGNOSTIC_PROBE_STATUSES,
   DIAGNOSTIC_PENDING_MODES,
   normalizeDiagnosticProbeId,
@@ -1401,6 +1402,23 @@ function requireActiveSubscribeVerificationRace(record) {
   }
 }
 
+function requireTerminalUnsubscribeVerificationRace(record) {
+  if (
+    record.status !== DIAGNOSTIC_PROBE_STATUSES.UNSUBSCRIBED ||
+    record.pendingMode !== null ||
+    record.subscriptionMayExist !== false ||
+    record.cleanupRequired !== false ||
+    record.leaseExpiresAt !== null ||
+    !record.unsubscribedAt
+  ) {
+    throw repositoryError("state_conflict", "terminal unsubscribe verification race is not correlated");
+  }
+  const verification = record.diagnosticMetadata?.lastVerification || null;
+  if (!verification || verification.mode !== DIAGNOSTIC_PENDING_MODES.UNSUBSCRIBE) {
+    throw repositoryError("state_conflict", "terminal unsubscribe verification race is not correlated");
+  }
+}
+
 function markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted(input = {}, options = {}) {
   return runLifecycleOperation(input, (record) => {
     if (record.status === DIAGNOSTIC_PROBE_STATUSES.ACTIVE) {
@@ -1498,10 +1516,31 @@ function markCodeClipYouTubeWebSubDiagnosticUnsubscribeDispatched(input = {}, op
 }
 
 function markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted(input = {}, options = {}) {
-  return runLifecycleOperation(input, (record) => {
-    requireStatus(record, [DIAGNOSTIC_PROBE_STATUSES.PENDING_UNSUBSCRIBE]);
-    return applyAcceptedMetadata(record, input, DISPATCH_MODES.UNSUBSCRIBE);
-  }, options);
+  return withRepositoryTransaction(options.queryClient, async (client) => {
+    await createLifecycleSavepoint(client);
+    let locked;
+    try {
+      locked = await lockDiagnosticProbe(client, input);
+    } catch (error) {
+      if (error instanceof CodeClipYouTubeWebSubDiagnosticProbeError) {
+        throw repositoryError("state_conflict", "terminal unsubscribe verification race is not correlated");
+      }
+      throw error;
+    }
+    const record = locked.row;
+    const result = (() => {
+      if (record.status === DIAGNOSTIC_PROBE_STATUSES.UNSUBSCRIBED) {
+        requireTerminalUnsubscribeVerificationRace(record);
+        return applyAcceptedMetadata(record, input, DISPATCH_MODES.UNSUBSCRIBE);
+      }
+      requireStatus(record, [DIAGNOSTIC_PROBE_STATUSES.PENDING_UNSUBSCRIBE]);
+      return applyAcceptedMetadata(record, input, DISPATCH_MODES.UNSUBSCRIBE);
+    })();
+    const next = normalizeDiagnosticProbeRecord(result.row);
+    if (result.idempotent) return { status: "idempotent", row: locked.row, public: publicProbe(locked.row) };
+    const row = await updateLockedProbe(client, locked.id, next);
+    return { status: "updated", row, public: publicProbe(row) };
+  });
 }
 
 function markCodeClipYouTubeWebSubDiagnosticCleanupRequired(input = {}, options = {}) {

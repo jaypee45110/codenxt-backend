@@ -1166,6 +1166,167 @@ test("B5 subscribe accepted active race fails closed without exact lifecycle cor
   }
 });
 
+test("B5 unsubscribe accepted reconciles verified terminal race for the same dispatch attempt", async () => {
+  const unsubscribedVerified = probeRow({
+    status: "unsubscribed",
+    pending_mode: null,
+    lease_expires_at: null,
+    verified_at: "2026-07-24T10:20:01.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    unsubscribed_at: "2026-07-24T10:20:01.000Z",
+    cleanup_required: false,
+    subscription_may_exist: false,
+    updated_at: "2026-07-24T10:20:01.000Z",
+    diagnostic_metadata: {
+      lastDispatch: {
+        mode: "unsubscribe",
+        status: "started",
+        attemptId: "attempt_unsubscribe_2",
+        attemptNumber: 2,
+        retryEligible: false,
+        dispatchedAt: "2026-07-24T10:20:00.000Z",
+      },
+      lastVerification: {
+        mode: "unsubscribe",
+        verifiedAt: "2026-07-24T10:20:01.000Z",
+      },
+      cleanup: {
+        requestedAt: "2026-07-24T10:20:00.000Z",
+        confirmedAt: "2026-07-24T10:20:01.000Z",
+      },
+    },
+  });
+  const client = makeLifecycleClient(unsubscribedVerified);
+
+  const accepted = await repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted({
+    probeId: PROBE_ID,
+    callbackId: CALLBACK_ID,
+    acceptedAt: "2026-07-24T10:20:02.000Z",
+    attemptId: "attempt_unsubscribe_2",
+    attemptNumber: 2,
+    resultCode: "hub_request_accepted",
+  }, { queryClient: client });
+
+  assert.equal(accepted.status, "updated");
+  assert.equal(accepted.row.status, "unsubscribed");
+  assert.equal(accepted.row.pendingMode, null);
+  assert.equal(accepted.row.unsubscribedAt, "2026-07-24T10:20:01.000Z");
+  assert.equal(accepted.row.leaseExpiresAt, null);
+  assert.equal(accepted.row.cleanupRequired, false);
+  assert.equal(accepted.row.subscriptionMayExist, false);
+  assert.equal(accepted.row.diagnosticMetadata.lastDispatch.status, "accepted");
+  assert.equal(accepted.row.diagnosticMetadata.lastDispatch.acceptedAt, "2026-07-24T10:20:02.000Z");
+  assert.equal(accepted.row.diagnosticMetadata.lastDispatch.resultCode, "hub_request_accepted");
+  assert.equal(accepted.row.diagnosticMetadata.lastVerification.mode, "unsubscribe");
+
+  const repeated = await repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted({
+    probeId: PROBE_ID,
+    callbackId: CALLBACK_ID,
+    acceptedAt: "2026-07-24T10:20:02.000Z",
+    attemptId: "attempt_unsubscribe_2",
+    attemptNumber: 2,
+    resultCode: "hub_request_accepted",
+  }, { queryClient: client });
+  assert.equal(repeated.status, "idempotent");
+  assert.equal(repeated.row.diagnosticMetadata.lastDispatch.status, "accepted");
+});
+
+test("B5 unsubscribe accepted terminal race fails closed without exact lifecycle correlation", async () => {
+  const terminalVerified = probeRow({
+    status: "unsubscribed",
+    pending_mode: null,
+    lease_expires_at: null,
+    verified_at: "2026-07-24T10:20:01.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    unsubscribed_at: "2026-07-24T10:20:01.000Z",
+    cleanup_required: false,
+    subscription_may_exist: false,
+    updated_at: "2026-07-24T10:20:01.000Z",
+    diagnostic_metadata: {
+      lastDispatch: {
+        mode: "unsubscribe",
+        status: "started",
+        attemptId: "attempt_unsubscribe_2",
+        attemptNumber: 2,
+        retryEligible: false,
+        dispatchedAt: "2026-07-24T10:20:00.000Z",
+      },
+      lastVerification: {
+        mode: "unsubscribe",
+        verifiedAt: "2026-07-24T10:20:01.000Z",
+      },
+    },
+  });
+  const cases = [
+    {
+      name: "different attempt id",
+      row: terminalVerified,
+      input: { attemptId: "attempt_unsubscribe_other", attemptNumber: 2 },
+    },
+    {
+      name: "different attempt number",
+      row: terminalVerified,
+      input: { attemptId: "attempt_unsubscribe_2", attemptNumber: 3 },
+    },
+    {
+      name: "different dispatch mode",
+      row: probeRow({
+        ...terminalVerified,
+        diagnostic_metadata: {
+          ...terminalVerified.diagnostic_metadata,
+          lastDispatch: { ...terminalVerified.diagnostic_metadata.lastDispatch, mode: "subscribe" },
+        },
+      }),
+      input: { attemptId: "attempt_unsubscribe_2", attemptNumber: 2 },
+    },
+    {
+      name: "missing unsubscribe verification",
+      row: probeRow({
+        ...terminalVerified,
+        diagnostic_metadata: {
+          lastDispatch: terminalVerified.diagnostic_metadata.lastDispatch,
+        },
+      }),
+      input: { attemptId: "attempt_unsubscribe_2", attemptNumber: 2 },
+    },
+    {
+      name: "non unsubscribe verification",
+      row: probeRow({
+        ...terminalVerified,
+        diagnostic_metadata: {
+          ...terminalVerified.diagnostic_metadata,
+          lastVerification: { ...terminalVerified.diagnostic_metadata.lastVerification, mode: "subscribe" },
+        },
+      }),
+      input: { attemptId: "attempt_unsubscribe_2", attemptNumber: 2 },
+    },
+    {
+      name: "subscription still may exist",
+      row: probeRow({ ...terminalVerified, subscription_may_exist: true }),
+      input: { attemptId: "attempt_unsubscribe_2", attemptNumber: 2 },
+    },
+    {
+      name: "cleanup still required",
+      row: probeRow({ ...terminalVerified, cleanup_required: true }),
+      input: { attemptId: "attempt_unsubscribe_2", attemptNumber: 2 },
+    },
+  ];
+
+  for (const testCase of cases) {
+    await assert.rejects(
+      () => repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted({
+        probeId: PROBE_ID,
+        callbackId: CALLBACK_ID,
+        acceptedAt: "2026-07-24T10:20:02.000Z",
+        resultCode: "hub_request_accepted",
+        ...testCase.input,
+      }, { queryClient: makeLifecycleClient(testCase.row) }),
+      { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" },
+      testCase.name
+    );
+  }
+});
+
 test("B3 illegal transitions fail closed", async () => {
   await assert.rejects(
     () => repository.recordCodeClipYouTubeWebSubDiagnosticNotificationObservation({

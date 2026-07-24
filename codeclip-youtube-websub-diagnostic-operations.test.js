@@ -367,3 +367,108 @@ test("diagnostic cleanup sends unsubscribe to the same diagnostic callback", asy
   assert.equal(hub.topic, TOPIC);
   assert.equal(hub.leaseSeconds, undefined);
 });
+
+test("diagnostic cleanup reconciles unsubscribed probe when GET verification wins the Hub 202 race", async () => {
+  const active = probe({
+    status: "active",
+    pendingMode: null,
+    verifiedAt: "2026-07-24T10:05:00.000Z",
+    firstVerifiedAt: "2026-07-24T10:05:00.000Z",
+    leaseExpiresAt: "2026-07-25T10:05:00.000Z",
+  });
+  const { state, options } = baseOptions({
+    requestSubscription: async (input) => {
+      state.calls.push(["hub", input]);
+      state.current = probe({
+        ...state.current,
+        status: "unsubscribed",
+        pendingMode: null,
+        cleanupRequired: false,
+        subscriptionMayExist: false,
+        leaseExpiresAt: null,
+        unsubscribedAt: "2026-07-24T10:10:01.000Z",
+        diagnosticMetadata: {
+          ...state.current.diagnosticMetadata,
+          lastVerification: {
+            mode: "unsubscribe",
+            verifiedAt: "2026-07-24T10:10:01.000Z",
+          },
+        },
+      });
+      return state.hubResult;
+    },
+    markUnsubscribeAccepted: async (input, options) => {
+      state.calls.push(["unsubscribeAccepted", input, options]);
+      state.current = {
+        ...state.current,
+        diagnosticMetadata: {
+          ...state.current.diagnosticMetadata,
+          lastDispatch: {
+            ...state.current.diagnosticMetadata.lastDispatch,
+            status: "accepted",
+            acceptedAt: input.acceptedAt,
+            resultCode: input.resultCode,
+          },
+        },
+      };
+      return { status: "updated", row: state.current, public: publicProbe(state.current) };
+    },
+  });
+  state.current = active;
+  state.hubResult = { ok: true, code: "hub_request_accepted", status: 202, mode: "unsubscribe" };
+
+  const result = await unsubscribeCodeClipYouTubeWebSubDiagnosticProbeOperation(PROBE_ID, {}, options);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "diagnostic_unsubscribe_pending");
+  assert.equal(result.probe.status, "unsubscribed");
+  assert.equal(result.probe.probeId, PROBE_ID);
+  assert.equal(result.probe.callbackId, "diag_y...1234");
+  assert.equal(result.probe.cleanupRequired, false);
+  assert.equal(result.probe.subscriptionMayExist, false);
+  assert.equal(state.calls.some((call) => call[0] === "markCleanupRequired"), false);
+  assert.equal(JSON.stringify(result).includes(CALLBACK_ID), false);
+  assert.equal(JSON.stringify(result).includes("root-secret"), false);
+});
+
+test("diagnostic cleanup returns recoverable pending state when Hub accepted but unsubscribe reconciliation is unavailable", async () => {
+  const active = probe({
+    status: "active",
+    pendingMode: null,
+    verifiedAt: "2026-07-24T10:05:00.000Z",
+    firstVerifiedAt: "2026-07-24T10:05:00.000Z",
+    leaseExpiresAt: "2026-07-25T10:05:00.000Z",
+  });
+  const { state, options } = baseOptions({
+    markUnsubscribeAccepted: async () => {
+      state.calls.push(["unsubscribeAccepted"]);
+      const error = new Error("unsubscribe accepted persistence failed");
+      error.name = "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError";
+      error.code = "state_conflict";
+      throw error;
+    },
+    getProbeByProbeId: async (probeId, options) => {
+      state.calls.push(["getProbe", probeId, options]);
+      return { row: state.current, public: publicProbe(state.current) };
+    },
+    markCleanupRequired: async (input, options) => {
+      state.calls.push(["markCleanupRequired", input, options]);
+      throw new Error("cleanup required transition should not be used after Hub accepted");
+    },
+  });
+  state.current = active;
+  state.hubResult = { ok: true, code: "hub_request_accepted", status: 202, mode: "unsubscribe" };
+
+  const result = await unsubscribeCodeClipYouTubeWebSubDiagnosticProbeOperation(PROBE_ID, {}, options);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "diagnostic_cleanup_pending");
+  assert.equal(result.probe.probeId, PROBE_ID);
+  assert.equal(result.probe.callbackId, "diag_y...1234");
+  assert.equal(result.probe.status, "pending_unsubscribe");
+  assert.equal(result.probe.pendingMode, "unsubscribe");
+  assert.equal(result.probe.cleanupRequired, true);
+  assert.equal(result.probe.subscriptionMayExist, true);
+  assert.equal(state.calls.some((call) => call[0] === "markCleanupRequired"), false);
+  assert.equal(JSON.stringify(result).includes(CALLBACK_ID), false);
+});

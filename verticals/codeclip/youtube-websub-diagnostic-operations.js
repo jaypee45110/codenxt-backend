@@ -180,6 +180,32 @@ function isVerifiedActiveSubscribeAttempt(row, attempt) {
   );
 }
 
+function isTerminalUnsubscribeAttempt(row, attempt) {
+  const verification = getLastVerification(row);
+  return Boolean(
+    row &&
+    row.status === "unsubscribed" &&
+    row.pendingMode === null &&
+    row.cleanupRequired === false &&
+    row.subscriptionMayExist === false &&
+    row.leaseExpiresAt === null &&
+    row.unsubscribedAt &&
+    verification &&
+    verification.mode === "unsubscribe" &&
+    isSameUnsubscribeAttempt(row, attempt)
+  );
+}
+
+function isSameUnsubscribeAttempt(row, { attemptId, attemptNumber }) {
+  const dispatch = getLastDispatch(row);
+  return Boolean(
+    dispatch &&
+    dispatch.mode === "unsubscribe" &&
+    dispatch.attemptId === attemptId &&
+    Number(dispatch.attemptNumber) === Number(attemptNumber)
+  );
+}
+
 function recoverableCleanupProbe(row, fallback = {}) {
   return {
     ...(row || fallback),
@@ -191,6 +217,18 @@ function recoverableCleanupProbe(row, fallback = {}) {
     subscriptionMayExist: true,
     failedOperation: "subscribe",
     failedReasonCode: "hub_request_accepted_without_callback",
+  };
+}
+
+function recoverablePendingUnsubscribeProbe(row, fallback = {}) {
+  return {
+    ...(row || fallback),
+    probeId: row?.probeId || fallback.probeId || null,
+    callbackId: row?.callbackId || fallback.callbackId || null,
+    status: "pending_unsubscribe",
+    pendingMode: "unsubscribe",
+    cleanupRequired: true,
+    subscriptionMayExist: true,
   };
 }
 
@@ -365,17 +403,43 @@ async function unsubscribeCodeClipYouTubeWebSubDiagnosticProbeOperation(probeId,
     );
     return fail(hubResult.code || "hub_request_failed", cleanup.row, cleanup.public, { retryable: hubResult.retryable !== false });
   }
-  const accepted = await runTransaction(options, queryClient, ({ queryClient: txClient }) =>
-    (options.markUnsubscribeAccepted || repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted)({
-      probeId: normalizedProbeId,
-      callbackId: dispatched.row.callbackId,
-      acceptedAt: new Date().toISOString(),
-      attemptId,
-      attemptNumber: 1,
-      resultCode: "hub_request_accepted",
-    }, { queryClient: txClient })
-  );
-  return ok("diagnostic_unsubscribe_pending", accepted.row, accepted.public, { status: accepted.row.status });
+  const acceptInput = {
+    probeId: normalizedProbeId,
+    callbackId: dispatched.row.callbackId,
+    acceptedAt: new Date().toISOString(),
+    attemptId,
+    attemptNumber: 1,
+    resultCode: "hub_request_accepted",
+  };
+  try {
+    const accepted = await runTransaction(options, queryClient, ({ queryClient: txClient }) =>
+      (options.markUnsubscribeAccepted || repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted)(
+        acceptInput,
+        { queryClient: txClient }
+      )
+    );
+    return ok("diagnostic_unsubscribe_pending", accepted.row, accepted.public, { status: accepted.row.status });
+  } catch (acceptError) {
+    let latest = null;
+    if (isRepositoryStateConflict(acceptError)) {
+      latest = await (options.getProbeByProbeId || repository.getCodeClipYouTubeWebSubDiagnosticProbeByProbeId)(
+        normalizedProbeId,
+        { queryClient }
+      );
+      if (isTerminalUnsubscribeAttempt(latest?.row, acceptInput)) {
+        const accepted = await runTransaction(options, queryClient, ({ queryClient: txClient }) =>
+          (options.markUnsubscribeAccepted || repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted)(
+            acceptInput,
+            { queryClient: txClient }
+          )
+        );
+        return ok("diagnostic_unsubscribe_pending", accepted.row, accepted.public, { status: accepted.row.status });
+      }
+    }
+
+    const recoverable = recoverablePendingUnsubscribeProbe(latest?.row, dispatched.row);
+    return fail("diagnostic_cleanup_pending", recoverable, {}, { retryable: false });
+  }
 }
 
 module.exports = {
