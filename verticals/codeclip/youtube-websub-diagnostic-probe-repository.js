@@ -9,6 +9,10 @@ const {
   normalizeYouTubeDiagnosticChannelId,
   normalizeYouTubeDiagnosticTopic,
   normalizeDiagnosticProbeRecord,
+  applyDiagnosticVerificationTransition,
+  applyDiagnosticNotificationObservation,
+  applyDiagnosticDispatchFailureTransition,
+  applyDiagnosticUnsubscribeTransition,
   serializeDiagnosticProbePublic,
 } = require("./youtube-websub-diagnostic-probe");
 
@@ -17,11 +21,25 @@ const CALLBACK_ID_CONSTRAINT = "codeclip_youtube_websub_diagnostic_probes_callba
 const OPEN_TOPIC_CONSTRAINT = "codeclip_youtube_websub_diagnostic_open_topic_uidx";
 const UNIQUE_VIOLATION = "23505";
 const CREATE_SAVEPOINT = "codeclip_youtube_websub_diagnostic_create";
+const LIFECYCLE_SAVEPOINT = "codeclip_youtube_websub_diagnostic_lifecycle";
 const READ_COMMITTED = "read committed";
 const CURSOR_VERSION = 1;
 const DEFAULT_LIST_LIMIT = 25;
 const MAX_LIST_LIMIT = 100;
 const POSTGRES_BIGINT_MAX = 9223372036854775807n;
+
+const POSTGRES_INT_MAX = 2147483647;
+const DISPATCH_MODES = Object.freeze({
+  SUBSCRIBE: "subscribe",
+  UNSUBSCRIBE: "unsubscribe",
+});
+const DISPATCH_STATUSES = Object.freeze({
+  STARTED: "started",
+  ACCEPTED: "accepted",
+  FAILED: "failed",
+});
+const DISPATCH_ACTIVE_STATUSES = Object.freeze([DISPATCH_STATUSES.STARTED]);
+const DISPATCH_TERMINAL_STATUSES = Object.freeze([DISPATCH_STATUSES.ACCEPTED, DISPATCH_STATUSES.FAILED]);
 
 class CodeClipYouTubeWebSubDiagnosticProbeRepositoryError extends Error {
   constructor(code, message, details = {}) {
@@ -518,6 +536,499 @@ async function listCodeClipYouTubeWebSubDiagnosticProbes(filters = {}, { queryCl
   };
 }
 
+
+function normalizeOperationTimestamp(value, fieldName) {
+  return normalizeRequiredIsoTimestamp(value, fieldName);
+}
+
+function maxIsoTimestamp(...values) {
+  const normalized = values.filter(Boolean).map((value) => normalizeRequiredIsoTimestamp(value, "timestamp"));
+  if (!normalized.length) return null;
+  return normalized.reduce((max, value) => (Date.parse(value) > Date.parse(max) ? value : max));
+}
+
+function normalizeAttemptId(value) {
+  if (typeof value !== "string") {
+    throw repositoryError("validation_error", "attemptId is invalid", { fieldName: "attemptId" });
+  }
+  const normalized = value.trim();
+  if (normalized !== value || !/^[A-Za-z0-9_-]{6,128}$/.test(normalized)) {
+    throw repositoryError("validation_error", "attemptId is invalid", { fieldName: "attemptId" });
+  }
+  return normalized;
+}
+
+function normalizeAttemptNumber(value) {
+  const normalized = String(value ?? "").trim();
+  if (!/^[0-9]+$/.test(normalized)) {
+    throw repositoryError("validation_error", "attemptNumber is invalid", { fieldName: "attemptNumber" });
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > POSTGRES_INT_MAX) {
+    throw repositoryError("validation_error", "attemptNumber is invalid", { fieldName: "attemptNumber" });
+  }
+  return parsed;
+}
+
+function normalizeRetryEligible(value) {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== "boolean") {
+    throw repositoryError("validation_error", "retryEligible is invalid", { fieldName: "retryEligible" });
+  }
+  return value;
+}
+
+function normalizeDispatchMode(mode) {
+  if (![DISPATCH_MODES.SUBSCRIBE, DISPATCH_MODES.UNSUBSCRIBE].includes(mode)) {
+    throw repositoryError("validation_error", "dispatch mode is invalid", { fieldName: "mode" });
+  }
+  return mode;
+}
+
+function normalizeDispatchMetadata(dispatch) {
+  if (!dispatch || typeof dispatch !== "object" || Array.isArray(dispatch)) return null;
+  const mode = normalizeDispatchMode(dispatch.mode);
+  const status = String(dispatch.status || "").trim();
+  if (!Object.values(DISPATCH_STATUSES).includes(status)) {
+    throw repositoryError("invalid_repository_row", "dispatch status is invalid", { fieldName: "diagnosticMetadata.lastDispatch.status" });
+  }
+  return {
+    mode,
+    status,
+    attemptId: normalizeAttemptId(dispatch.attemptId),
+    attemptNumber: normalizeAttemptNumber(dispatch.attemptNumber),
+    retryEligible: normalizeRetryEligible(dispatch.retryEligible),
+    staleAfterAt: dispatch.staleAfterAt ? normalizeRequiredIsoTimestamp(dispatch.staleAfterAt, "staleAfterAt") : null,
+    dispatchedAt: dispatch.dispatchedAt ? normalizeRequiredIsoTimestamp(dispatch.dispatchedAt, "dispatchedAt") : null,
+    acceptedAt: dispatch.acceptedAt ? normalizeRequiredIsoTimestamp(dispatch.acceptedAt, "acceptedAt") : null,
+    failedAt: dispatch.failedAt ? normalizeRequiredIsoTimestamp(dispatch.failedAt, "failedAt") : null,
+    resultCode: dispatch.resultCode ? String(dispatch.resultCode).trim() : null,
+  };
+}
+
+function getLastDispatch(record) {
+  try {
+    return normalizeDispatchMetadata(record.diagnosticMetadata?.lastDispatch || null);
+  } catch (error) {
+    if (error instanceof CodeClipYouTubeWebSubDiagnosticProbeRepositoryError) {
+      throw repositoryError("invalid_repository_row", "persisted dispatch metadata is invalid");
+    }
+    throw error;
+  }
+}
+
+function isDispatchActive(dispatch, now) {
+  if (!dispatch || !DISPATCH_ACTIVE_STATUSES.includes(dispatch.status)) return false;
+  if (!dispatch.staleAfterAt) return true;
+  return Date.parse(dispatch.staleAfterAt) > Date.parse(now);
+}
+
+function isDispatchReplaceable(dispatch, incoming, now) {
+  if (!dispatch) return true;
+  if (dispatch.mode !== incoming.mode) {
+    if (isDispatchActive(dispatch, now)) {
+      throw repositoryError("state_conflict", "active dispatch cannot be replaced");
+    }
+    return true;
+  }
+  if (incoming.attemptNumber < dispatch.attemptNumber) {
+    throw repositoryError("state_conflict", "dispatch attempt is stale");
+  }
+  if (incoming.attemptNumber === dispatch.attemptNumber && incoming.attemptId !== dispatch.attemptId) {
+    throw repositoryError("state_conflict", "dispatch attempt identity conflicts");
+  }
+  if (incoming.attemptNumber === dispatch.attemptNumber && incoming.attemptId === dispatch.attemptId) {
+    return false;
+  }
+  if (isDispatchActive(dispatch, now)) {
+    throw repositoryError("state_conflict", "active dispatch cannot be replaced");
+  }
+  if (DISPATCH_TERMINAL_STATUSES.includes(dispatch.status)) return true;
+  if (dispatch.status === DISPATCH_STATUSES.FAILED && dispatch.retryEligible === true) return true;
+  throw repositoryError("state_conflict", "dispatch cannot be replaced");
+}
+
+function buildDispatch({ mode, attemptId, attemptNumber, status, at, staleAfterAt = null, leaseSeconds = null, retryEligible = false, resultCode = null }) {
+  const dispatch = {
+    mode: normalizeDispatchMode(mode),
+    status,
+    attemptId: normalizeAttemptId(attemptId),
+    attemptNumber: normalizeAttemptNumber(attemptNumber),
+    retryEligible: normalizeRetryEligible(retryEligible),
+  };
+  if (status === DISPATCH_STATUSES.STARTED) dispatch.dispatchedAt = normalizeOperationTimestamp(at, "dispatchedAt");
+  if (status === DISPATCH_STATUSES.ACCEPTED) dispatch.acceptedAt = normalizeOperationTimestamp(at, "acceptedAt");
+  if (status === DISPATCH_STATUSES.FAILED) dispatch.failedAt = normalizeOperationTimestamp(at, "failedAt");
+  if (staleAfterAt) dispatch.staleAfterAt = normalizeOperationTimestamp(staleAfterAt, "staleAfterAt");
+  if (leaseSeconds !== null && leaseSeconds !== undefined) dispatch.leaseSeconds = Number.parseInt(String(leaseSeconds), 10);
+  if (resultCode) dispatch.resultCode = String(resultCode).trim();
+  return dispatch;
+}
+
+function replaceMetadata(record, updates = {}) {
+  const next = {};
+  for (const key of ["lastVerification", "lastDispatch", "lastFailure", "lastNotification", "cleanup"]) {
+    if (record.diagnosticMetadata && Object.hasOwn(record.diagnosticMetadata, key)) {
+      next[key] = record.diagnosticMetadata[key];
+    }
+  }
+  return { ...next, ...updates };
+}
+
+function applyDispatchMetadata(record, input, mode) {
+  const at = normalizeOperationTimestamp(input.dispatchedAt, "dispatchedAt");
+  const incoming = {
+    mode,
+    attemptId: normalizeAttemptId(input.attemptId),
+    attemptNumber: normalizeAttemptNumber(input.attemptNumber),
+  };
+  const existing = getLastDispatch(record);
+  const replace = isDispatchReplaceable(existing && existing.mode === mode ? existing : existing, incoming, at);
+  if (!replace && existing.status === DISPATCH_STATUSES.STARTED) return { row: record, idempotent: true };
+  const dispatch = buildDispatch({
+    mode,
+    attemptId: incoming.attemptId,
+    attemptNumber: incoming.attemptNumber,
+    status: DISPATCH_STATUSES.STARTED,
+    at,
+    staleAfterAt: input.staleAfterAt || null,
+    leaseSeconds: input.leaseSeconds,
+  });
+  return {
+    row: {
+      ...record,
+      updatedAt: maxIsoTimestamp(record.updatedAt, at),
+      diagnosticMetadata: replaceMetadata(record, { lastDispatch: dispatch }),
+    },
+    idempotent: false,
+  };
+}
+
+function applyAcceptedMetadata(record, input, mode) {
+  const at = normalizeOperationTimestamp(input.acceptedAt, "acceptedAt");
+  const dispatch = getLastDispatch(record);
+  if (!dispatch || dispatch.mode !== mode) {
+    throw repositoryError("state_conflict", "accepted dispatch mode does not match current dispatch");
+  }
+  const attemptId = normalizeAttemptId(input.attemptId);
+  const attemptNumber = normalizeAttemptNumber(input.attemptNumber);
+  if (dispatch.attemptId !== attemptId || dispatch.attemptNumber !== attemptNumber) {
+    throw repositoryError("state_conflict", "accepted dispatch attempt does not match current dispatch");
+  }
+  if (dispatch.status === DISPATCH_STATUSES.ACCEPTED) {
+    return { row: record, idempotent: true };
+  }
+  if (dispatch.status !== DISPATCH_STATUSES.STARTED) {
+    throw repositoryError("state_conflict", "dispatch cannot be accepted");
+  }
+  const nextDispatch = {
+    ...dispatch,
+    status: DISPATCH_STATUSES.ACCEPTED,
+    acceptedAt: at,
+    retryEligible: false,
+    resultCode: input.resultCode ? String(input.resultCode).trim() : "hub_request_accepted",
+  };
+  return {
+    row: {
+      ...record,
+      updatedAt: maxIsoTimestamp(record.updatedAt, at),
+      diagnosticMetadata: replaceMetadata(record, { lastDispatch: nextDispatch }),
+    },
+    idempotent: false,
+  };
+}
+
+function applyFailureMetadata(record, input, operation) {
+  const failedAt = normalizeOperationTimestamp(input.failedAt || input.requiredAt, "failedAt");
+  const reasonCode = String(input.reasonCode || input.failedReasonCode || "diagnostic_cleanup_required").trim();
+  if (!/^[a-z0-9_]{2,80}$/.test(reasonCode)) {
+    throw repositoryError("validation_error", "reasonCode is invalid", { fieldName: "reasonCode" });
+  }
+  const cleanupRequired = input.cleanupRequired === undefined ? false : Boolean(input.cleanupRequired);
+  const subscriptionMayExist = input.subscriptionMayExist === undefined ? false : Boolean(input.subscriptionMayExist);
+  if (cleanupRequired && !subscriptionMayExist) {
+    throw repositoryError("validation_error", "cleanupRequired requires subscriptionMayExist", { fieldName: "subscriptionMayExist" });
+  }
+  const failed = applyDiagnosticDispatchFailureTransition(record, {
+    failedAt,
+    failedOperation: operation,
+    failedReasonCode: reasonCode,
+    cleanupRequired,
+    subscriptionMayExist,
+  });
+  return {
+    ...failed,
+    updatedAt: maxIsoTimestamp(record.updatedAt, failedAt),
+    diagnosticMetadata: replaceMetadata(failed, {
+      lastFailure: {
+        operation,
+        reasonCode,
+        failedAt,
+        cleanupRequired,
+        subscriptionMayExist,
+      },
+      cleanup: cleanupRequired
+        ? { ...(record.diagnosticMetadata.cleanup || {}), requiredAt: failedAt, reasonCode }
+        : record.diagnosticMetadata.cleanup,
+    }),
+  };
+}
+
+async function createLifecycleSavepoint(client) {
+  try {
+    await client.query(`SAVEPOINT ${LIFECYCLE_SAVEPOINT}`);
+    await client.query(`RELEASE SAVEPOINT ${LIFECYCLE_SAVEPOINT}`);
+  } catch (error) {
+    throw repositoryError("transaction_required", "diagnostic probe lifecycle requires an active transaction", {
+      causeCode: error?.code || null,
+    });
+  }
+}
+
+function normalizeIdentity(input = {}) {
+  const probeId = input.probeId ? normalizeDiagnosticProbeId(input.probeId) : null;
+  const callbackId = input.callbackId ? normalizeDiagnosticCallbackId(input.callbackId) : null;
+  if (!probeId && !callbackId) {
+    throw repositoryError("validation_error", "probeId or callbackId is required", { fieldName: "probeId" });
+  }
+  return { probeId, callbackId };
+}
+
+async function lockDiagnosticProbe(client, input = {}) {
+  const identity = normalizeIdentity(input);
+  const values = [];
+  const clauses = [];
+  if (identity.probeId) {
+    values.push(identity.probeId);
+    clauses.push(`probe_id = $${values.length}`);
+  }
+  if (identity.callbackId) {
+    values.push(identity.callbackId);
+    clauses.push(`callback_id = $${values.length}`);
+  }
+  const result = await client.query(
+    `
+      SELECT *
+      FROM codeclip_youtube_websub_diagnostic_probes
+      WHERE ${clauses.join(" OR ")}
+      FOR UPDATE
+    `,
+    values
+  );
+  const rawRows = result.rows || [];
+  if (!rawRows.length) throw repositoryError("probe_not_found", "diagnostic probe was not found");
+  if (rawRows.length !== 1) throw repositoryError("repository_state_conflict", "diagnostic identity matched multiple rows");
+  const row = mapDiagnosticProbeRow(rawRows[0]);
+  if ((identity.probeId && row.probeId !== identity.probeId) || (identity.callbackId && row.callbackId !== identity.callbackId)) {
+    throw repositoryError("repository_state_conflict", "diagnostic identity mismatch");
+  }
+  return { id: rawRows[0].id, row };
+}
+
+function probeUpdateParams(id, record) {
+  return [id, ...probeInsertParams(record)];
+}
+
+async function updateLockedProbe(client, id, record) {
+  const result = await client.query(
+    `
+      UPDATE codeclip_youtube_websub_diagnostic_probes
+      SET
+        probe_id = $2,
+        callback_id = $3,
+        provider = $4,
+        channel = $5,
+        channel_id = $6,
+        topic = $7,
+        status = $8,
+        pending_mode = $9,
+        secret_version = $10,
+        lease_expires_at = $11,
+        verified_at = $12,
+        first_verified_at = $13,
+        last_notification_at = $14,
+        unsubscribed_at = $15,
+        cleanup_required = $16,
+        subscription_may_exist = $17,
+        failed_operation = $18,
+        failed_reason_code = $19,
+        diagnostic_metadata = $20::jsonb,
+        created_at = $21,
+        updated_at = $22
+      WHERE id = $1
+      RETURNING *
+    `,
+    probeUpdateParams(id, record)
+  );
+  if ((result.rows || []).length !== 1) {
+    throw repositoryError("repository_state_conflict", "diagnostic lifecycle update did not update exactly one row");
+  }
+  return mapDiagnosticProbeRow(result.rows[0]);
+}
+
+async function runLifecycleOperation(input, transition, { queryClient } = {}) {
+  return withRepositoryTransaction(queryClient, async (client) => {
+    await createLifecycleSavepoint(client);
+    const locked = await lockDiagnosticProbe(client, input);
+    const result = transition(locked.row);
+    const next = normalizeDiagnosticProbeRecord(result.row);
+    if (result.idempotent) return { status: "idempotent", row: locked.row, public: publicProbe(locked.row) };
+    const row = await updateLockedProbe(client, locked.id, next);
+    return { status: "updated", row, public: publicProbe(row) };
+  });
+}
+
+function requireStatus(record, statuses) {
+  if (!statuses.includes(record.status)) {
+    throw repositoryError("state_conflict", "diagnostic probe state does not allow this operation", {
+      status: record.status,
+    });
+  }
+}
+
+function markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched(input = {}, options = {}) {
+  return runLifecycleOperation(input, (record) => {
+    requireStatus(record, [DIAGNOSTIC_PROBE_STATUSES.PENDING_SUBSCRIBE]);
+    return applyDispatchMetadata(record, input, DISPATCH_MODES.SUBSCRIBE);
+  }, options);
+}
+
+function markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted(input = {}, options = {}) {
+  return runLifecycleOperation(input, (record) => {
+    requireStatus(record, [DIAGNOSTIC_PROBE_STATUSES.PENDING_SUBSCRIBE]);
+    return applyAcceptedMetadata(record, input, DISPATCH_MODES.SUBSCRIBE);
+  }, options);
+}
+
+function hasVerificationStateChanged(record, next) {
+  return next.status !== record.status ||
+    next.pendingMode !== record.pendingMode ||
+    next.verifiedAt !== record.verifiedAt ||
+    next.firstVerifiedAt !== record.firstVerifiedAt ||
+    next.leaseExpiresAt !== record.leaseExpiresAt ||
+    next.updatedAt !== record.updatedAt ||
+    next.subscriptionMayExist !== record.subscriptionMayExist;
+}
+
+function markCodeClipYouTubeWebSubDiagnosticVerificationReceived(input = {}, options = {}) {
+  return runLifecycleOperation(input, (record) => {
+    if (![DIAGNOSTIC_PROBE_STATUSES.PENDING_SUBSCRIBE, DIAGNOSTIC_PROBE_STATUSES.ACTIVE].includes(record.status)) {
+      throw repositoryError("state_conflict", "verification is not allowed for current diagnostic state");
+    }
+    if (input.topic && input.topic !== record.topic) throw repositoryError("state_conflict", "verification topic mismatch");
+    if (input.channelId && input.channelId !== record.channelId) throw repositoryError("state_conflict", "verification channel mismatch");
+    const next = applyDiagnosticVerificationTransition(record, {
+      verifiedAt: input.verifiedAt,
+      leaseSeconds: input.leaseSeconds,
+    });
+    if (!hasVerificationStateChanged(record, next)) return { row: record, idempotent: true };
+    return { row: next, idempotent: false };
+  }, options);
+}
+
+function isSameNotificationObservation(previous, incoming) {
+  if (!previous || !incoming) return false;
+  return previous.observationIdentity === incoming.observationIdentity &&
+    previous.channelId === incoming.channelId &&
+    previous.videoId === incoming.videoId &&
+    previous.publishedAt === incoming.publishedAt &&
+    previous.updatedAt === incoming.updatedAt &&
+    (previous.titleHash || null) === (incoming.titleHash || null);
+}
+
+function markCodeClipYouTubeWebSubDiagnosticNotificationObserved(input = {}, options = {}) {
+  return runLifecycleOperation(input, (record) => {
+    requireStatus(record, [DIAGNOSTIC_PROBE_STATUSES.ACTIVE]);
+    const next = applyDiagnosticNotificationObservation(record, input);
+    const incomingObservedAt = normalizeOperationTimestamp(input.observedAt, "observedAt");
+    const existingObservedAt = record.lastNotificationAt;
+    if (existingObservedAt && Date.parse(incomingObservedAt) < Date.parse(existingObservedAt)) {
+      return { row: record, idempotent: true };
+    }
+    if (existingObservedAt && Date.parse(incomingObservedAt) === Date.parse(existingObservedAt)) {
+      const previous = record.diagnosticMetadata?.lastNotification || null;
+      const incoming = next.diagnosticMetadata?.lastNotification || null;
+      if (!previous || isSameNotificationObservation(previous, incoming)) {
+        return { row: previous ? record : next, idempotent: true };
+      }
+      throw repositoryError("state_conflict", "notification observation conflicts at the same timestamp");
+    }
+    return { row: next, idempotent: JSON.stringify(next) === JSON.stringify(record) };
+  }, options);
+}
+
+function markCodeClipYouTubeWebSubDiagnosticSubscribeFailed(input = {}, options = {}) {
+  return runLifecycleOperation(input, (record) => {
+    if (record.status === DIAGNOSTIC_PROBE_STATUSES.FAILED) {
+      const existing = record.diagnosticMetadata.lastFailure || {};
+      const same = existing.operation === "subscribe" && existing.reasonCode === input.reasonCode;
+      if (same) return { row: record, idempotent: true };
+      throw repositoryError("state_conflict", "diagnostic failure already recorded");
+    }
+    requireStatus(record, [DIAGNOSTIC_PROBE_STATUSES.PENDING_SUBSCRIBE]);
+    return { row: applyFailureMetadata(record, { ...input, failedAt: input.failedAt, cleanupRequired: Boolean(input.cleanupRequired), subscriptionMayExist: Boolean(input.subscriptionMayExist) }, "subscribe"), idempotent: false };
+  }, options);
+}
+
+function markCodeClipYouTubeWebSubDiagnosticUnsubscribeDispatched(input = {}, options = {}) {
+  return runLifecycleOperation(input, (record) => {
+    if (![DIAGNOSTIC_PROBE_STATUSES.ACTIVE, DIAGNOSTIC_PROBE_STATUSES.FAILED, DIAGNOSTIC_PROBE_STATUSES.PENDING_UNSUBSCRIBE].includes(record.status)) {
+      throw repositoryError("state_conflict", "unsubscribe dispatch is not allowed for current diagnostic state");
+    }
+    if (record.status === DIAGNOSTIC_PROBE_STATUSES.FAILED && !(record.cleanupRequired && record.subscriptionMayExist)) {
+      throw repositoryError("state_conflict", "failed diagnostic probe is not cleanup eligible");
+    }
+    const prepared = record.status === DIAGNOSTIC_PROBE_STATUSES.PENDING_UNSUBSCRIBE
+      ? record
+      : applyDiagnosticUnsubscribeTransition(record, { requestedAt: input.dispatchedAt });
+    return applyDispatchMetadata(prepared, input, DISPATCH_MODES.UNSUBSCRIBE);
+  }, options);
+}
+
+function markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted(input = {}, options = {}) {
+  return runLifecycleOperation(input, (record) => {
+    requireStatus(record, [DIAGNOSTIC_PROBE_STATUSES.PENDING_UNSUBSCRIBE]);
+    return applyAcceptedMetadata(record, input, DISPATCH_MODES.UNSUBSCRIBE);
+  }, options);
+}
+
+function markCodeClipYouTubeWebSubDiagnosticCleanupRequired(input = {}, options = {}) {
+  return runLifecycleOperation(input, (record) => {
+    if (![DIAGNOSTIC_PROBE_STATUSES.PENDING_SUBSCRIBE, DIAGNOSTIC_PROBE_STATUSES.ACTIVE, DIAGNOSTIC_PROBE_STATUSES.PENDING_UNSUBSCRIBE, DIAGNOSTIC_PROBE_STATUSES.FAILED].includes(record.status)) {
+      throw repositoryError("state_conflict", "cleanup required is not allowed for current diagnostic state");
+    }
+    if (input.subscriptionMayExist === false) {
+      throw repositoryError("validation_error", "cleanup required implies subscription may exist", { fieldName: "subscriptionMayExist" });
+    }
+    const reasonCode = input.reasonCode || "diagnostic_cleanup_required";
+    if (record.status === DIAGNOSTIC_PROBE_STATUSES.FAILED && record.cleanupRequired && record.subscriptionMayExist && record.failedReasonCode === reasonCode) {
+      return { row: record, idempotent: true };
+    }
+    return { row: applyFailureMetadata(record, { ...input, failedAt: input.requiredAt, reasonCode, cleanupRequired: true, subscriptionMayExist: true }, "unsubscribe"), idempotent: false };
+  }, options);
+}
+
+function markCodeClipYouTubeWebSubDiagnosticCleanupCompleted(input = {}, options = {}) {
+  return runLifecycleOperation(input, (record) => {
+    if (record.status === DIAGNOSTIC_PROBE_STATUSES.UNSUBSCRIBED) return { row: record, idempotent: true };
+    requireStatus(record, [DIAGNOSTIC_PROBE_STATUSES.PENDING_UNSUBSCRIBE]);
+    const next = applyDiagnosticUnsubscribeTransition(record, { confirmedAt: input.completedAt });
+    return {
+      row: {
+        ...next,
+        failedOperation: record.failedOperation,
+        failedReasonCode: record.failedReasonCode,
+        diagnosticMetadata: replaceMetadata(next, {
+          ...next.diagnosticMetadata,
+          lastFailure: record.diagnosticMetadata.lastFailure,
+          cleanup: next.diagnosticMetadata.cleanup,
+        }),
+      },
+      idempotent: false,
+    };
+  }, options);
+}
+
 module.exports = {
   CodeClipYouTubeWebSubDiagnosticProbeRepositoryError,
   PROBE_ID_CONSTRAINT,
@@ -531,4 +1042,13 @@ module.exports = {
   listCodeClipYouTubeWebSubDiagnosticProbes,
   encodeDiagnosticProbeCursor,
   decodeDiagnosticProbeCursor,
+  markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched,
+  markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted,
+  markCodeClipYouTubeWebSubDiagnosticVerificationReceived,
+  markCodeClipYouTubeWebSubDiagnosticNotificationObserved,
+  markCodeClipYouTubeWebSubDiagnosticSubscribeFailed,
+  markCodeClipYouTubeWebSubDiagnosticUnsubscribeDispatched,
+  markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted,
+  markCodeClipYouTubeWebSubDiagnosticCleanupRequired,
+  markCodeClipYouTubeWebSubDiagnosticCleanupCompleted,
 };

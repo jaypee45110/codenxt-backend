@@ -397,3 +397,777 @@ test("invalid database row fails closed with invalid_repository_row", async () =
     { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "invalid_repository_row" }
   );
 });
+
+function rowFromUpdateParams(params) {
+  return probeRow({
+    id: params[0],
+    probe_id: params[1],
+    callback_id: params[2],
+    provider: params[3],
+    channel: params[4],
+    channel_id: params[5],
+    topic: params[6],
+    status: params[7],
+    pending_mode: params[8],
+    secret_version: params[9],
+    lease_expires_at: params[10],
+    verified_at: params[11],
+    first_verified_at: params[12],
+    last_notification_at: params[13],
+    unsubscribed_at: params[14],
+    cleanup_required: params[15],
+    subscription_may_exist: params[16],
+    failed_operation: params[17],
+    failed_reason_code: params[18],
+    diagnostic_metadata: JSON.parse(params[19]),
+    created_at: params[20],
+    updated_at: params[21],
+  });
+}
+
+function makeLifecycleClient(initialRows, options = {}) {
+  const state = { rows: Array.isArray(initialRows) ? initialRows : [initialRows] };
+  const client = makeClient((sql, params) => {
+    if (/SAVEPOINT codeclip_youtube_websub_diagnostic_lifecycle/.test(sql)) {
+      if (options.lifecycleSavepointFailure) {
+        const error = new Error("SAVEPOINT can only be used in transaction blocks");
+        error.code = "25P01";
+        throw error;
+      }
+      return { rows: [] };
+    }
+    if (/RELEASE SAVEPOINT codeclip_youtube_websub_diagnostic_lifecycle/.test(sql)) return { rows: [] };
+    if (/FOR UPDATE/.test(sql)) return { rows: state.rows };
+    if (/UPDATE codeclip_youtube_websub_diagnostic_probes/.test(sql)) {
+      if (options.zeroUpdate) return { rows: [] };
+      const updated = rowFromUpdateParams(params);
+      state.rows = [updated];
+      return { rows: [updated] };
+    }
+    return { rows: [] };
+  }, { isolation: options.isolation });
+  client.state = state;
+  return client;
+}
+
+function activeRow(overrides = {}) {
+  return probeRow({
+    status: "active",
+    pending_mode: null,
+    verified_at: "2026-07-24T10:05:00.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    lease_expires_at: "2026-07-25T10:05:00.000Z",
+    updated_at: "2026-07-24T10:05:00.000Z",
+    subscription_may_exist: true,
+    ...overrides,
+  });
+}
+
+function pendingUnsubscribeRow(overrides = {}) {
+  return probeRow({
+    status: "pending_unsubscribe",
+    pending_mode: "unsubscribe",
+    verified_at: "2026-07-24T10:05:00.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    lease_expires_at: "2026-07-25T10:05:00.000Z",
+    updated_at: "2026-07-24T10:15:00.000Z",
+    subscription_may_exist: true,
+    diagnostic_metadata: { cleanup: { requestedAt: "2026-07-24T10:15:00.000Z" } },
+    ...overrides,
+  });
+}
+
+function failedCleanupRow(overrides = {}) {
+  return probeRow({
+    status: "failed",
+    pending_mode: null,
+    cleanup_required: true,
+    subscription_may_exist: true,
+    failed_operation: "subscribe",
+    failed_reason_code: "hub_request_failed",
+    updated_at: "2026-07-24T10:11:00.000Z",
+    diagnostic_metadata: {
+      lastFailure: {
+        operation: "subscribe",
+        reasonCode: "hub_request_failed",
+        failedAt: "2026-07-24T10:11:00.000Z",
+        cleanupRequired: true,
+        subscriptionMayExist: true,
+      },
+    },
+    ...overrides,
+  });
+}
+
+test("B3 normal lifecycle transitions through dispatch verification notification unsubscribe and cleanup", async () => {
+  const client = makeLifecycleClient(probeRow());
+  const dispatched = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+    probeId: PROBE_ID,
+    dispatchedAt: "2026-07-24T10:01:00.000Z",
+    attemptId: "attempt_subscribe_1",
+    attemptNumber: 1,
+    staleAfterAt: "2026-07-24T10:06:00.000Z",
+    leaseSeconds: 86400,
+  }, { queryClient: client });
+  assert.equal(dispatched.status, "updated");
+  assert.equal(dispatched.row.status, "pending_subscribe");
+  assert.equal(dispatched.row.diagnosticMetadata.lastDispatch.mode, "subscribe");
+
+  const accepted = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted({
+    probeId: PROBE_ID,
+    acceptedAt: "2026-07-24T10:02:00.000Z",
+    attemptId: "attempt_subscribe_1",
+    attemptNumber: 1,
+  }, { queryClient: client });
+  assert.equal(accepted.row.diagnosticMetadata.lastDispatch.status, "accepted");
+  assert.equal(accepted.row.status, "pending_subscribe");
+
+  const verified = await repository.markCodeClipYouTubeWebSubDiagnosticVerificationReceived({
+    probeId: PROBE_ID,
+    verifiedAt: "2026-07-24T10:03:00.000Z",
+    leaseSeconds: 86400,
+    topic: TOPIC,
+    channelId: CHANNEL_ID,
+  }, { queryClient: client });
+  assert.equal(verified.row.status, "active");
+  assert.equal(verified.row.pendingMode, null);
+
+  const notified = await repository.markCodeClipYouTubeWebSubDiagnosticNotificationObserved({
+    probeId: PROBE_ID,
+    channelId: CHANNEL_ID,
+    videoId: "Q8yMabcVtxc",
+    publishedAt: "2026-07-24T10:04:00.000Z",
+    updatedAt: "2026-07-24T10:04:30.000Z",
+    observedAt: "2026-07-24T10:05:00.000Z",
+    titleHash: "abcdef123456",
+  }, { queryClient: client });
+  assert.equal(notified.row.status, "active");
+  assert.equal(notified.row.lastNotificationAt, "2026-07-24T10:05:00.000Z");
+
+  const unsubDispatch = await repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeDispatched({
+    probeId: PROBE_ID,
+    dispatchedAt: "2026-07-24T10:06:00.000Z",
+    attemptId: "attempt_unsubscribe_1",
+    attemptNumber: 1,
+  }, { queryClient: client });
+  assert.equal(unsubDispatch.row.status, "pending_unsubscribe");
+  assert.equal(unsubDispatch.row.pendingMode, "unsubscribe");
+
+  await repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted({
+    probeId: PROBE_ID,
+    acceptedAt: "2026-07-24T10:07:00.000Z",
+    attemptId: "attempt_unsubscribe_1",
+    attemptNumber: 1,
+  }, { queryClient: client });
+  const cleaned = await repository.markCodeClipYouTubeWebSubDiagnosticCleanupCompleted({
+    probeId: PROBE_ID,
+    completedAt: "2026-07-24T10:08:00.000Z",
+  }, { queryClient: client });
+  assert.equal(cleaned.row.status, "unsubscribed");
+  assert.equal(cleaned.row.pendingMode, null);
+  assert.equal(cleaned.row.subscriptionMayExist, false);
+  assertNoFullSecrets(cleaned.public);
+});
+
+test("B3 cleanup required always enters failed and unsubscribe dispatch is only pending_unsubscribe entry", async () => {
+  const client = makeLifecycleClient(activeRow());
+  const cleanup = await repository.markCodeClipYouTubeWebSubDiagnosticCleanupRequired({
+    probeId: PROBE_ID,
+    requiredAt: "2026-07-24T10:20:00.000Z",
+    reasonCode: "diagnostic_cleanup_required",
+  }, { queryClient: client });
+  assert.equal(cleanup.row.status, "failed");
+  assert.equal(cleanup.row.cleanupRequired, true);
+  assert.equal(cleanup.row.subscriptionMayExist, true);
+  assert.equal(cleanup.row.pendingMode, null);
+
+  const dispatched = await repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeDispatched({
+    probeId: PROBE_ID,
+    dispatchedAt: "2026-07-24T10:21:00.000Z",
+    attemptId: "attempt_unsubscribe_cleanup",
+    attemptNumber: 1,
+  }, { queryClient: client });
+  assert.equal(dispatched.row.status, "pending_unsubscribe");
+});
+
+test("B3 cleanupRequired true with subscriptionMayExist false is rejected", async () => {
+  const client = makeLifecycleClient(activeRow());
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticCleanupRequired({
+      probeId: PROBE_ID,
+      requiredAt: "2026-07-24T10:20:00.000Z",
+      reasonCode: "diagnostic_cleanup_required",
+      subscriptionMayExist: false,
+    }, { queryClient: client }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "validation_error" }
+  );
+});
+
+test("B3 monotonic verification notification updatedAt and cleanup timestamps do not move backward", async () => {
+  const client = makeLifecycleClient(activeRow({
+    verified_at: "2026-07-24T10:10:00.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    lease_expires_at: "2026-07-26T10:10:00.000Z",
+    last_notification_at: "2026-07-24T10:12:00.000Z",
+    updated_at: "2026-07-24T10:12:00.000Z",
+  }));
+  const verified = await repository.markCodeClipYouTubeWebSubDiagnosticVerificationReceived({
+    probeId: PROBE_ID,
+    verifiedAt: "2026-07-24T10:09:00.000Z",
+    leaseSeconds: 60,
+    topic: TOPIC,
+    channelId: CHANNEL_ID,
+  }, { queryClient: client });
+  assert.equal(verified.status, "idempotent");
+  assert.equal(verified.row.verifiedAt, "2026-07-24T10:10:00.000Z");
+  assert.equal(verified.row.firstVerifiedAt, "2026-07-24T10:05:00.000Z");
+  assert.equal(verified.row.leaseExpiresAt, "2026-07-26T10:10:00.000Z");
+  assert.equal(verified.row.updatedAt, "2026-07-24T10:12:00.000Z");
+
+  const notified = await repository.markCodeClipYouTubeWebSubDiagnosticNotificationObserved({
+    probeId: PROBE_ID,
+    channelId: CHANNEL_ID,
+    videoId: "Q8yMabcVtxc",
+    publishedAt: "2026-07-24T10:01:00.000Z",
+    updatedAt: "2026-07-24T10:01:30.000Z",
+    observedAt: "2026-07-24T10:11:00.000Z",
+    titleHash: "abcdef123456",
+  }, { queryClient: client });
+  assert.equal(notified.row.lastNotificationAt, "2026-07-24T10:12:00.000Z");
+
+  const unsubscribed = makeLifecycleClient(probeRow({
+    status: "unsubscribed",
+    pending_mode: null,
+    lease_expires_at: null,
+    verified_at: "2026-07-24T10:05:00.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    unsubscribed_at: "2026-07-24T10:30:00.000Z",
+    subscription_may_exist: false,
+    updated_at: "2026-07-24T10:30:00.000Z",
+  }));
+  const cleanup = await repository.markCodeClipYouTubeWebSubDiagnosticCleanupCompleted({
+    probeId: PROBE_ID,
+    completedAt: "2026-07-24T10:31:00.000Z",
+  }, { queryClient: unsubscribed });
+  assert.equal(cleanup.status, "idempotent");
+  assert.equal(cleanup.row.unsubscribedAt, "2026-07-24T10:30:00.000Z");
+});
+
+test("B3 dispatch attempts enforce idempotent stale mismatch and active replacement rules", async () => {
+  const started = probeRow({
+    diagnostic_metadata: {
+      lastDispatch: {
+        mode: "subscribe",
+        status: "started",
+        attemptId: "attempt_subscribe_2",
+        attemptNumber: 2,
+        retryEligible: false,
+        staleAfterAt: "2026-07-24T10:30:00.000Z",
+        dispatchedAt: "2026-07-24T10:20:00.000Z",
+      },
+    },
+    updated_at: "2026-07-24T10:20:00.000Z",
+  });
+  const same = makeLifecycleClient(started);
+  const idempotent = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+    probeId: PROBE_ID,
+    dispatchedAt: "2026-07-24T10:21:00.000Z",
+    attemptId: "attempt_subscribe_2",
+    attemptNumber: 2,
+  }, { queryClient: same });
+  assert.equal(idempotent.status, "idempotent");
+
+  const lower = makeLifecycleClient(started);
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+      probeId: PROBE_ID,
+      dispatchedAt: "2026-07-24T10:21:00.000Z",
+      attemptId: "attempt_subscribe_1",
+      attemptNumber: 1,
+    }, { queryClient: lower }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" }
+  );
+
+  const sameNumberDifferentId = makeLifecycleClient(started);
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+      probeId: PROBE_ID,
+      dispatchedAt: "2026-07-24T10:21:00.000Z",
+      attemptId: "attempt_subscribe_other",
+      attemptNumber: 2,
+    }, { queryClient: sameNumberDifferentId }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" }
+  );
+
+  const activeReplacement = makeLifecycleClient(started);
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+      probeId: PROBE_ID,
+      dispatchedAt: "2026-07-24T10:21:00.000Z",
+      attemptId: "attempt_subscribe_3",
+      attemptNumber: 3,
+    }, { queryClient: activeReplacement }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" }
+  );
+
+  const terminal = makeLifecycleClient(probeRow({
+    diagnostic_metadata: {
+      lastDispatch: {
+        mode: "subscribe",
+        status: "accepted",
+        attemptId: "attempt_subscribe_2",
+        attemptNumber: 2,
+        retryEligible: false,
+        acceptedAt: "2026-07-24T10:20:00.000Z",
+      },
+    },
+  }));
+  const next = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+    probeId: PROBE_ID,
+    dispatchedAt: "2026-07-24T10:21:00.000Z",
+    attemptId: "attempt_subscribe_3",
+    attemptNumber: 3,
+  }, { queryClient: terminal });
+  assert.equal(next.status, "updated");
+  assert.equal(next.row.diagnosticMetadata.lastDispatch.attemptNumber, 3);
+});
+
+test("B3 accepted result must match current attempt and stale accepted is rejected", async () => {
+  const client = makeLifecycleClient(probeRow({
+    diagnostic_metadata: {
+      lastDispatch: {
+        mode: "subscribe",
+        status: "started",
+        attemptId: "attempt_subscribe_2",
+        attemptNumber: 2,
+        retryEligible: false,
+        dispatchedAt: "2026-07-24T10:20:00.000Z",
+      },
+    },
+  }));
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted({
+      probeId: PROBE_ID,
+      acceptedAt: "2026-07-24T10:22:00.000Z",
+      attemptId: "attempt_subscribe_1",
+      attemptNumber: 1,
+    }, { queryClient: client }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" }
+  );
+});
+
+test("B3 illegal transitions fail closed", async () => {
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticNotificationObserved({
+      probeId: PROBE_ID,
+      channelId: CHANNEL_ID,
+      videoId: "Q8yMabcVtxc",
+      publishedAt: "2026-07-24T10:01:00.000Z",
+      updatedAt: "2026-07-24T10:01:30.000Z",
+      observedAt: "2026-07-24T10:11:00.000Z",
+    }, { queryClient: makeLifecycleClient(probeRow()) }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" }
+  );
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticCleanupCompleted({
+      probeId: PROBE_ID,
+      completedAt: "2026-07-24T10:11:00.000Z",
+    }, { queryClient: makeLifecycleClient(activeRow()) }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" }
+  );
+});
+
+test("B3 locks exact identity with FOR UPDATE and split brain probe/callback fails closed", async () => {
+  const client = makeLifecycleClient([
+    probeRow({ id: "1", probe_id: PROBE_ID, callback_id: "diag_yt_otherCallback1234" }),
+    probeRow({ id: "2", probe_id: "diag_otherProbe123", callback_id: CALLBACK_ID }),
+  ]);
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+      probeId: PROBE_ID,
+      callbackId: CALLBACK_ID,
+      dispatchedAt: "2026-07-24T10:01:00.000Z",
+      attemptId: "attempt_subscribe_1",
+      attemptNumber: 1,
+    }, { queryClient: client }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "repository_state_conflict" }
+  );
+  assert.ok(client.calls.some((call) => /FOR UPDATE/.test(call.sql)));
+});
+
+test("B3 update returning zero rows fails closed with repository_state_conflict", async () => {
+  const client = makeLifecycleClient(probeRow(), { zeroUpdate: true });
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+      probeId: PROBE_ID,
+      dispatchedAt: "2026-07-24T10:01:00.000Z",
+      attemptId: "attempt_subscribe_1",
+      attemptNumber: 1,
+    }, { queryClient: client }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "repository_state_conflict" }
+  );
+  const update = client.calls.find((call) => /UPDATE codeclip_youtube_websub_diagnostic_probes/.test(call.sql));
+  assert.match(update.sql, /WHERE id = \$1/);
+});
+
+test("B3 malformed persisted dispatch metadata fails closed", async () => {
+  const client = makeLifecycleClient(probeRow({
+    diagnostic_metadata: { lastDispatch: { mode: "subscribe", status: "started", attemptId: "bad", attemptNumber: null } },
+  }));
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+      probeId: PROBE_ID,
+      dispatchedAt: "2026-07-24T10:01:00.000Z",
+      attemptId: "attempt_subscribe_1",
+      attemptNumber: 1,
+    }, { queryClient: client }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "invalid_repository_row" }
+  );
+});
+
+test("B3 success return status is updated or idempotent and public remains sanitized", async () => {
+  const client = makeLifecycleClient(probeRow());
+  const first = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+    probeId: PROBE_ID,
+    dispatchedAt: "2026-07-24T10:01:00.000Z",
+    attemptId: "attempt_subscribe_1",
+    attemptNumber: 1,
+  }, { queryClient: client });
+  const second = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+    probeId: PROBE_ID,
+    dispatchedAt: "2026-07-24T10:02:00.000Z",
+    attemptId: "attempt_subscribe_1",
+    attemptNumber: 1,
+  }, { queryClient: client });
+  assert.deepEqual([first.status, second.status], ["updated", "idempotent"]);
+  assert.notEqual(first.status, "conflict");
+  assertNoFullSecrets(first.public);
+});
+
+
+test("B3 failed dispatch attempts cannot later be accepted and duplicate accepted remains idempotent", async () => {
+  const failedSubscribe = makeLifecycleClient(probeRow({
+    diagnostic_metadata: {
+      lastDispatch: {
+        mode: "subscribe",
+        status: "failed",
+        attemptId: "attempt_subscribe_2",
+        attemptNumber: 2,
+        retryEligible: false,
+        failedAt: "2026-07-24T10:20:00.000Z",
+      },
+    },
+  }));
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted({
+      probeId: PROBE_ID,
+      acceptedAt: "2026-07-24T10:21:00.000Z",
+      attemptId: "attempt_subscribe_2",
+      attemptNumber: 2,
+    }, { queryClient: failedSubscribe }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" }
+  );
+
+  const failedUnsubscribe = makeLifecycleClient(probeRow({
+    status: "pending_unsubscribe",
+    pending_mode: "unsubscribe",
+    verified_at: "2026-07-24T10:05:00.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    lease_expires_at: "2026-07-25T10:05:00.000Z",
+    subscription_may_exist: true,
+    diagnostic_metadata: {
+      lastDispatch: {
+        mode: "unsubscribe",
+        status: "failed",
+        attemptId: "attempt_unsubscribe_2",
+        attemptNumber: 2,
+        retryEligible: false,
+        failedAt: "2026-07-24T10:20:00.000Z",
+      },
+    },
+  }));
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted({
+      probeId: PROBE_ID,
+      acceptedAt: "2026-07-24T10:21:00.000Z",
+      attemptId: "attempt_unsubscribe_2",
+      attemptNumber: 2,
+    }, { queryClient: failedUnsubscribe }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" }
+  );
+
+  const acceptedSubscribe = makeLifecycleClient(probeRow({
+    diagnostic_metadata: {
+      lastDispatch: {
+        mode: "subscribe",
+        status: "accepted",
+        attemptId: "attempt_subscribe_2",
+        attemptNumber: 2,
+        retryEligible: false,
+        acceptedAt: "2026-07-24T10:20:00.000Z",
+      },
+    },
+  }));
+  const duplicate = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted({
+    probeId: PROBE_ID,
+    acceptedAt: "2026-07-24T10:21:00.000Z",
+    attemptId: "attempt_subscribe_2",
+    attemptNumber: 2,
+  }, { queryClient: acceptedSubscribe });
+  assert.equal(duplicate.status, "idempotent");
+});
+
+test("B3 verification idempotency preserves metadata unless monotonic fields advance", async () => {
+  const lastVerification = {
+    mode: "subscribe",
+    leaseSeconds: 86400,
+    verifiedAt: "2026-07-24T10:10:00.000Z",
+  };
+  const client = makeLifecycleClient(activeRow({
+    verified_at: "2026-07-24T10:10:00.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    lease_expires_at: "2026-07-25T10:10:00.000Z",
+    updated_at: "2026-07-24T10:10:00.000Z",
+    diagnostic_metadata: { lastVerification },
+  }));
+
+  const older = await repository.markCodeClipYouTubeWebSubDiagnosticVerificationReceived({
+    probeId: PROBE_ID,
+    verifiedAt: "2026-07-24T10:09:00.000Z",
+    leaseSeconds: 60,
+    topic: TOPIC,
+    channelId: CHANNEL_ID,
+  }, { queryClient: client });
+  assert.equal(older.status, "idempotent");
+  assert.deepEqual(older.row.diagnosticMetadata.lastVerification, lastVerification);
+
+  const identical = await repository.markCodeClipYouTubeWebSubDiagnosticVerificationReceived({
+    probeId: PROBE_ID,
+    verifiedAt: "2026-07-24T10:10:00.000Z",
+    leaseSeconds: 86400,
+    topic: TOPIC,
+    channelId: CHANNEL_ID,
+  }, { queryClient: client });
+  assert.equal(identical.status, "idempotent");
+  assert.deepEqual(identical.row.diagnosticMetadata.lastVerification, lastVerification);
+
+  const newer = await repository.markCodeClipYouTubeWebSubDiagnosticVerificationReceived({
+    probeId: PROBE_ID,
+    verifiedAt: "2026-07-24T10:20:00.000Z",
+    leaseSeconds: 86400,
+    topic: TOPIC,
+    channelId: CHANNEL_ID,
+  }, { queryClient: client });
+  assert.equal(newer.status, "updated");
+  assert.equal(newer.row.verifiedAt, "2026-07-24T10:20:00.000Z");
+  assert.equal(newer.row.leaseExpiresAt, "2026-07-25T10:20:00.000Z");
+  assert.deepEqual(newer.row.diagnosticMetadata.lastVerification, {
+    mode: "subscribe",
+    leaseSeconds: 86400,
+    verifiedAt: "2026-07-24T10:20:00.000Z",
+  });
+});
+
+test("B3 notification observation preserves newer metadata and rejects same-timestamp conflicts", async () => {
+  const lastNotification = {
+    observationIdentity: `youtube:${CHANNEL_ID}:Q8yMabcVtxc:published:2026-07-24T10:04:00.000Z`,
+    channelId: CHANNEL_ID,
+    videoId: "Q8yMabcVtxc",
+    publishedAt: "2026-07-24T10:04:00.000Z",
+    updatedAt: "2026-07-24T10:04:30.000Z",
+    observedAt: "2026-07-24T10:12:00.000Z",
+    titleHash: "abcdef123456",
+    duplicate: false,
+  };
+  const client = makeLifecycleClient(activeRow({
+    last_notification_at: "2026-07-24T10:12:00.000Z",
+    updated_at: "2026-07-24T10:12:00.000Z",
+    diagnostic_metadata: { lastNotification },
+  }));
+
+  const older = await repository.markCodeClipYouTubeWebSubDiagnosticNotificationObserved({
+    probeId: PROBE_ID,
+    channelId: CHANNEL_ID,
+    videoId: "OldVideo123",
+    publishedAt: "2026-07-24T10:01:00.000Z",
+    updatedAt: "2026-07-24T10:01:30.000Z",
+    observedAt: "2026-07-24T10:11:00.000Z",
+    titleHash: "bbbbbbbb",
+  }, { queryClient: client });
+  assert.equal(older.status, "idempotent");
+  assert.deepEqual(older.row.diagnosticMetadata.lastNotification, lastNotification);
+
+  const identical = await repository.markCodeClipYouTubeWebSubDiagnosticNotificationObserved({
+    probeId: PROBE_ID,
+    channelId: CHANNEL_ID,
+    videoId: "Q8yMabcVtxc",
+    publishedAt: "2026-07-24T10:04:00.000Z",
+    updatedAt: "2026-07-24T10:04:30.000Z",
+    observedAt: "2026-07-24T10:12:00.000Z",
+    titleHash: "abcdef123456",
+  }, { queryClient: client });
+  assert.equal(identical.status, "idempotent");
+  assert.deepEqual(identical.row.diagnosticMetadata.lastNotification, lastNotification);
+
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticNotificationObserved({
+      probeId: PROBE_ID,
+      channelId: CHANNEL_ID,
+      videoId: "Other12345",
+      publishedAt: "2026-07-24T10:06:00.000Z",
+      updatedAt: "2026-07-24T10:06:30.000Z",
+      observedAt: "2026-07-24T10:12:00.000Z",
+      titleHash: "cccccccc",
+    }, { queryClient: client }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "state_conflict" }
+  );
+
+  const newer = await repository.markCodeClipYouTubeWebSubDiagnosticNotificationObserved({
+    probeId: PROBE_ID,
+    channelId: CHANNEL_ID,
+    videoId: "NewVid1234",
+    publishedAt: "2026-07-24T10:13:00.000Z",
+    updatedAt: "2026-07-24T10:13:30.000Z",
+    observedAt: "2026-07-24T10:13:45.000Z",
+    titleHash: "dddddddd",
+  }, { queryClient: client });
+  assert.equal(newer.status, "updated");
+  assert.equal(newer.row.lastNotificationAt, "2026-07-24T10:13:45.000Z");
+  assert.equal(newer.row.diagnosticMetadata.lastNotification.videoId, "NewVid1234");
+});
+
+test("B3 cleanup completed is monotonic for updatedAt and cleanup metadata", async () => {
+  const client = makeLifecycleClient(probeRow({
+    status: "pending_unsubscribe",
+    pending_mode: "unsubscribe",
+    verified_at: "2026-07-24T10:05:00.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    lease_expires_at: "2026-07-25T10:05:00.000Z",
+    subscription_may_exist: true,
+    updated_at: "2026-07-24T10:30:00.000Z",
+    diagnostic_metadata: { cleanup: { requestedAt: "2026-07-24T10:20:00.000Z", confirmedAt: "2026-07-24T10:29:00.000Z" } },
+  }));
+  const cleanup = await repository.markCodeClipYouTubeWebSubDiagnosticCleanupCompleted({
+    probeId: PROBE_ID,
+    completedAt: "2026-07-24T10:25:00.000Z",
+  }, { queryClient: client });
+  assert.equal(cleanup.row.status, "unsubscribed");
+  assert.equal(cleanup.row.unsubscribedAt, "2026-07-24T10:25:00.000Z");
+  assert.equal(cleanup.row.updatedAt, "2026-07-24T10:30:00.000Z");
+  assert.equal(cleanup.row.diagnosticMetadata.cleanup.confirmedAt, "2026-07-24T10:29:00.000Z");
+
+  const duplicate = await repository.markCodeClipYouTubeWebSubDiagnosticCleanupCompleted({
+    probeId: PROBE_ID,
+    completedAt: "2026-07-24T10:31:00.000Z",
+  }, { queryClient: client });
+  assert.equal(duplicate.status, "idempotent");
+  assert.equal(duplicate.row.unsubscribedAt, "2026-07-24T10:25:00.000Z");
+  assert.equal(duplicate.row.diagnosticMetadata.cleanup.confirmedAt, "2026-07-24T10:29:00.000Z");
+});
+
+test("B3 subscribe failure records failed state and duplicate failure is idempotent", async () => {
+  const client = makeLifecycleClient(probeRow());
+  const failed = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeFailed({
+    probeId: PROBE_ID,
+    failedAt: "2026-07-24T10:10:00.000Z",
+    reasonCode: "hub_request_failed",
+    cleanupRequired: true,
+    subscriptionMayExist: true,
+  }, { queryClient: client });
+  assert.equal(failed.status, "updated");
+  assert.equal(failed.row.status, "failed");
+  assert.equal(failed.row.failedOperation, "subscribe");
+  assert.equal(failed.row.cleanupRequired, true);
+
+  const duplicate = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeFailed({
+    probeId: PROBE_ID,
+    failedAt: "2026-07-24T10:11:00.000Z",
+    reasonCode: "hub_request_failed",
+    cleanupRequired: true,
+    subscriptionMayExist: true,
+  }, { queryClient: client });
+  assert.equal(duplicate.status, "idempotent");
+});
+
+test("B3 unsubscribe accepted duplicate is idempotent", async () => {
+  const client = makeLifecycleClient(probeRow({
+    status: "pending_unsubscribe",
+    pending_mode: "unsubscribe",
+    verified_at: "2026-07-24T10:05:00.000Z",
+    first_verified_at: "2026-07-24T10:05:00.000Z",
+    lease_expires_at: "2026-07-25T10:05:00.000Z",
+    subscription_may_exist: true,
+    diagnostic_metadata: {
+      lastDispatch: {
+        mode: "unsubscribe",
+        status: "accepted",
+        attemptId: "attempt_unsubscribe_1",
+        attemptNumber: 1,
+        retryEligible: false,
+        acceptedAt: "2026-07-24T10:20:00.000Z",
+      },
+    },
+  }));
+  const duplicate = await repository.markCodeClipYouTubeWebSubDiagnosticUnsubscribeAccepted({
+    probeId: PROBE_ID,
+    acceptedAt: "2026-07-24T10:21:00.000Z",
+    attemptId: "attempt_unsubscribe_1",
+    attemptNumber: 1,
+  }, { queryClient: client });
+  assert.equal(duplicate.status, "idempotent");
+});
+
+test("B3 lifecycle lookup supports callback-only and matching probe plus callback identities", async () => {
+  const byCallback = makeLifecycleClient(probeRow());
+  const callbackOnly = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+    callbackId: CALLBACK_ID,
+    dispatchedAt: "2026-07-24T10:01:00.000Z",
+    attemptId: "attempt_subscribe_1",
+    attemptNumber: 1,
+  }, { queryClient: byCallback });
+  assert.equal(callbackOnly.status, "updated");
+  assert.match(byCallback.calls.find((call) => /FOR UPDATE/.test(call.sql)).sql, /callback_id = \$1/);
+
+  const both = makeLifecycleClient(probeRow());
+  const bothIdentities = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+    probeId: PROBE_ID,
+    callbackId: CALLBACK_ID,
+    dispatchedAt: "2026-07-24T10:01:00.000Z",
+    attemptId: "attempt_subscribe_1",
+    attemptNumber: 1,
+  }, { queryClient: both });
+  assert.equal(bothIdentities.status, "updated");
+});
+
+test("B3 supplied lifecycle transaction contract is enforced", async () => {
+  const readCommitted = makeLifecycleClient(probeRow());
+  const success = await repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+    probeId: PROBE_ID,
+    dispatchedAt: "2026-07-24T10:01:00.000Z",
+    attemptId: "attempt_subscribe_1",
+    attemptNumber: 1,
+  }, { queryClient: readCommitted });
+  assert.equal(success.status, "updated");
+  assert.equal(readCommitted.calls.some((call) => /^BEGIN/.test(call.sql)), false);
+  assert.equal(readCommitted.calls.some((call) => call.sql === "COMMIT" || call.sql === "ROLLBACK"), false);
+
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+      probeId: PROBE_ID,
+      dispatchedAt: "2026-07-24T10:01:00.000Z",
+      attemptId: "attempt_subscribe_1",
+      attemptNumber: 1,
+    }, { queryClient: makeLifecycleClient(probeRow(), { lifecycleSavepointFailure: true }) }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "transaction_required" }
+  );
+
+  await assert.rejects(
+    () => repository.markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched({
+      probeId: PROBE_ID,
+      dispatchedAt: "2026-07-24T10:01:00.000Z",
+      attemptId: "attempt_subscribe_1",
+      attemptNumber: 1,
+    }, { queryClient: makeLifecycleClient(probeRow(), { isolation: "repeatable read" }) }),
+    { name: "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError", code: "transaction_isolation_unsupported" }
+  );
+});

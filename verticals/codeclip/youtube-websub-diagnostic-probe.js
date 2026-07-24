@@ -513,6 +513,13 @@ function applyDiagnosticUnsubscribeTransition(record, { requestedAt, confirmedAt
       });
     }
     const normalizedConfirmedAt = normalizeRequiredTimestamp(confirmedAt, "confirmedAt");
+    const existingConfirmedAt = current.diagnosticMetadata.cleanup?.confirmedAt || null;
+    const nextConfirmedAt = existingConfirmedAt && Date.parse(existingConfirmedAt) > Date.parse(normalizedConfirmedAt)
+      ? existingConfirmedAt
+      : normalizedConfirmedAt;
+    const nextUpdatedAt = Date.parse(normalizedConfirmedAt) > Date.parse(current.updatedAt)
+      ? normalizedConfirmedAt
+      : current.updatedAt;
     return {
       ...current,
       status: DIAGNOSTIC_PROBE_STATUSES.UNSUBSCRIBED,
@@ -521,12 +528,12 @@ function applyDiagnosticUnsubscribeTransition(record, { requestedAt, confirmedAt
       cleanupRequired: false,
       subscriptionMayExist: false,
       unsubscribedAt: current.unsubscribedAt || normalizedConfirmedAt,
-      updatedAt: normalizedConfirmedAt,
+      updatedAt: nextUpdatedAt,
       diagnosticMetadata: {
         ...current.diagnosticMetadata,
         cleanup: {
           ...(current.diagnosticMetadata.cleanup || {}),
-          confirmedAt: normalizedConfirmedAt,
+          confirmedAt: nextConfirmedAt,
         },
       },
     };
