@@ -1385,8 +1385,28 @@ function markCodeClipYouTubeWebSubDiagnosticSubscribeDispatched(input = {}, opti
   }, options);
 }
 
+function requireActiveSubscribeVerificationRace(record) {
+  if (record.status !== DIAGNOSTIC_PROBE_STATUSES.ACTIVE || record.pendingMode !== null) {
+    throw repositoryError("state_conflict", "active subscribe verification race is not correlated");
+  }
+  const verification = record.diagnosticMetadata?.lastVerification || null;
+  if (
+    !verification ||
+    verification.mode !== DIAGNOSTIC_PENDING_MODES.SUBSCRIBE ||
+    !record.verifiedAt ||
+    !record.firstVerifiedAt ||
+    !record.leaseExpiresAt
+  ) {
+    throw repositoryError("state_conflict", "active subscribe verification race is not correlated");
+  }
+}
+
 function markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted(input = {}, options = {}) {
   return runLifecycleOperation(input, (record) => {
+    if (record.status === DIAGNOSTIC_PROBE_STATUSES.ACTIVE) {
+      requireActiveSubscribeVerificationRace(record);
+      return applyAcceptedMetadata(record, input, DISPATCH_MODES.SUBSCRIBE);
+    }
     requireStatus(record, [DIAGNOSTIC_PROBE_STATUSES.PENDING_SUBSCRIBE]);
     return applyAcceptedMetadata(record, input, DISPATCH_MODES.SUBSCRIBE);
   }, options);

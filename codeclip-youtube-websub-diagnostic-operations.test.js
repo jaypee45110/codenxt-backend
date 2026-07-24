@@ -239,11 +239,79 @@ test("diagnostic start reuses existing open probe without a duplicate Hub reques
   assert.equal(state.calls.some((call) => call[0] === "hub"), false);
 });
 
-test("diagnostic start marks cleanup risk when Hub accepted but local accepted persistence fails", async () => {
+test("diagnostic start reconciles active probe when GET verification wins the Hub 202 race", async () => {
+  const { state, options } = baseOptions({
+    requestSubscription: async (input) => {
+      state.calls.push(["hub", input]);
+      state.current = probe({
+        ...state.current,
+        status: "active",
+        pendingMode: null,
+        verifiedAt: "2026-07-24T10:00:01.000Z",
+        firstVerifiedAt: "2026-07-24T10:00:01.000Z",
+        leaseExpiresAt: "2026-08-03T10:00:01.000Z",
+        diagnosticMetadata: {
+          ...state.current.diagnosticMetadata,
+          lastVerification: {
+            mode: "subscribe",
+            verifiedAt: "2026-07-24T10:00:01.000Z",
+            leaseSeconds: 864000,
+          },
+        },
+      });
+      return state.hubResult;
+    },
+    markSubscribeAccepted: async (input, options) => {
+      state.calls.push(["subscribeAccepted", input, options]);
+      state.current = {
+        ...state.current,
+        diagnosticMetadata: {
+          ...state.current.diagnosticMetadata,
+          lastDispatch: {
+            ...state.current.diagnosticMetadata.lastDispatch,
+            status: "accepted",
+            acceptedAt: input.acceptedAt,
+            resultCode: input.resultCode,
+          },
+        },
+      };
+      return { status: "updated", row: state.current, public: publicProbe(state.current) };
+    },
+  });
+
+  const result = await createCodeClipYouTubeWebSubDiagnosticProbeOperation(
+    { channelId: CHANNEL_ID, leaseSeconds: 864000 },
+    options
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "diagnostic_subscribe_pending");
+  assert.equal(result.probe.status, "active");
+  assert.equal(result.probe.probeId, PROBE_ID);
+  assert.equal(result.probe.callbackId, "diag_y...1234");
+  assert.equal(result.probe.cleanupRequired, false);
+  assert.equal(result.probe.subscriptionMayExist, true);
+  assert.equal(state.calls.some((call) => call[0] === "subscribeFailed"), false);
+  assert.equal(JSON.stringify(result).includes(CALLBACK_ID), false);
+  assert.equal(JSON.stringify(result).includes("root-secret"), false);
+});
+
+test("diagnostic start returns recoverable cleanup risk when Hub accepted but reconciliation is unavailable", async () => {
   const { state, options } = baseOptions({
     markSubscribeAccepted: async () => {
       state.calls.push(["subscribeAccepted"]);
-      throw new Error("accepted persistence failed");
+      const error = new Error("accepted persistence failed");
+      error.name = "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError";
+      error.code = "state_conflict";
+      throw error;
+    },
+    getProbeByProbeId: async (probeId, options) => {
+      state.calls.push(["getProbe", probeId, options]);
+      return { row: state.current, public: publicProbe(state.current) };
+    },
+    markSubscribeFailed: async (input, options) => {
+      state.calls.push(["subscribeFailed", input, options]);
+      throw new Error("subscribe failed transition should not be used after Hub accepted");
     },
   });
   const result = await createCodeClipYouTubeWebSubDiagnosticProbeOperation(
@@ -252,7 +320,12 @@ test("diagnostic start marks cleanup risk when Hub accepted but local accepted p
   );
   assert.equal(result.ok, false);
   assert.equal(result.code, "diagnostic_cleanup_required");
-  assert.equal(state.calls.some((call) => call[0] === "subscribeFailed"), true);
+  assert.equal(result.probe.probeId, PROBE_ID);
+  assert.equal(result.probe.callbackId, "diag_y...1234");
+  assert.equal(result.probe.cleanupRequired, true);
+  assert.equal(result.probe.subscriptionMayExist, true);
+  assert.equal(state.calls.some((call) => call[0] === "subscribeFailed"), false);
+  assert.equal(JSON.stringify(result).includes(CALLBACK_ID), false);
 });
 
 test("diagnostic start fails closed when configured base URL is missing", async () => {

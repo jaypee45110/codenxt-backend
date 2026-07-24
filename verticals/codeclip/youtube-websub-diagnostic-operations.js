@@ -143,6 +143,57 @@ function isExistingOpen(result) {
   return result?.status === "existing" && ["pending_subscribe", "active", "pending_unsubscribe", "failed"].includes(result.row?.status);
 }
 
+function isRepositoryStateConflict(error) {
+  return error?.name === "CodeClipYouTubeWebSubDiagnosticProbeRepositoryError" && error.code === "state_conflict";
+}
+
+function getLastDispatch(row) {
+  return row?.diagnosticMetadata?.lastDispatch || null;
+}
+
+function getLastVerification(row) {
+  return row?.diagnosticMetadata?.lastVerification || null;
+}
+
+function isSameSubscribeAttempt(row, { attemptId, attemptNumber }) {
+  const dispatch = getLastDispatch(row);
+  return Boolean(
+    dispatch &&
+    dispatch.mode === "subscribe" &&
+    dispatch.attemptId === attemptId &&
+    Number(dispatch.attemptNumber) === Number(attemptNumber)
+  );
+}
+
+function isVerifiedActiveSubscribeAttempt(row, attempt) {
+  const verification = getLastVerification(row);
+  return Boolean(
+    row &&
+    row.status === "active" &&
+    row.pendingMode === null &&
+    row.verifiedAt &&
+    row.firstVerifiedAt &&
+    row.leaseExpiresAt &&
+    verification &&
+    verification.mode === "subscribe" &&
+    isSameSubscribeAttempt(row, attempt)
+  );
+}
+
+function recoverableCleanupProbe(row, fallback = {}) {
+  return {
+    ...(row || fallback),
+    probeId: row?.probeId || fallback.probeId || null,
+    callbackId: row?.callbackId || fallback.callbackId || null,
+    status: "failed",
+    pendingMode: null,
+    cleanupRequired: true,
+    subscriptionMayExist: true,
+    failedOperation: "subscribe",
+    failedReasonCode: "hub_request_accepted_without_callback",
+  };
+}
+
 async function createCodeClipYouTubeWebSubDiagnosticProbeOperation(input = {}, options = {}) {
   const env = options.env || process.env;
   const queryClient = requireQueryClient(options.queryClient);
@@ -205,30 +256,59 @@ async function createCodeClipYouTubeWebSubDiagnosticProbeOperation(input = {}, o
     );
     return fail(hubResult.code || "hub_request_failed", failed.row, failed.public, { retryable: hubResult.retryable !== false });
   }
+  const acceptedAt = new Date().toISOString();
+  const acceptInput = {
+    probeId: row.probeId,
+    callbackId: row.callbackId,
+    acceptedAt,
+    attemptId,
+    attemptNumber: 1,
+    resultCode: "hub_request_accepted",
+  };
   try {
     const accepted = await runTransaction(options, queryClient, ({ queryClient: txClient }) =>
-      (options.markSubscribeAccepted || repository.markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted)({
-        probeId: row.probeId,
-        callbackId: row.callbackId,
-        acceptedAt: new Date().toISOString(),
-        attemptId,
-        attemptNumber: 1,
-        resultCode: "hub_request_accepted",
-      }, { queryClient: txClient })
+      (options.markSubscribeAccepted || repository.markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted)(
+        acceptInput,
+        { queryClient: txClient }
+      )
     );
     return ok("diagnostic_subscribe_pending", accepted.row, accepted.public, { status: accepted.row.status });
-  } catch {
-    const failed = await runTransaction(options, queryClient, ({ queryClient: txClient }) =>
-      (options.markSubscribeFailed || repository.markCodeClipYouTubeWebSubDiagnosticSubscribeFailed)({
-        probeId: row.probeId,
-        callbackId: row.callbackId,
-        failedAt: new Date().toISOString(),
-        reasonCode: "hub_request_accepted_without_callback",
-        cleanupRequired: true,
-        subscriptionMayExist: true,
-      }, { queryClient: txClient })
-    );
-    return fail("diagnostic_cleanup_required", failed.row, failed.public, { retryable: false });
+  } catch (acceptError) {
+    let latest = null;
+    if (isRepositoryStateConflict(acceptError)) {
+      latest = await (options.getProbeByProbeId || repository.getCodeClipYouTubeWebSubDiagnosticProbeByProbeId)(
+        row.probeId,
+        { queryClient }
+      );
+      if (isVerifiedActiveSubscribeAttempt(latest?.row, acceptInput)) {
+        const accepted = await runTransaction(options, queryClient, ({ queryClient: txClient }) =>
+          (options.markSubscribeAccepted || repository.markCodeClipYouTubeWebSubDiagnosticSubscribeAccepted)(
+            acceptInput,
+            { queryClient: txClient }
+          )
+        );
+        return ok("diagnostic_subscribe_pending", accepted.row, accepted.public, { status: accepted.row.status });
+      }
+    }
+
+    const cleanupInput = {
+      probeId: row.probeId,
+      requiredAt: new Date().toISOString(),
+      reasonCode: "hub_request_accepted_without_callback",
+      subscriptionMayExist: true,
+    };
+    try {
+      const cleanup = await runTransaction(options, queryClient, ({ queryClient: txClient }) =>
+        (options.markCleanupRequired || repository.markCodeClipYouTubeWebSubDiagnosticCleanupRequired)(
+          cleanupInput,
+          { queryClient: txClient }
+        )
+      );
+      return fail("diagnostic_cleanup_required", cleanup.row, cleanup.public, { retryable: false });
+    } catch {
+      const recoverable = recoverableCleanupProbe(latest?.row, row);
+      return fail("diagnostic_cleanup_required", recoverable, {}, { retryable: false });
+    }
   }
 }
 
