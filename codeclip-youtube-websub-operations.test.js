@@ -111,6 +111,33 @@ function canClaimRenewDispatch(dispatch, nowEpochMs) {
   return false;
 }
 
+function canClaimUnsubscribeDispatch(dispatch, nowEpochMs) {
+  if (dispatch === undefined || dispatch === null) return true;
+  if (typeof dispatch !== "object" || Array.isArray(dispatch)) return false;
+  if (dispatch.status === "failed" && dispatch.mode === "unsubscribe") {
+    return dispatch.retryEligible === true && isSafeAttemptNumber(dispatch.attemptNumber);
+  }
+  if (dispatch.status === "started") {
+    return (
+      dispatch.mode === "unsubscribe" &&
+      isSafeAttemptNumber(dispatch.attemptNumber) &&
+      Number.isSafeInteger(dispatch.staleAfterEpochMs) &&
+      dispatch.staleAfterEpochMs >= 0 &&
+      dispatch.staleAfterEpochMs <= nowEpochMs
+    );
+  }
+  if (
+    (dispatch.mode === "subscribe" || dispatch.mode === "renew") &&
+    isSafeAttemptNumber(dispatch.attemptNumber)
+  ) {
+    return (
+      dispatch.status === "accepted" ||
+      (dispatch.status === "failed" && dispatch.retryEligible === false)
+    );
+  }
+  return false;
+}
+
 function toRepoRow(input = {}) {
   return {
     id: input.id || "sub-1",
@@ -1756,6 +1783,158 @@ test("YouTube WebSub unsubscribe marks pending and leaves binding lifecycle unto
   assert.deepEqual(state.auditRows.map((row) => row.mode), ["unsubscribe", "unsubscribe"]);
 });
 
+test("YouTube WebSub unsubscribe after terminal renew dispatch claims and sends hub request", async () => {
+  const terminalRenewDispatch = {
+    attemptId: "attempt_previous_renew_accepted",
+    attemptNumber: 3,
+    previousAttemptCount: 2,
+    status: "accepted",
+    mode: "renew",
+    resultCode: "hub_request_accepted",
+    hubHttpStatus: 202,
+    retryEligible: false,
+    startedAt: "2026-07-23T11:21:41.379767+00:00",
+    completedAt: "2026-07-23T11:21:41.792679+00:00",
+    requestedLeaseSeconds: 864000,
+  };
+  const { state, options } = baseOptions({
+    state: {
+      existingByCallback: subscription({
+        status: "active",
+        pendingMode: null,
+        metadata: { dispatch: terminalRenewDispatch },
+      }),
+      hubResult: { ok: true, code: "hub_request_accepted", status: 202, mode: "unsubscribe" },
+    },
+  });
+  options.generateDispatchAttemptId = () => "attempt_unsubscribe_4";
+  options.claimUnsubscribeDispatch = async (callbackId, input) => {
+    state.calls.push(["claimDispatch", "unsubscribe", callbackId, input]);
+    const current = state.existingByCallback;
+    if (
+      !current ||
+      current.status !== "pending_unsubscribe" ||
+      current.pendingMode !== "unsubscribe" ||
+      !canClaimUnsubscribeDispatch(current.metadata?.dispatch, input.nowEpochMs ?? 1_800_000_000_000)
+    ) {
+      return null;
+    }
+    const previousAttemptNumber = current.metadata.dispatch.attemptNumber;
+    const claimed = subscription({
+      ...current,
+      callbackId,
+      metadata: {
+        ...current.metadata,
+        dispatch: {
+          attemptId: input.attemptId,
+          attemptNumber: previousAttemptNumber + 1,
+          previousAttemptCount: previousAttemptNumber,
+          status: "started",
+          mode: "unsubscribe",
+          startedAt: "2026-07-25T05:08:41.500Z",
+          staleAfterEpochMs: 1_800_000_060_000,
+          requestedLeaseSeconds: null,
+          retryEligible: false,
+        },
+      },
+    });
+    state.claimed = claimed;
+    state.existingByCallback = claimed;
+    return claimed;
+  };
+
+  const result = await unsubscribeCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, options);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "unsubscribe_pending");
+  assert.equal(result.status, "pending_unsubscribe");
+  assert.equal(result.dispatchClaimed, true);
+  assert.equal(result.subscription.status, "pending_unsubscribe");
+  assert.equal(result.subscription.lastOperation.mode, "unsubscribe");
+  assert.equal(result.subscription.lastOperation.status, "accepted");
+  assert.equal(result.subscription.lastOperation.attemptNumber, 4);
+  assert.equal(state.calls.filter((call) => call[0] === "hub").length, 1);
+  const hubCall = state.calls.find((call) => call[0] === "hub")[1];
+  assert.equal(hubCall.mode, "unsubscribe");
+  assert.equal(hubCall.operationMode, "unsubscribe");
+  assert.equal(hubCall.attemptId, "attempt_unsubscribe_4");
+  assert.equal(hubCall.attemptNumber, 4);
+  const recordCall = state.calls.find((call) => call[0] === "recordDispatch");
+  assert.equal(recordCall[1], "unsubscribe");
+  assert.equal(recordCall[3].attemptId, "attempt_unsubscribe_4");
+  assert.equal(recordCall[3].resultCode, "hub_request_accepted");
+});
+
+test("YouTube WebSub unsubscribe returns conflict when claim is missing without active same-attempt dispatch", async () => {
+  const { state, options } = baseOptions({
+    state: {
+      existingByCallback: subscription({
+        status: "pending_unsubscribe",
+        pendingMode: "unsubscribe",
+        metadata: {
+          dispatch: {
+            attemptId: "attempt_previous_renew_accepted",
+            attemptNumber: 3,
+            status: "accepted",
+            mode: "renew",
+            resultCode: "hub_request_accepted",
+            retryEligible: false,
+          },
+        },
+      }),
+    },
+  });
+  options.claimUnsubscribeDispatch = async (callbackId, input) => {
+    state.calls.push(["claimDispatch", "unsubscribe", callbackId, input]);
+    return null;
+  };
+
+  const result = await unsubscribeCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, options);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "subscription_state_conflict");
+  assert.equal(result.dispatchClaimed, false);
+  assert.equal(result.subscription.status, "pending_unsubscribe");
+  assert.equal(state.calls.some((call) => call[0] === "hub"), false);
+  assert.equal(state.calls.some((call) => call[0] === "recordDispatch"), false);
+});
+
+test("YouTube WebSub unsubscribe treats same non-stale started attempt as idempotent", async () => {
+  const { state, options } = baseOptions({
+    state: {
+      existingByCallback: subscription({
+        status: "pending_unsubscribe",
+        pendingMode: "unsubscribe",
+        metadata: {
+          dispatch: {
+            attemptId: "attempt_1",
+            attemptNumber: 4,
+            status: "started",
+            mode: "unsubscribe",
+            staleAfterEpochMs: 1_800_000_060_000,
+            retryEligible: false,
+          },
+        },
+      }),
+    },
+  });
+  options.claimUnsubscribeDispatch = async (callbackId, input) => {
+    state.calls.push(["claimDispatch", "unsubscribe", callbackId, input]);
+    return null;
+  };
+  options.dispatchNowEpochMs = 1_800_000_000_000;
+
+  const result = await unsubscribeCodeClipYouTubeWebSubSubscriptionOperation("yt_callback_1", {}, options);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "unsubscribe_pending");
+  assert.equal(result.dispatchClaimed, false);
+  assert.equal(result.subscription.lastOperation.mode, "unsubscribe");
+  assert.equal(result.subscription.lastOperation.status, "started");
+  assert.equal(result.subscription.lastOperation.attemptNumber, 4);
+  assert.equal(state.calls.some((call) => call[0] === "hub"), false);
+});
+
 test("YouTube WebSub unsubscribe duplicate, retry, stale and failure dispatch states are handled", async () => {
   const activeClaim = baseOptions({
     state: {
@@ -1768,8 +1947,8 @@ test("YouTube WebSub unsubscribe duplicate, retry, stale and failure dispatch st
     {},
     activeClaim.options
   );
-  assert.equal(activeClaimResult.ok, true);
-  assert.equal(activeClaimResult.code, "unsubscribe_pending");
+  assert.equal(activeClaimResult.ok, false);
+  assert.equal(activeClaimResult.code, "subscription_state_conflict");
   assert.equal(activeClaimResult.dispatchClaimed, false);
   assert.equal(activeClaim.state.calls.some((call) => call[0] === "hub"), false);
 

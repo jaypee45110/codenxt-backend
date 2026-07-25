@@ -110,6 +110,16 @@ function claimableDispatch(dispatch, nowEpochMs, expectedMode = "subscribe") {
       (dispatch.status === "failed" && dispatch.retryEligible === false)
     );
   }
+  if (
+    expectedMode === "unsubscribe" &&
+    (dispatch.mode === "subscribe" || dispatch.mode === "renew") &&
+    isSafeAttemptNumber(dispatch.attemptNumber)
+  ) {
+    return (
+      dispatch.status === "accepted" ||
+      (dispatch.status === "failed" && dispatch.retryEligible === false)
+    );
+  }
   return false;
 }
 
@@ -1095,6 +1105,201 @@ test("YouTube WebSub renew dispatch replaces terminal renew dispatch", async (t)
       assert.equal(claimed.metadata.dispatch.resultCode, undefined);
       assert.equal(claimed.metadata.dispatch.completedAt, undefined);
       assert.equal(claimed.metadata.dispatch.retryEligible, false);
+    });
+  }
+});
+
+test("YouTube WebSub unsubscribe dispatch replaces terminal subscribe or renew dispatch", async (t) => {
+  const cases = [
+    {
+      name: "accepted terminal renew",
+      previousDispatch: {
+        attemptId: "attempt_previous_renew_accepted",
+        attemptNumber: 3,
+        previousAttemptCount: 2,
+        status: "accepted",
+        mode: "renew",
+        resultCode: "hub_request_accepted",
+        hubHttpStatus: 202,
+        retryEligible: false,
+        startedAt: "2026-07-23T11:21:41.379767+00:00",
+        completedAt: "2026-07-23T11:21:41.792679+00:00",
+        requestedLeaseSeconds: 864000,
+      },
+    },
+    {
+      name: "failed non-retryable terminal renew",
+      previousDispatch: {
+        attemptId: "attempt_previous_renew_rejected",
+        attemptNumber: 3,
+        previousAttemptCount: 2,
+        status: "failed",
+        mode: "renew",
+        resultCode: "hub_request_rejected",
+        hubHttpStatus: 400,
+        retryEligible: false,
+        startedAt: "2026-07-23T11:21:41.379767+00:00",
+        completedAt: "2026-07-23T11:21:41.792679+00:00",
+        requestedLeaseSeconds: 864000,
+      },
+    },
+    {
+      name: "accepted terminal subscribe",
+      previousDispatch: {
+        attemptId: "attempt_previous_subscribe_accepted",
+        attemptNumber: 1,
+        previousAttemptCount: 0,
+        status: "accepted",
+        mode: "subscribe",
+        resultCode: "hub_request_accepted",
+        hubHttpStatus: 202,
+        retryEligible: false,
+        startedAt: "2026-07-21T11:13:50.700000+00:00",
+        completedAt: "2026-07-21T11:13:50.925000+00:00",
+        requestedLeaseSeconds: 864000,
+      },
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const client = createSubscriptionClient();
+      await createPendingCodeClipYouTubeWebSubSubscription(
+        validInput({
+          status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+          pendingMode: PENDING_MODES.UNSUBSCRIBE,
+          leaseStartedAt: "2026-07-23T11:21:45.997Z",
+          leaseExpiresAt: "2026-08-02T11:21:45.997Z",
+          lastVerifiedAt: "2026-07-23T11:21:45.997Z",
+          metadata: {
+            bindingId: "4",
+            requestedBy: "operator_key",
+            dispatch: item.previousDispatch,
+          },
+        }),
+        { queryClient: client }
+      );
+
+      const claimed = await claimCodeClipYouTubeWebSubUnsubscribeDispatch("yt_cb_123", {
+        attemptId: "attempt_unsubscribe_after_terminal_lifecycle",
+        staleAfterSeconds: 60,
+        nowEpochMs: 1_800_000_000_000,
+        queryClient: client,
+      });
+
+      assert.ok(claimed, "terminal subscribe/renew dispatch should not block unsubscribe");
+      assert.equal(claimed.status, SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE);
+      assert.equal(claimed.pendingMode, PENDING_MODES.UNSUBSCRIBE);
+      assert.equal(claimed.metadata.dispatch.attemptId, "attempt_unsubscribe_after_terminal_lifecycle");
+      assert.equal(claimed.metadata.dispatch.mode, "unsubscribe");
+      assert.equal(claimed.metadata.dispatch.status, "started");
+      assert.equal(claimed.metadata.dispatch.attemptNumber, item.previousDispatch.attemptNumber + 1);
+      assert.equal(claimed.metadata.dispatch.previousAttemptCount, item.previousDispatch.attemptNumber);
+      assert.equal(claimed.metadata.dispatch.requestedLeaseSeconds, null);
+      assert.equal(claimed.metadata.dispatch.resultCode, undefined);
+      assert.equal(claimed.metadata.dispatch.completedAt, undefined);
+      assert.equal(claimed.metadata.dispatch.retryEligible, false);
+    });
+  }
+});
+
+test("YouTube WebSub unsubscribe dispatch rejects active, malformed, and unrelated lifecycle claims", async (t) => {
+  const cases = [
+    {
+      name: "non-stale started renew",
+      status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+      pendingMode: PENDING_MODES.UNSUBSCRIBE,
+      dispatch: {
+        attemptId: "attempt_started_renew",
+        attemptNumber: 3,
+        status: "started",
+        mode: "renew",
+        staleAfterEpochMs: 1_900_000_000_000,
+        retryEligible: false,
+      },
+    },
+    {
+      name: "malformed attemptNumber",
+      status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+      pendingMode: PENDING_MODES.UNSUBSCRIBE,
+      dispatch: {
+        attemptId: "attempt_malformed_renew",
+        attemptNumber: "3",
+        status: "accepted",
+        mode: "renew",
+        retryEligible: false,
+      },
+    },
+    {
+      name: "attempt overflow",
+      status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+      pendingMode: PENDING_MODES.UNSUBSCRIBE,
+      dispatch: {
+        attemptId: "attempt_overflow",
+        attemptNumber: 2147483647,
+        status: "accepted",
+        mode: "renew",
+        retryEligible: false,
+      },
+    },
+    {
+      name: "wrong pending mode",
+      status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+      pendingMode: PENDING_MODES.SUBSCRIBE,
+      dispatch: {
+        attemptId: "attempt_previous_renew_accepted",
+        attemptNumber: 3,
+        status: "accepted",
+        mode: "renew",
+        retryEligible: false,
+      },
+    },
+    {
+      name: "wrong status",
+      status: SUBSCRIPTION_STATUSES.ACTIVE,
+      pendingMode: PENDING_MODES.UNSUBSCRIBE,
+      dispatch: {
+        attemptId: "attempt_previous_renew_accepted",
+        attemptNumber: 3,
+        status: "accepted",
+        mode: "renew",
+        retryEligible: false,
+      },
+    },
+    {
+      name: "terminal unsubscribe without retry rule",
+      status: SUBSCRIPTION_STATUSES.PENDING_UNSUBSCRIBE,
+      pendingMode: PENDING_MODES.UNSUBSCRIBE,
+      dispatch: {
+        attemptId: "attempt_previous_unsubscribe_accepted",
+        attemptNumber: 2,
+        status: "accepted",
+        mode: "unsubscribe",
+        retryEligible: false,
+      },
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const client = createSubscriptionClient();
+      await createPendingCodeClipYouTubeWebSubSubscription(
+        validInput({
+          status: item.status,
+          pendingMode: item.pendingMode,
+          metadata: { dispatch: item.dispatch },
+        }),
+        { queryClient: client }
+      );
+
+      const claimed = await claimCodeClipYouTubeWebSubUnsubscribeDispatch("yt_cb_123", {
+        attemptId: "attempt_unsubscribe_rejected",
+        staleAfterSeconds: 60,
+        nowEpochMs: 1_800_000_000_000,
+        queryClient: client,
+      });
+
+      assert.equal(claimed, null, `${item.name} should fail closed`);
     });
   }
 });

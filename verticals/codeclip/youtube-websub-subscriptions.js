@@ -727,6 +727,21 @@ async function claimCodeClipYouTubeWebSubDispatch(
               )
             )
           )
+          OR (
+            $6 = 'unsubscribe'
+            AND jsonb_typeof(metadata->'dispatch') = 'object'
+            AND metadata->'dispatch'->>'mode' IN ('subscribe', 'renew')
+            AND jsonb_typeof(metadata->'dispatch'->'attemptNumber') = 'number'
+            AND (metadata->'dispatch'->>'attemptNumber') ~ '^[0-9]{1,9}$'
+            AND (metadata->'dispatch'->>'attemptNumber')::bigint < 2147483647
+            AND (
+              metadata->'dispatch'->>'status' = 'accepted'
+              OR (
+                metadata->'dispatch'->>'status' = 'failed'
+                AND metadata->'dispatch'->>'retryEligible' = 'false'
+              )
+            )
+          )
         )
       RETURNING *
     `,

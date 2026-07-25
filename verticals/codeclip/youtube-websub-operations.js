@@ -388,12 +388,12 @@ function normalizeRenewDispatchNowEpochMs(value) {
   return candidate;
 }
 
-function isSameActiveRenewDispatchAttempt(dispatch = {}, { attemptId, nowEpochMs } = {}) {
+function isSameActiveDispatchAttempt(dispatch = {}, { mode, attemptId, nowEpochMs } = {}) {
   return (
     dispatch &&
     typeof dispatch === "object" &&
     !Array.isArray(dispatch) &&
-    dispatch.mode === "renew" &&
+    dispatch.mode === mode &&
     dispatch.status === "started" &&
     dispatch.attemptId === attemptId &&
     Number.isSafeInteger(dispatch.attemptNumber) &&
@@ -446,7 +446,7 @@ async function runLifecycleDispatch({
   }
   const attemptId = (options.generateDispatchAttemptId || buildDispatchAttemptId)();
   const dispatchNowEpochMs =
-    dispatchMode === "renew"
+    dispatchMode === "renew" || dispatchMode === "unsubscribe"
       ? normalizeRenewDispatchNowEpochMs(options.dispatchNowEpochMs)
       : options.dispatchNowEpochMs;
   const claim = await (
@@ -463,11 +463,12 @@ async function runLifecycleDispatch({
   );
 
   if (!claim) {
-    if (dispatchMode === "renew") {
+    if (dispatchMode === "renew" || dispatchMode === "unsubscribe") {
       const current = await (
         options.getSubscriptionByCallbackId || getCodeClipYouTubeWebSubSubscriptionByCallbackId
       )(subscription.callbackId, { queryClient });
-      if (!isSameActiveRenewDispatchAttempt(current?.metadata?.dispatch, {
+      if (!isSameActiveDispatchAttempt(current?.metadata?.dispatch, {
+        mode: dispatchMode,
         attemptId,
         nowEpochMs: dispatchNowEpochMs,
       })) {
