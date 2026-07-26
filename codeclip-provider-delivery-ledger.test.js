@@ -21,6 +21,7 @@ function createDeliveryRow(overrides = {}) {
     external_message_id: overrides.external_message_id || 'message-1',
     idempotency_key: overrides.idempotency_key ?? 'redis-key-1',
     payload_fingerprint: overrides.payload_fingerprint ?? 'fingerprint-1',
+    initial_delivery_source: overrides.initial_delivery_source || 'websub',
     verification_state: overrides.verification_state || 'verified',
     processing_state: Object.hasOwn(overrides, 'processing_state')
       ? overrides.processing_state
@@ -93,13 +94,14 @@ function createStatefulDeliveryClient({ throwOn = null } = {}) {
           external_message_id: params[4],
           idempotency_key: params[5],
           payload_fingerprint: params[6],
-          verification_state: params[7],
-          processing_state: params[8],
-          core_persistence_state: params[9],
-          completion_state: params[10],
-          retry_eligible: params[11],
-          terminal_state: params[12],
-          received_at: params[13] || '2026-07-11T00:00:00.000Z',
+          initial_delivery_source: params[7],
+          verification_state: params[8],
+          processing_state: params[9],
+          core_persistence_state: params[10],
+          completion_state: params[11],
+          retry_eligible: params[12],
+          terminal_state: params[13],
+          received_at: params[14] || '2026-07-11T00:00:00.000Z',
         });
         const key = deliveryKey(row);
         const existing = rows.find((item) => deliveryKey(item) === key);
@@ -180,21 +182,25 @@ test('codeClip provider delivery schema defines durable identity and indexes', a
 
   await ensureCodeClipProviderDeliveriesTable(client);
 
-  assert.equal(client.calls.length, 5);
+  assert.equal(client.calls.length, 7);
   assert.match(client.calls[0].sql, /CREATE TABLE IF NOT EXISTS codeclip_provider_deliveries/);
   assert.match(
     client.calls[0].sql,
     /UNIQUE \(provider, provider_account_id, event_code, external_message_id\)/
   );
   assert.match(client.calls[0].sql, /CHECK \(attempt_count >= 1\)/);
+  assert.match(client.calls[0].sql, /initial_delivery_source TEXT NOT NULL DEFAULT 'websub'/);
+  assert.match(client.calls[0].sql, /CHECK \(initial_delivery_source IN \('websub', 'operator_reconciliation_recovery', 'atom_reconciliation'\)\)/);
   assert.match(client.calls[0].sql, /received_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[0].sql, /last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[0].sql, /created_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[0].sql, /updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
-  assert.match(client.calls[1].sql, /codeclip_provider_deliveries_event_code_idx/);
-  assert.match(client.calls[2].sql, /codeclip_provider_deliveries_completion_state_idx/);
-  assert.match(client.calls[3].sql, /codeclip_provider_deliveries_processing_state_idx/);
-  assert.match(client.calls[4].sql, /codeclip_provider_deliveries_received_at_idx/);
+  assert.match(client.calls[1].sql, /ADD COLUMN IF NOT EXISTS initial_delivery_source/);
+  assert.match(client.calls[2].sql, /codeclip_provider_deliveries_initial_source_chk/);
+  assert.match(client.calls[3].sql, /codeclip_provider_deliveries_event_code_idx/);
+  assert.match(client.calls[4].sql, /codeclip_provider_deliveries_completion_state_idx/);
+  assert.match(client.calls[5].sql, /codeclip_provider_deliveries_processing_state_idx/);
+  assert.match(client.calls[6].sql, /codeclip_provider_deliveries_received_at_idx/);
 });
 
 test('codeClip provider delivery create distinguishes created and existing rows', async () => {
@@ -220,10 +226,40 @@ test('codeClip provider delivery create distinguishes created and existing rows'
   assert.equal(created.row.eventId, 'event-1');
   assert.equal(created.row.idempotencyKey, 'redis-key-1');
   assert.equal(created.row.payloadFingerprint, 'fingerprint-1');
+  assert.equal(created.row.initialDeliverySource, 'websub');
   assert.equal(existing.status, 'existing');
   assert.equal(existing.existing, true);
   assert.equal(existing.row.id, created.row.id);
   assert.match(client.calls[0].sql, /ON CONFLICT \(provider, provider_account_id, event_code, external_message_id\)/);
+});
+
+test('codeClip provider delivery initial source is validated and never overwritten by duplicates', async () => {
+  const client = createStatefulDeliveryClient();
+  const identity = {
+    provider: 'youtube',
+    providerAccountId: 'UCvwiNkgNuGuizjo33NZhzPg',
+    eventCode: 'CC-INITIAL-SOURCE',
+    externalMessageId: 'youtube:UCvwiNkgNuGuizjo33NZhzPg:video1:published',
+    initialDeliverySource: 'atom_reconciliation',
+  };
+
+  const created = await createCodeClipProviderDelivery(identity, client);
+  const duplicate = await createCodeClipProviderDelivery({
+    ...identity,
+    initialDeliverySource: 'websub',
+  }, client);
+  const invalid = await createCodeClipProviderDelivery({
+    ...identity,
+    externalMessageId: 'youtube:UCvwiNkgNuGuizjo33NZhzPg:video2:published',
+    initialDeliverySource: 'manual_bad_source',
+  }, client);
+
+  assert.equal(created.status, 'created');
+  assert.equal(created.row.initialDeliverySource, 'atom_reconciliation');
+  assert.equal(duplicate.status, 'existing');
+  assert.equal(duplicate.row.initialDeliverySource, 'atom_reconciliation');
+  assert.equal(invalid.status, 'failed');
+  assert.match(invalid.error.message, /initial_delivery_source/);
 });
 
 test('codeClip provider delivery identity is account scoped', async () => {

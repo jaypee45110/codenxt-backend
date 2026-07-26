@@ -361,6 +361,10 @@ test("YouTube notification records one delivery per entry and deduplicates exist
     `youtube:${CHANNEL_ID}:videoABC123:published`,
     `youtube:${CHANNEL_ID}:videoXYZ987:published`,
   ]);
+  assert.deepEqual(first.state.createdDeliveries.map((delivery) => delivery.initialDeliverySource), [
+    "websub",
+    "websub",
+  ]);
   assert.equal(first.state.firstActivations.length, 2);
 
   const duplicate = await postNotification(xml, {

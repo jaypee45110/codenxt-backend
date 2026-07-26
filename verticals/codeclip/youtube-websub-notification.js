@@ -196,6 +196,7 @@ async function processEntry({
     saveCodeClipRewardAssignments = database.saveCodeClipRewardAssignments,
     saveCodeClipXtraRedemption = database.saveCodeClipXtraRedemption,
     runCodeClipCorePersistenceTransaction = database.withCodeClipCorePersistenceTransaction,
+    source = "websub",
   } = dependencies;
 
   if (entry.channelId !== subscription.providerAccountId) {
@@ -210,6 +211,7 @@ async function processEntry({
       eventId: event?.id || null,
       idempotencyKey,
       payloadFingerprint: buildCodeClipYouTubeWebSubPayloadFingerprint(rawBody),
+      initialDeliverySource: source,
       verificationState: "verified",
       processingState: "processing",
       corePersistenceState: "not_started",

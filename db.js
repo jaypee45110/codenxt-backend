@@ -1198,6 +1198,7 @@ function mapCodeClipProviderDeliveryRow(row = null) {
     externalMessageId: row.external_message_id,
     idempotencyKey: row.idempotency_key,
     payloadFingerprint: row.payload_fingerprint,
+    initialDeliverySource: row.initial_delivery_source || 'websub',
     verificationState: row.verification_state,
     processingState: row.processing_state,
     attemptCount: row.attempt_count,
@@ -2576,6 +2577,7 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
       external_message_id TEXT NOT NULL,
       idempotency_key TEXT,
       payload_fingerprint TEXT,
+      initial_delivery_source TEXT NOT NULL DEFAULT 'websub',
       verification_state TEXT NOT NULL DEFAULT 'verified',
       processing_state TEXT NOT NULL DEFAULT 'received',
       attempt_count INTEGER NOT NULL DEFAULT 1,
@@ -2592,8 +2594,30 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (provider, provider_account_id, event_code, external_message_id),
-      CHECK (attempt_count >= 1)
+      CHECK (attempt_count >= 1),
+      CONSTRAINT codeclip_provider_deliveries_initial_source_chk
+      CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation'))
     )
+  `);
+
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_deliveries
+    ADD COLUMN IF NOT EXISTS initial_delivery_source TEXT NOT NULL DEFAULT 'websub'
+  `);
+
+  await queryClient.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_deliveries_initial_source_chk'
+      ) THEN
+        ALTER TABLE codeclip_provider_deliveries
+        ADD CONSTRAINT codeclip_provider_deliveries_initial_source_chk
+        CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation'));
+      END IF;
+    END $$;
   `);
 
   await queryClient.query(`
@@ -2698,6 +2722,20 @@ function optionalCodeClipProviderDeliveryString(value) {
   return normalized || null;
 }
 
+const CODECLIP_PROVIDER_DELIVERY_INITIAL_SOURCES = new Set([
+  'websub',
+  'operator_reconciliation_recovery',
+  'atom_reconciliation',
+]);
+
+function normalizeCodeClipProviderDeliveryInitialSource(value = 'websub') {
+  const normalized = String(value || 'websub').trim().toLowerCase();
+  if (!CODECLIP_PROVIDER_DELIVERY_INITIAL_SOURCES.has(normalized)) {
+    throw new Error('codeClip provider delivery initial_delivery_source is invalid');
+  }
+  return normalized;
+}
+
 async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool) {
   if (!queryClient) {
     return {
@@ -2719,6 +2757,20 @@ async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool)
   }
 
   const normalized = normalizeCodeClipProviderDeliveryIdentity(delivery);
+  let initialDeliverySource;
+  try {
+    initialDeliverySource = normalizeCodeClipProviderDeliveryInitialSource(
+      delivery.initialDeliverySource || delivery.initial_delivery_source || 'websub'
+    );
+  } catch (error) {
+    return {
+      status: 'failed',
+      created: false,
+      existing: false,
+      row: null,
+      error,
+    };
+  }
 
   try {
     if (queryClient === pool) {
@@ -2735,6 +2787,7 @@ async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool)
           external_message_id,
           idempotency_key,
           payload_fingerprint,
+          initial_delivery_source,
           verification_state,
           processing_state,
           attempt_count,
@@ -2746,7 +2799,7 @@ async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool)
           last_attempt_at,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$11,$12,$13,COALESCE($14::timestamptz,NOW()),NOW(),NOW())
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12,$13,$14,COALESCE($15::timestamptz,NOW()),NOW(),NOW())
         ON CONFLICT (provider, provider_account_id, event_code, external_message_id)
         DO NOTHING
         RETURNING *
@@ -2759,6 +2812,7 @@ async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool)
         normalized.externalMessageId,
         optionalCodeClipProviderDeliveryString(delivery.idempotencyKey || delivery.idempotency_key),
         optionalCodeClipProviderDeliveryString(delivery.payloadFingerprint || delivery.payload_fingerprint),
+        initialDeliverySource,
         delivery.verificationState || delivery.verification_state || 'verified',
         delivery.processingState || delivery.processing_state || 'processing',
         delivery.corePersistenceState || delivery.core_persistence_state || 'not_started',
@@ -2804,6 +2858,278 @@ async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool)
       error,
     };
   }
+}
+
+async function ensureCodeClipYouTubeReconciliationClaimsTable(queryClient = pool) {
+  if (!queryClient) return;
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_youtube_reconciliation_claims (
+      callback_id TEXT PRIMARY KEY,
+      claim_id TEXT NOT NULL,
+      claimed_at TIMESTAMPTZ NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (expires_at > claimed_at)
+    )
+  `);
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_reconciliation_claims_expires_at_idx
+    ON codeclip_youtube_reconciliation_claims (expires_at)
+  `);
+}
+
+function normalizeIsoTimestamp(value, fieldName) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new Error(`${fieldName} must be a valid timestamp`);
+  return new Date(timestamp).toISOString();
+}
+
+function normalizeClaimText(value, fieldName) {
+  const normalized = String(value || '').trim();
+  if (!normalized || normalized.length > 160 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new Error(`${fieldName} is invalid`);
+  }
+  return normalized;
+}
+
+function normalizeLeaseMs(value) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1000 || parsed > 60 * 60 * 1000) {
+    throw new Error('leaseMs must be a safe bounded positive integer');
+  }
+  return parsed;
+}
+
+function mapCodeClipYouTubeReconciliationClaimRow(row = null) {
+  if (!row) return null;
+  return {
+    callbackId: row.callback_id,
+    claimId: row.claim_id,
+    claimedAt: row.claimed_at,
+    expiresAt: row.expires_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function claimCodeClipYouTubeReconciliationSubscription({
+  callbackId,
+  claimId,
+  now,
+  leaseMs,
+  queryClient = pool,
+} = {}) {
+  if (!queryClient || typeof queryClient.query !== 'function') {
+    throw new Error('queryClient is required');
+  }
+  const normalizedCallbackId = normalizeClaimText(callbackId, 'callbackId');
+  const normalizedClaimId = normalizeClaimText(claimId, 'claimId');
+  const claimedAt = normalizeIsoTimestamp(now, 'now');
+  const normalizedLeaseMs = normalizeLeaseMs(leaseMs);
+  const expiresAt = new Date(Date.parse(claimedAt) + normalizedLeaseMs).toISOString();
+  if (queryClient === pool) await ensureCodeClipYouTubeReconciliationClaimsTable(queryClient);
+  const result = await queryClient.query(
+    `
+      INSERT INTO codeclip_youtube_reconciliation_claims (
+        callback_id,
+        claim_id,
+        claimed_at,
+        expires_at,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,NOW())
+      ON CONFLICT (callback_id) DO UPDATE
+      SET claim_id = EXCLUDED.claim_id,
+          claimed_at = EXCLUDED.claimed_at,
+          expires_at = EXCLUDED.expires_at,
+          updated_at = NOW()
+      WHERE codeclip_youtube_reconciliation_claims.expires_at <= EXCLUDED.claimed_at
+      RETURNING *
+    `,
+    [normalizedCallbackId, normalizedClaimId, claimedAt, expiresAt]
+  );
+  if (result.rows?.[0]) {
+    return { status: 'claimed', claim: mapCodeClipYouTubeReconciliationClaimRow(result.rows[0]) };
+  }
+  const current = await queryClient.query(
+    `
+      SELECT *
+      FROM codeclip_youtube_reconciliation_claims
+      WHERE callback_id = $1
+      LIMIT 1
+    `,
+    [normalizedCallbackId]
+  );
+  return {
+    status: 'contended',
+    claim: mapCodeClipYouTubeReconciliationClaimRow(current.rows?.[0] || null),
+  };
+}
+
+async function releaseCodeClipYouTubeReconciliationSubscriptionClaim({
+  callbackId,
+  claimId,
+  queryClient = pool,
+} = {}) {
+  if (!queryClient || typeof queryClient.query !== 'function') {
+    throw new Error('queryClient is required');
+  }
+  const normalizedCallbackId = normalizeClaimText(callbackId, 'callbackId');
+  const normalizedClaimId = normalizeClaimText(claimId, 'claimId');
+  if (queryClient === pool) await ensureCodeClipYouTubeReconciliationClaimsTable(queryClient);
+  const result = await queryClient.query(
+    `
+      DELETE FROM codeclip_youtube_reconciliation_claims
+      WHERE callback_id = $1
+        AND claim_id = $2
+      RETURNING *
+    `,
+    [normalizedCallbackId, normalizedClaimId]
+  );
+  return {
+    status: result.rows?.[0] ? 'released' : 'not_owner',
+    claim: mapCodeClipYouTubeReconciliationClaimRow(result.rows?.[0] || null),
+  };
+}
+
+async function ensureCodeClipYouTubeReconciliationObservabilityTables(queryClient = pool) {
+  if (!queryClient) return;
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_youtube_reconciliation_detection_observations (
+      id BIGSERIAL PRIMARY KEY,
+      event_code TEXT NOT NULL,
+      channel_fingerprint TEXT NOT NULL,
+      video_id TEXT NOT NULL,
+      detection_source TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      initial_delivery_source TEXT,
+      observed_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (detection_source IN ('atom')),
+      CHECK (initial_delivery_source IS NULL OR initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation'))
+    )
+  `);
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_youtube_reconciliation_detection_observations_event_idx
+    ON codeclip_youtube_reconciliation_detection_observations (event_code, observed_at DESC)
+  `);
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_youtube_reconciliation_worker_heartbeats (
+      worker_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+      last_started_at TIMESTAMPTZ,
+      last_completed_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+function normalizeSafeCodeClipReconciliationText(value, fieldName, maxLength = 160) {
+  const normalized = String(value || '').trim();
+  if (!normalized || normalized.length > maxLength || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new Error(`${fieldName} is invalid`);
+  }
+  return normalized;
+}
+
+async function recordCodeClipYouTubeReconciliationDetectionObservation({
+  eventCode,
+  channelFingerprint,
+  videoId,
+  detectionSource,
+  outcome,
+  initialDeliverySource = null,
+  observedAt,
+  queryClient = pool,
+} = {}) {
+  if (!queryClient || typeof queryClient.query !== 'function') {
+    throw new Error('queryClient is required');
+  }
+  const normalized = {
+    eventCode: normalizeSafeCodeClipReconciliationText(eventCode, 'eventCode'),
+    channelFingerprint: normalizeSafeCodeClipReconciliationText(channelFingerprint, 'channelFingerprint', 64),
+    videoId: normalizeSafeCodeClipReconciliationText(videoId, 'videoId', 80),
+    detectionSource: normalizeSafeCodeClipReconciliationText(detectionSource, 'detectionSource', 80),
+    outcome: normalizeSafeCodeClipReconciliationText(outcome, 'outcome', 120),
+    initialDeliverySource: initialDeliverySource
+      ? normalizeCodeClipProviderDeliveryInitialSource(initialDeliverySource)
+      : null,
+    observedAt: normalizeIsoTimestamp(observedAt, 'observedAt'),
+  };
+  if (queryClient === pool) await ensureCodeClipYouTubeReconciliationObservabilityTables(queryClient);
+  await queryClient.query(
+    `
+      INSERT INTO codeclip_youtube_reconciliation_detection_observations (
+        event_code,
+        channel_fingerprint,
+        video_id,
+        detection_source,
+        outcome,
+        initial_delivery_source,
+        observed_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+    `,
+    [
+      normalized.eventCode,
+      normalized.channelFingerprint,
+      normalized.videoId,
+      normalized.detectionSource,
+      normalized.outcome,
+      normalized.initialDeliverySource,
+      normalized.observedAt,
+    ]
+  );
+  return { status: 'recorded' };
+}
+
+async function recordCodeClipYouTubeReconciliationWorkerHeartbeat({
+  workerId = 'codeclip-youtube-reconciliation-worker',
+  status,
+  summary = {},
+  startedAt = null,
+  completedAt = null,
+  now,
+  queryClient = pool,
+} = {}) {
+  if (!queryClient || typeof queryClient.query !== 'function') {
+    throw new Error('queryClient is required');
+  }
+  const normalizedWorkerId = normalizeSafeCodeClipReconciliationText(workerId, 'workerId');
+  const normalizedStatus = normalizeSafeCodeClipReconciliationText(status, 'status', 80);
+  const updatedAt = normalizeIsoTimestamp(now || completedAt || new Date().toISOString(), 'now');
+  const normalizedStartedAt = startedAt ? normalizeIsoTimestamp(startedAt, 'startedAt') : null;
+  const normalizedCompletedAt = completedAt ? normalizeIsoTimestamp(completedAt, 'completedAt') : null;
+  if (queryClient === pool) await ensureCodeClipYouTubeReconciliationObservabilityTables(queryClient);
+  await queryClient.query(
+    `
+      INSERT INTO codeclip_youtube_reconciliation_worker_heartbeats (
+        worker_id,
+        status,
+        summary,
+        last_started_at,
+        last_completed_at,
+        updated_at
+      )
+      VALUES ($1,$2,$3::jsonb,$4,$5,$6)
+      ON CONFLICT (worker_id) DO UPDATE
+      SET status = EXCLUDED.status,
+          summary = EXCLUDED.summary,
+          last_started_at = EXCLUDED.last_started_at,
+          last_completed_at = EXCLUDED.last_completed_at,
+          updated_at = EXCLUDED.updated_at
+      RETURNING *
+    `,
+    [
+      normalizedWorkerId,
+      normalizedStatus,
+      JSON.stringify(summary && typeof summary === 'object' && !Array.isArray(summary) ? summary : {}),
+      normalizedStartedAt,
+      normalizedCompletedAt,
+      updatedAt,
+    ]
+  );
+  return { status: 'recorded' };
 }
 
 const CODECLIP_PROVIDER_DELIVERY_UPDATE_COLUMNS = {
@@ -4101,6 +4427,8 @@ module.exports = {
   ensureCodeClipYouTubeWebSubDiagnosticProbeTables,
   ensureCodeClipYouTubeOAuthStatesTable,
   ensureCodeClipProviderDeliveriesTable,
+  ensureCodeClipYouTubeReconciliationClaimsTable,
+  ensureCodeClipYouTubeReconciliationObservabilityTables,
   recordCodeClipYouTubeOAuthState,
   consumeCodeClipYouTubeOAuthState,
   createCodeClipProviderDelivery,
@@ -4113,6 +4441,10 @@ module.exports = {
   classifyCodeClipProviderDeliveryOperationalState,
   buildCodeClipProviderDeliveryCategoryPredicate,
   getCodeClipProviderDeliveryOperationalSummary,
+  claimCodeClipYouTubeReconciliationSubscription,
+  recordCodeClipYouTubeReconciliationDetectionObservation,
+  recordCodeClipYouTubeReconciliationWorkerHeartbeat,
+  releaseCodeClipYouTubeReconciliationSubscriptionClaim,
   ensureCodeClipXtraRedemptionsTable,
   saveCodeClipXtraRedemption,
   ensureCodeClipInteractionsTable,

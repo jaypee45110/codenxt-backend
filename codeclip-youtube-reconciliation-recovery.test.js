@@ -302,6 +302,7 @@ test("execute revalidates, uses the ordinary provider pipeline once, and maps re
   assert.equal(executed.status, "execution_completed");
   assert.equal(input.state.writes.length, 1);
   assert.equal(input.state.writes[0].entry.externalMessageId, EXTERNAL_MESSAGE_ID);
+  assert.equal(input.state.writes[0].dependencies.source, "operator_reconciliation_recovery");
   assert.equal(input.state.audit.map((entry) => entry.action).includes("execute_completed"), true);
 
   const replayInput = deps({ state: { delivery: { processingState: "completed", corePersistenceState: "committed", completionState: "completed", terminalState: true } } });

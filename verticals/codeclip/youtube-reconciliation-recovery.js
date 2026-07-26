@@ -521,7 +521,7 @@ async function executeCodeClipYouTubeReconciliationRecovery(input = {}, options 
       now: nowDate(options.now),
       rawBody,
       queryClient: options.queryClient,
-      dependencies: options,
+      dependencies: { ...options, source: "operator_reconciliation_recovery" },
     });
     if (result.status === "duplicate") {
       audit(options, "execute_idempotent_replay", {
