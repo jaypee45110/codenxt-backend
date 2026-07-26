@@ -564,6 +564,9 @@ app.use((error, req, res, next) => {
   const isCodeClipProviderBindingsRoute =
     req.path === "/internal/codeclip/provider-bindings" ||
     req.path.startsWith("/internal/codeclip/provider-bindings/");
+  const isCodeClipYouTubeReconciliationRecoveryRoute =
+    req.path === "/internal/codeclip/youtube-reconciliation/dry-run" ||
+    req.path === "/internal/codeclip/youtube-reconciliation/execute";
 
   if (
     isCodeClipProviderBindingsRoute &&
@@ -576,6 +579,19 @@ app.use((error, req, res, next) => {
         message: "Invalid provider binding request.",
         details: {},
       },
+    });
+  }
+
+  if (
+    isCodeClipYouTubeReconciliationRecoveryRoute &&
+    error?.type === "entity.parse.failed"
+  ) {
+    return res.status(400).set("Cache-Control", "no-store").json({
+      ok: false,
+      eligible: false,
+      status: "invalid_candidate",
+      code: "invalid_candidate",
+      error: "Invalid YouTube reconciliation recovery request",
     });
   }
 
@@ -8097,6 +8113,183 @@ app.get("/internal/codeclip/smoothoperator/provider-deliveries/:deliveryId", req
     return sendCodeClipSmoothOperatorProviderDeliveryError(res, {
       code: "delivery_unavailable",
     });
+  }
+});
+
+function mapCodeClipYouTubeReconciliationRecoveryStatus(status, ok = false) {
+  if (ok && status === "execution_completed") return 202;
+  if (ok && status === "eligible") return 200;
+  if (ok && status === "idempotent_replay") return 200;
+  if (
+    status === "invalid_candidate" ||
+    status === "identity_mismatch" ||
+    status === "explicit_confirmation_required" ||
+    status === "confirmation_required"
+  ) return 400;
+  if (
+    status === "already_delivered" ||
+    status === "in_flight" ||
+    status === "stale_confirmation" ||
+    status === "before_activation_boundary" ||
+    status === "subscription_pending" ||
+    status === "subscription_not_active" ||
+    status === "binding_not_active" ||
+    status === "subscription_scope_mismatch" ||
+    status === "unsupported_event_configuration"
+  ) return 409;
+  if (
+    status === "binding_not_found" ||
+    status === "subscription_not_found" ||
+    status === "event_not_found" ||
+    status === "video_not_found"
+  ) return 404;
+  return 503;
+}
+
+const CODECLIP_YOUTUBE_RECONCILIATION_DRY_RUN_KEYS = new Set([
+  "provider",
+  "channelId",
+  "videoId",
+  "eventCode",
+  "externalMessageId",
+]);
+
+const CODECLIP_YOUTUBE_RECONCILIATION_EXECUTE_KEYS = new Set([
+  ...CODECLIP_YOUTUBE_RECONCILIATION_DRY_RUN_KEYS,
+  "confirm",
+  "confirmationToken",
+]);
+
+function invalidCodeClipYouTubeReconciliationRecoveryRequest(res) {
+  return res.status(400).set("Cache-Control", "no-store").json({
+    ok: false,
+    eligible: false,
+    status: "invalid_candidate",
+    code: "invalid_candidate",
+    error: "Invalid YouTube reconciliation recovery request",
+  });
+}
+
+function isPlainRequestBody(body) {
+  return !!body && typeof body === "object" && !Array.isArray(body);
+}
+
+function validateCodeClipYouTubeReconciliationRecoveryBody(body, allowedKeys, mode) {
+  if (!isPlainRequestBody(body)) return false;
+  if (!Object.keys(body).every((key) => allowedKeys.has(key))) return false;
+
+  for (const key of CODECLIP_YOUTUBE_RECONCILIATION_DRY_RUN_KEYS) {
+    if (Object.hasOwn(body, key) && typeof body[key] !== "string") return false;
+  }
+
+  if (mode === "execute") {
+    if (Object.hasOwn(body, "confirm") && body.confirm !== true) return false;
+    if (Object.hasOwn(body, "confirmationToken") && typeof body.confirmationToken !== "string") {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function sendCodeClipYouTubeReconciliationRecoveryResult(res, result) {
+  const payload = result?.ok
+    ? result
+    : {
+        ...result,
+        code: result?.error?.code || result?.status || "execution_failed",
+      };
+  return res
+    .status(mapCodeClipYouTubeReconciliationRecoveryStatus(result?.status, result?.ok))
+    .set("Cache-Control", "no-store")
+    .json(payload);
+}
+
+function sendCodeClipYouTubeReconciliationRecoveryError(res, code = "execution_failed") {
+  return res
+    .status(mapCodeClipYouTubeReconciliationRecoveryStatus(code, false))
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      eligible: false,
+      status: code,
+      code,
+      error: "YouTube reconciliation recovery unavailable",
+    });
+}
+
+function setCodeClipYouTubeReconciliationRecoveryNoStore(_req, res, next) {
+  res.set("Cache-Control", "no-store");
+  return next();
+}
+
+app.use(
+  [
+    "/internal/codeclip/youtube-reconciliation/dry-run",
+    "/internal/codeclip/youtube-reconciliation/execute",
+  ],
+  setCodeClipYouTubeReconciliationRecoveryNoStore
+);
+
+app.post("/internal/codeclip/youtube-reconciliation/dry-run", requireCodeClipAdmin, async (req, res) => {
+  const route = "/internal/codeclip/youtube-reconciliation/dry-run";
+  const {
+    dryRunCodeClipYouTubeReconciliationRecovery,
+  } = require("./verticals/codeclip/youtube-reconciliation-recovery");
+
+  try {
+    if (!validateCodeClipYouTubeReconciliationRecoveryBody(
+      req.body,
+      CODECLIP_YOUTUBE_RECONCILIATION_DRY_RUN_KEYS,
+      "dry-run"
+    )) {
+      return invalidCodeClipYouTubeReconciliationRecoveryRequest(res);
+    }
+    const result = await dryRunCodeClipYouTubeReconciliationRecovery(req.body || {}, {
+      queryClient: database.pool,
+      adminSecret: process.env.CODECLIP_ADMIN_KEY,
+    });
+    return sendCodeClipYouTubeReconciliationRecoveryResult(res, result);
+  } catch (error) {
+    console.warn("codeClip YouTube reconciliation dry-run failed", {
+      vertical: "codeclip",
+      provider: "youtube",
+      route,
+      operationalEvent: "youtube_reconciliation_recovery_dry_run_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeReconciliationRecoveryError(res, "execution_failed");
+  }
+});
+
+app.post("/internal/codeclip/youtube-reconciliation/execute", requireCodeClipAdmin, async (req, res) => {
+  const route = "/internal/codeclip/youtube-reconciliation/execute";
+  const {
+    executeCodeClipYouTubeReconciliationRecovery,
+  } = require("./verticals/codeclip/youtube-reconciliation-recovery");
+
+  try {
+    if (!validateCodeClipYouTubeReconciliationRecoveryBody(
+      req.body,
+      CODECLIP_YOUTUBE_RECONCILIATION_EXECUTE_KEYS,
+      "execute"
+    )) {
+      return invalidCodeClipYouTubeReconciliationRecoveryRequest(res);
+    }
+    const result = await executeCodeClipYouTubeReconciliationRecovery(req.body || {}, {
+      queryClient: database.pool,
+      adminSecret: process.env.CODECLIP_ADMIN_KEY,
+    });
+    return sendCodeClipYouTubeReconciliationRecoveryResult(res, result);
+  } catch (error) {
+    console.warn("codeClip YouTube reconciliation execute failed", {
+      vertical: "codeclip",
+      provider: "youtube",
+      route,
+      operationalEvent: "youtube_reconciliation_recovery_execute_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipYouTubeReconciliationRecoveryError(res, "execution_failed");
   }
 });
 

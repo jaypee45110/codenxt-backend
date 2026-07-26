@@ -148,9 +148,9 @@ function notificationDeps(overrides = {}) {
       state.deliveryUpdates.push({ identity, updates });
       return { status: "updated", row: { ...identity, ...updates } };
     },
-    recordFirstActivatedVideo: async (input) => {
+    recordFirstActivatedVideo: async (callbackId, options = {}) => {
       state.calls.push("first_video");
-      state.firstActivations.push(input);
+      state.firstActivations.push({ callbackId, options });
       return state.subscription;
     },
     createProviderEventInteraction: (input) => {
@@ -224,7 +224,7 @@ async function postNotification(rawBody, overrides = {}) {
     },
     deps
   );
-  return { result, state: deps.state };
+  return { result, state: deps.state, queryClient: deps.queryClient };
 }
 
 test("YouTube Atom parser normalizes a single entry", () => {
@@ -378,13 +378,21 @@ test("YouTube notification persists provider-event runtime after activation reso
     published: "2026-07-18T09:15:00+00:00",
     updated: "2026-07-18T09:16:00+00:00",
   })]);
-  const { result, state } = await postNotification(xml);
+  const { result, state, queryClient } = await postNotification(xml);
   const interactionInput = state.providerEventInteractions[0];
   const persistenceCall = state.persistenceCalls[0];
   const terminalUpdate = state.deliveryUpdates[state.deliveryUpdates.length - 1].updates;
 
   assert.equal(result.httpStatus, 202);
   assert.equal(result.payload.status, "processed");
+  assert.deepEqual(state.firstActivations[0], {
+    callbackId: CALLBACK_ID,
+    options: {
+      videoId: "videoABC123",
+      activatedAt: NOW.toISOString(),
+      queryClient,
+    },
+  });
   assert.equal(state.providerEventInteractions.length, 1);
   assert.equal(interactionInput.event, state.event.raw_event);
   assert.equal(interactionInput.eventCode, state.binding.eventCode);

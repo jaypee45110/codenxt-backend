@@ -274,12 +274,12 @@ async function processEntry({
   }
 
   const activation = await recordFirstActivatedVideo(
+    subscription.callbackId,
     {
-      callbackId: subscription.callbackId,
       videoId: entry.videoId,
       activatedAt: now.toISOString(),
+      queryClient,
     },
-    { queryClient }
   );
   if (!activation) {
     return { status: "failed", code: "persistence_failed" };
@@ -514,7 +514,9 @@ async function processCodeClipYouTubeWebSubNotification(input = {}, options = {}
 module.exports = {
   YOUTUBE_WEBSUB_ALLOWED_CONTENT_TYPES,
   YOUTUBE_WEBSUB_MAX_BODY_BYTES,
+  buildEntryDeliveryIdentity,
   buildCodeClipYouTubeWebSubPayloadFingerprint,
   isSupportedYouTubeWebSubContentType,
+  processEntry,
   processCodeClipYouTubeWebSubNotification,
 };
