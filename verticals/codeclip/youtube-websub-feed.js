@@ -5,6 +5,8 @@ const {
 } = require("./provider-account-bindings");
 
 const YOUTUBE_WEBSUB_MAX_ENTRIES = 20;
+const YOUTUBE_ATOM_FEED_HOST = "www.youtube.com";
+const YOUTUBE_ATOM_FEED_PATH = "/feeds/videos.xml";
 
 class CodeClipYouTubeWebSubFeedError extends Error {
   constructor(code, message, details = {}) {
@@ -67,7 +69,7 @@ function readLinkHref(links, rel) {
   return "";
 }
 
-function normalizeHttpsUrl(value, fieldName) {
+function normalizeTopicUrl(value, fieldName) {
   const raw = asString(value);
   if (!raw) {
     throw feedError("INVALID_ATOM_FEED", `${fieldName} is required`, { fieldName });
@@ -80,9 +82,24 @@ function normalizeHttpsUrl(value, fieldName) {
     throw feedError("INVALID_ATOM_FEED", `${fieldName} must be a valid URL`, { fieldName });
   }
 
-  if (url.protocol !== "https:") {
+  if (url.protocol === "https:") {
+    return url.toString();
+  }
+
+  if (
+    url.protocol !== "http:" ||
+    url.hostname !== YOUTUBE_ATOM_FEED_HOST ||
+    url.pathname !== YOUTUBE_ATOM_FEED_PATH
+  ) {
     throw feedError("INVALID_ATOM_FEED", `${fieldName} must be an HTTPS URL`, { fieldName });
   }
+
+  const channelId = normalizeYouTubeChannelId(url.searchParams.get("channel_id") || "", "channelId");
+  url.protocol = "https:";
+  url.hostname = YOUTUBE_ATOM_FEED_HOST;
+  url.pathname = YOUTUBE_ATOM_FEED_PATH;
+  url.search = `?channel_id=${encodeURIComponent(channelId)}`;
+  url.hash = "";
 
   return url.toString();
 }
@@ -207,7 +224,7 @@ function parseCodeClipYouTubeWebSubAtomFeed(rawBody, options = {}) {
     throw feedError("INVALID_ATOM_FEED", "Atom feed is required");
   }
 
-  const topic = normalizeHttpsUrl(readLinkHref(readLocalName(feed, "link"), "self"), "topic");
+  const topic = normalizeTopicUrl(readLinkHref(readLocalName(feed, "link"), "self"), "topic");
   const channelId = normalizeYouTubeChannelId(readChannelIdFromTopic(topic), "channelId");
   const rawEntries = readLocalName(feed, "entry");
   const entries = rawEntries === undefined

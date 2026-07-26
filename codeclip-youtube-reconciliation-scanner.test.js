@@ -73,10 +73,11 @@ function upload(videoId, overrides = {}) {
   };
 }
 
-function xml(entries, channelId = CHANNEL_ID) {
+function xml(entries, channelId = CHANNEL_ID, options = {}) {
+  const topic = options.topic || `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
   return `<?xml version="1.0" encoding="UTF-8"?>
   <feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015">
-    <link rel="self" href="https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}"/>
+    <link rel="self" href="${topic}"/>
     <id>yt:channel:${channelId}</id>
     <updated>2026-07-25T08:48:00Z</updated>
     ${entries
@@ -278,6 +279,27 @@ test("source adapter malformed response handling is sanitized", async () => {
       ),
     /malformed/
   );
+});
+
+test("Atom adapter accepts canonical YouTube http self-link", async () => {
+  const result = await fetchAtomUploads(
+    { ...subscription(), eventCode: EVENT_CODE, channelId: CHANNEL_ID },
+    {
+      now: NOW,
+      fetchImpl: async () => ({
+        ok: true,
+        text: async () =>
+          xml([upload("atomok")], CHANNEL_ID, {
+            topic: `http://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`,
+          }),
+      }),
+    }
+  );
+
+  assert.equal(result.source, ATOM_SOURCE);
+  assert.equal(result.sourceIdentity, `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`);
+  assert.equal(result.uploads.length, 1);
+  assert.equal(result.uploads[0].videoId, "atomok");
 });
 
 test("Atom adapter validates channel identity", async () => {
