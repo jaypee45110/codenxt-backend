@@ -392,6 +392,7 @@ test("loadConfig rejects invalid numeric overrides", () => {
     "CODECLIP_MONITOR_POLL_INTERVAL_MS",
     "CODECLIP_MONITOR_TIMEOUT_MS",
     "CODECLIP_MONITOR_ALERT_COOLDOWN_MS",
+    "CODECLIP_MONITOR_ALERT_REMINDER_MS",
     "CODECLIP_MONITOR_HTTP_FAILURE_THRESHOLD",
   ];
 
@@ -400,6 +401,19 @@ test("loadConfig rejects invalid numeric overrides", () => {
       assert.throws(() => loadConfig(validEnv({ [key]: value })), /positive integer/);
     }
   }
+});
+
+test("loadConfig applies conservative alert reminder default and override", () => {
+  const defaults = loadConfig(validEnv());
+  assert.equal(defaults.alertReminderMs, 21600000);
+
+  const overridden = loadConfig(
+    validEnv({ CODECLIP_MONITOR_ALERT_REMINDER_MS: "7200000" })
+  );
+  assert.equal(overridden.alertReminderMs, 7200000);
+
+  const empty = loadConfig(validEnv({ CODECLIP_MONITOR_ALERT_REMINDER_MS: "" }));
+  assert.equal(empty.alertReminderMs, 21600000);
 });
 
 test("validateOperatorSummary accepts valid empty and fully populated summaries", () => {
@@ -633,19 +647,254 @@ test("processMeasurement applies transport threshold and resets counter on a val
   assert.equal(state.consecutiveTransportFailures, 1);
 
   const second = await processWithFetch(
-    { ok: false, httpStatus: 503, classification: "transport_error", reason: "http_503", summary: null },
+    { ok: false, httpStatus: null, classification: "transport_error", reason: "timeout", summary: null },
     state,
     config,
     [webhookResponse()],
     { clock, logger }
   );
   assert.equal(second.fetchFn.calls.length, 1);
-  assert.equal(state.alerts.has("transport_failure"), true);
-  assert.equal(state.alerts.get("transport_failure").reason, "http_503");
+  assert.equal(state.alerts.has("codeclip:transport_error:timeout:none"), true);
+  assert.equal(state.alerts.get("codeclip:transport_error:timeout:none").reason, "timeout");
 
   await processWithFetch(measurement(), state, config, [webhookResponse()], { clock, logger });
   assert.equal(state.consecutiveTransportFailures, 0);
-  assert.equal(state.alerts.has("transport_failure"), false);
+  assert.equal(state.consecutiveTransportFailureId, null);
+  assert.equal(state.alerts.has("codeclip:transport_error:timeout:none"), false);
+});
+
+test("processMeasurement sends first http_401 alert when threshold is reached", async () => {
+  const config = baseConfig({ httpFailureThreshold: 2 });
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+  const http401 = {
+    ok: false,
+    httpStatus: 401,
+    classification: "transport_error",
+    reason: "http_401",
+    summary: null,
+  };
+
+  const first = await processWithFetch(http401, state, config, [], { clock, logger });
+  assert.equal(first.fetchFn.calls.length, 0);
+  assert.equal(state.alerts.size, 0);
+
+  const second = await processWithFetch(http401, state, config, [webhookResponse()], {
+    clock,
+    logger,
+  });
+  assert.equal(second.fetchFn.calls.length, 1);
+  assert.equal(state.alerts.has("codeclip:transport_error:http_401:401"), true);
+  assert.equal(state.alerts.get("codeclip:transport_error:http_401:401").severity, "critical");
+});
+
+test("processMeasurement suppresses identical http_401 until explicit reminder period", async () => {
+  const config = baseConfig({
+    alertCooldownMs: 900000,
+    alertReminderMs: 21600000,
+    httpFailureThreshold: 2,
+  });
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+  const http401 = {
+    ok: false,
+    httpStatus: 401,
+    classification: "transport_error",
+    reason: "http_401",
+    summary: null,
+  };
+
+  await processWithFetch(http401, state, config, [], { clock, logger });
+  const firstAlert = await processWithFetch(http401, state, config, [webhookResponse()], {
+    clock,
+    logger,
+  });
+  assert.equal(firstAlert.fetchFn.calls.length, 1);
+  const firstSentAt = state.alerts.get("codeclip:transport_error:http_401:401").lastSentAt;
+
+  clock.advance(900000);
+  const afterCooldown = await processWithFetch(http401, state, config, [], { clock, logger });
+  assert.equal(afterCooldown.fetchFn.calls.length, 0);
+  assert.equal(state.alerts.get("codeclip:transport_error:http_401:401").lastSentAt, firstSentAt);
+
+  clock.advance(21600000 - 900000 - 1);
+  const beforeReminder = await processWithFetch(http401, state, config, [], { clock, logger });
+  assert.equal(beforeReminder.fetchFn.calls.length, 0);
+  assert.equal(state.alerts.get("codeclip:transport_error:http_401:401").lastSentAt, firstSentAt);
+
+  clock.advance(1);
+  const reminder = await processWithFetch(http401, state, config, [webhookResponse()], {
+    clock,
+    logger,
+  });
+  assert.equal(reminder.fetchFn.calls.length, 1);
+  assert.ok(state.alerts.get("codeclip:transport_error:http_401:401").lastSentAt > firstSentAt);
+});
+
+test("processMeasurement requires threshold for changed transport identity before replacing active alarm", async () => {
+  const config = baseConfig({
+    alertCooldownMs: 900000,
+    alertReminderMs: 21600000,
+    httpFailureThreshold: 2,
+  });
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+  const http401 = {
+    ok: false,
+    httpStatus: 401,
+    classification: "transport_error",
+    reason: "http_401",
+    summary: null,
+  };
+  const http500 = {
+    ok: false,
+    httpStatus: 500,
+    classification: "transport_error",
+    reason: "http_500",
+    summary: null,
+  };
+
+  await processWithFetch(http401, state, config, [], { clock, logger });
+  await processWithFetch(http401, state, config, [webhookResponse()], { clock, logger });
+  assert.equal(state.alerts.has("codeclip:transport_error:http_401:401"), true);
+  assert.equal(state.consecutiveTransportFailures, 2);
+  assert.equal(state.consecutiveTransportFailureId, "codeclip:transport_error:http_401:401");
+
+  clock.advance(60000);
+  const firstChanged = await processWithFetch(http500, state, config, [], {
+    clock,
+    logger,
+  });
+  assert.equal(firstChanged.fetchFn.calls.length, 0);
+  assert.equal(state.consecutiveTransportFailures, 1);
+  assert.equal(state.consecutiveTransportFailureId, "codeclip:transport_error:http_500:500");
+  assert.equal(state.alerts.has("codeclip:transport_error:http_401:401"), true);
+  assert.equal(state.alerts.has("codeclip:transport_error:http_500:500"), false);
+
+  clock.advance(60000);
+  const secondChanged = await processWithFetch(http500, state, config, [webhookResponse()], {
+    clock,
+    logger,
+  });
+  assert.equal(secondChanged.fetchFn.calls.length, 1);
+  assert.equal(state.consecutiveTransportFailures, 2);
+  assert.equal(state.consecutiveTransportFailureId, "codeclip:transport_error:http_500:500");
+  assert.equal(state.alerts.has("codeclip:transport_error:http_500:500"), true);
+  assert.equal(state.alerts.has("codeclip:transport_error:http_401:401"), false);
+});
+
+test("processMeasurement does not share threshold across alternating transport identities", async () => {
+  const config = baseConfig({ httpFailureThreshold: 2, alertReminderMs: 21600000 });
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+  const http401 = {
+    ok: false,
+    httpStatus: 401,
+    classification: "transport_error",
+    reason: "http_401",
+    summary: null,
+  };
+  const http500 = {
+    ok: false,
+    httpStatus: 500,
+    classification: "transport_error",
+    reason: "http_500",
+    summary: null,
+  };
+
+  for (const item of [http401, http500, http401, http500]) {
+    const result = await processWithFetch(item, state, config, [], { clock, logger });
+    assert.equal(result.fetchFn.calls.length, 0);
+    assert.equal(state.consecutiveTransportFailures, 1);
+  }
+
+  assert.equal(state.alerts.size, 0);
+  assert.equal(state.consecutiveTransportFailureId, "codeclip:transport_error:http_500:500");
+});
+
+test("processMeasurement resets transport counter identity on healthy measurement", async () => {
+  const config = baseConfig({ httpFailureThreshold: 2, alertReminderMs: 21600000 });
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+  const http401 = {
+    ok: false,
+    httpStatus: 401,
+    classification: "transport_error",
+    reason: "http_401",
+    summary: null,
+  };
+
+  await processWithFetch(http401, state, config, [], { clock, logger });
+  assert.equal(state.consecutiveTransportFailures, 1);
+  assert.equal(state.consecutiveTransportFailureId, "codeclip:transport_error:http_401:401");
+
+  await processWithFetch(measurement(), state, config, [], { clock, logger });
+  assert.equal(state.consecutiveTransportFailures, 0);
+  assert.equal(state.consecutiveTransportFailureId, null);
+});
+
+test("processMeasurement sends one transport recovery, then allows same failure after recovery", async () => {
+  const config = baseConfig({ httpFailureThreshold: 2, alertReminderMs: 21600000 });
+  const state = createMonitorState();
+  const clock = createClock();
+  const logger = createLogger();
+  const http401 = {
+    ok: false,
+    httpStatus: 401,
+    classification: "transport_error",
+    reason: "http_401",
+    summary: null,
+  };
+
+  await processWithFetch(http401, state, config, [], { clock, logger });
+  await processWithFetch(http401, state, config, [webhookResponse()], { clock, logger });
+
+  const recovered = await processWithFetch(measurement(), state, config, [webhookResponse()], {
+    clock,
+    logger,
+  });
+  assert.equal(recovered.fetchFn.calls.length, 1);
+  assert.match(JSON.parse(recovered.fetchFn.calls[0][1].body).text, /reason=transport_http_401_recovered/);
+  assert.equal(state.alerts.size, 0);
+
+  const stillOk = await processWithFetch(measurement(), state, config, [], { clock, logger });
+  assert.equal(stillOk.fetchFn.calls.length, 0);
+
+  await processWithFetch(http401, state, config, [], { clock, logger });
+  const newFailure = await processWithFetch(http401, state, config, [webhookResponse()], {
+    clock,
+    logger,
+  });
+  assert.equal(newFailure.fetchFn.calls.length, 1);
+});
+
+test("createMonitorState documents restart limitation by starting with empty in-memory alerts", async () => {
+  const config = baseConfig({ httpFailureThreshold: 2, alertReminderMs: 21600000 });
+  const http401 = {
+    ok: false,
+    httpStatus: 401,
+    classification: "transport_error",
+    reason: "http_401",
+    summary: null,
+  };
+
+  const beforeRestart = createMonitorState();
+  await processWithFetch(http401, beforeRestart, config, [], { clock: createClock(), logger: createLogger() });
+  await processWithFetch(http401, beforeRestart, config, [webhookResponse()], {
+    clock: createClock(),
+    logger: createLogger(),
+  });
+  assert.equal(beforeRestart.alerts.size, 1);
+
+  const afterRestart = createMonitorState();
+  assert.equal(afterRestart.alerts.size, 0);
+  assert.equal(afterRestart.consecutiveTransportFailures, 0);
+  assert.equal(afterRestart.consecutiveTransportFailureId, null);
 });
 
 test("processMeasurement sends invalid_json and invalid_contract alerts immediately", async () => {

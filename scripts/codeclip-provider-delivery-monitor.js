@@ -15,6 +15,7 @@ const DEFAULTS = Object.freeze({
   pollIntervalMs: 60000,
   timeoutMs: 5000,
   alertCooldownMs: 900000,
+  alertReminderMs: 21600000,
   httpFailureThreshold: 2,
 });
 
@@ -177,6 +178,11 @@ function loadConfig(env = process.env) {
       env.CODECLIP_MONITOR_ALERT_COOLDOWN_MS,
       "CODECLIP_MONITOR_ALERT_COOLDOWN_MS",
       DEFAULTS.alertCooldownMs
+    ),
+    alertReminderMs: parsePositiveInteger(
+      env.CODECLIP_MONITOR_ALERT_REMINDER_MS,
+      "CODECLIP_MONITOR_ALERT_REMINDER_MS",
+      DEFAULTS.alertReminderMs
     ),
     httpFailureThreshold: parsePositiveInteger(
       env.CODECLIP_MONITOR_HTTP_FAILURE_THRESHOLD,
@@ -537,6 +543,37 @@ async function sendNotification(config, message, options = {}) {
   return sendWebhookAlert(config, message, options);
 }
 
+function normalizeAlarmIdentityPart(value) {
+  return (
+    String(value || "none")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_:-]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "") || "none"
+  );
+}
+
+function createTransportAlarmId(measurement) {
+  const httpStatus = Number.isInteger(measurement.httpStatus)
+    ? measurement.httpStatus
+    : "none";
+
+  return [
+    "codeclip",
+    normalizeAlarmIdentityPart(measurement.classification),
+    normalizeAlarmIdentityPart(measurement.reason || "transport_failure"),
+    normalizeAlarmIdentityPart(httpStatus),
+  ].join(":");
+}
+
+function isTransportAlarmId(id) {
+  return (
+    id === "transport_failure" ||
+    String(id || "").startsWith("codeclip:transport_error:")
+  );
+}
+
 function shouldLogNotificationDeliveryFailure(state, nowMs, config) {
   if (
     state.lastNotificationFailureLoggedAt !== null &&
@@ -620,9 +657,10 @@ function getActiveReasons(measurement, state, config) {
   ) {
     return [
       {
-        id: "transport_failure",
+        id: createTransportAlarmId(measurement),
         severity: "critical",
         reason: measurement.reason || "transport_failure",
+        reminderMs: config.alertReminderMs,
       },
     ];
   }
@@ -630,7 +668,7 @@ function getActiveReasons(measurement, state, config) {
   return [];
 }
 
-function getRecoveryReason(alarmId) {
+function getRecoveryReason(alarmId, previous = {}) {
   switch (alarmId) {
     case "committed_incomplete":
       return "committed_incomplete_recovered";
@@ -643,6 +681,9 @@ function getRecoveryReason(alarmId) {
     case "transport_failure":
       return "transport_recovered";
     default:
+      if (isTransportAlarmId(alarmId)) {
+        return `transport_${normalizeAlarmIdentityPart(previous.reason || "failure")}_recovered`;
+      }
       throw new Error("Unknown recovery alarm id");
   }
 }
@@ -656,9 +697,19 @@ async function processMeasurement(measurement, state, config, options = {}) {
   const timers = options.timers || globalThis;
 
   if (measurement.classification === "transport_error") {
-    state.consecutiveTransportFailures += 1;
+    const transportAlarmId = createTransportAlarmId(measurement);
+    if (state.consecutiveTransportFailureId === transportAlarmId) {
+      state.consecutiveTransportFailures += 1;
+    } else {
+      state.consecutiveTransportFailureId = transportAlarmId;
+      state.consecutiveTransportFailures = 1;
+    }
   } else if (measurement.ok) {
     state.consecutiveTransportFailures = 0;
+    state.consecutiveTransportFailureId = null;
+  } else {
+    state.consecutiveTransportFailures = 0;
+    state.consecutiveTransportFailureId = null;
   }
 
   const activeReasons = getActiveReasons(measurement, state, config);
@@ -674,8 +725,9 @@ async function processMeasurement(measurement, state, config, options = {}) {
 
   for (const active of activeReasons) {
     const previous = state.alerts.get(active.id);
+    const reminderMs = active.reminderMs || config.alertCooldownMs;
     const shouldSend =
-      !previous || now.getTime() - previous.lastSentAt >= config.alertCooldownMs;
+      !previous || now.getTime() - previous.lastSentAt >= reminderMs;
 
     if (!shouldSend) continue;
 
@@ -703,6 +755,14 @@ async function processMeasurement(measurement, state, config, options = {}) {
       severity: active.severity,
       reason: active.reason,
     });
+
+    if (isTransportAlarmId(active.id)) {
+      for (const id of Array.from(state.alerts.keys())) {
+        if (id !== active.id && isTransportAlarmId(id)) {
+          state.alerts.delete(id);
+        }
+      }
+    }
   }
 
   if (!measurement.ok) return;
@@ -712,7 +772,7 @@ async function processMeasurement(measurement, state, config, options = {}) {
 
     const message = createAlertMessage({
       severity: "recovery",
-      reason: getRecoveryReason(id),
+      reason: getRecoveryReason(id, previous),
       timestamp,
       httpStatus: measurement.httpStatus,
       summary: measurement.summary,
@@ -735,6 +795,7 @@ async function processMeasurement(measurement, state, config, options = {}) {
 function createMonitorState() {
   return {
     consecutiveTransportFailures: 0,
+    consecutiveTransportFailureId: null,
     lastNotificationFailureLoggedAt: null,
     alerts: new Map(),
   };
@@ -801,6 +862,7 @@ function createCodeClipProviderDeliveryMonitor(config, options = {}) {
       pollIntervalMs: config.pollIntervalMs,
       timeoutMs: config.timeoutMs,
       alertCooldownMs: config.alertCooldownMs,
+      alertReminderMs: config.alertReminderMs,
       httpFailureThreshold: config.httpFailureThreshold,
     });
 
