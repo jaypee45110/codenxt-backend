@@ -60,6 +60,10 @@ async function runCli({
   stdout = process.stdout,
   queryClient = database.pool,
   logger = createLogger(),
+  workerState = createCodeClipYouTubeReconciliationWorkerState(),
+  runWorkerOnce = runCodeClipYouTubeReconciliationWorkerOnce,
+  sleep: sleepFn = sleep,
+  randomJitterMs: jitterFn = randomJitterMs,
 } = {}) {
   const args = parseArgs(argv);
   if (args.help) {
@@ -67,7 +71,6 @@ async function runCli({
     return { status: "help" };
   }
   const config = buildRuntimeConfig(env, args);
-  const workerState = createCodeClipYouTubeReconciliationWorkerState();
   const shutdown = () => {
     workerState.shuttingDown = true;
   };
@@ -75,7 +78,7 @@ async function runCli({
   process.once("SIGINT", shutdown);
 
   async function runOnce() {
-    const report = await runCodeClipYouTubeReconciliationWorkerOnce({
+    const report = await runWorkerOnce({
       config,
       dryRun: config.dryRun,
       queryClient,
@@ -87,11 +90,12 @@ async function runCli({
     return report;
   }
 
-  if (args.once || config.dryRun) return runOnce();
+  if (args.once) return runOnce();
   while (!workerState.shuttingDown) {
-    await sleep(randomJitterMs(config.jitterMs));
+    await sleepFn(jitterFn(config.jitterMs));
+    if (workerState.shuttingDown) break;
     await runOnce();
-    await sleep(config.intervalMs);
+    await sleepFn(config.intervalMs);
   }
   return { status: "shutdown" };
 }
