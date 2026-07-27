@@ -3,9 +3,10 @@ const crypto = require("node:crypto");
 const database = require("../../db");
 const {
   ATOM_SOURCE,
+  DATA_API_SOURCE,
   buildDeliveryIdentity,
+  createUploadSourceAdapter,
   discoverEligibleTargets,
-  fetchAtomUploads,
   normalizeUploadEntry,
 } = require("./youtube-reconciliation-scanner");
 const {
@@ -13,6 +14,7 @@ const {
 } = require("./youtube-websub-notification");
 
 const ATOM_RECONCILIATION_SOURCE = "atom_reconciliation";
+const DATA_API_POLLING_SOURCE = "data_api_polling";
 const WORKER_VERSION = 1;
 
 const DEFAULTS = Object.freeze({
@@ -25,6 +27,7 @@ const DEFAULTS = Object.freeze({
   globalConcurrency: 2,
   claimLeaseMs: 5 * 60 * 1000,
   dryRun: false,
+  uploadSource: ATOM_SOURCE,
 });
 
 function parseBoundedInteger(value, name, defaultValue, { min, max }) {
@@ -42,6 +45,12 @@ function parseBoolean(value, defaultValue = false) {
   if (["1", "true", "yes"].includes(normalized)) return true;
   if (["0", "false", "no"].includes(normalized)) return false;
   throw new Error("dryRun must be a boolean");
+}
+
+function parseUploadSource(value, defaultValue = ATOM_SOURCE) {
+  const normalized = String(value || defaultValue).trim().toLowerCase();
+  if (normalized === ATOM_SOURCE || normalized === DATA_API_SOURCE) return normalized;
+  throw new Error("unsupported YouTube reconciliation detection source");
 }
 
 function loadCodeClipYouTubeReconciliationWorkerConfig(env = process.env) {
@@ -95,6 +104,10 @@ function loadCodeClipYouTubeReconciliationWorkerConfig(env = process.env) {
       { min: 60_000, max: 60 * 60 * 1000 }
     ),
     dryRun: parseBoolean(env.CODECLIP_YOUTUBE_RECONCILIATION_DRY_RUN, DEFAULTS.dryRun),
+    uploadSource: parseUploadSource(
+      env.CODECLIP_YOUTUBE_RECONCILIATION_SOURCE,
+      DEFAULTS.uploadSource
+    ),
   };
 }
 
@@ -189,15 +202,27 @@ function normalizeProcessResult(result = {}) {
   return "terminal_failed";
 }
 
+function initialDeliverySourceForDetectionSource(detectionSource) {
+  if (detectionSource === ATOM_SOURCE) {
+    return ATOM_RECONCILIATION_SOURCE;
+  }
+  if (detectionSource === DATA_API_SOURCE) {
+    return DATA_API_POLLING_SOURCE;
+  }
+  throw new Error("unsupported YouTube reconciliation detection source");
+}
+
 async function processCandidate({ target, candidate, input, report, now }) {
   const summary = report.summary;
+  const detectionSource = parseUploadSource(candidate.source, input.config.uploadSource);
+  const initialDeliverySource = initialDeliverySourceForDetectionSource(detectionSource);
   const delivery = await input.getDeliveryByIdentity(buildDeliveryIdentity(candidate), input.queryClient);
   const state = deliveryState(delivery);
   if (state === "existing_completed") {
     summary.existingCompleted += 1;
     const deliveryReport = {
       ...sanitizeWorkerLogEvent(candidate),
-      detectionSource: ATOM_SOURCE,
+      detectionSource,
       initialDeliverySource: delivery.initialDeliverySource || "websub",
       outcome: "existing_completed",
     };
@@ -209,7 +234,7 @@ async function processCandidate({ target, candidate, input, report, now }) {
     summary.existingInFlight += 1;
     const deliveryReport = {
       ...sanitizeWorkerLogEvent(candidate),
-      detectionSource: ATOM_SOURCE,
+      detectionSource,
       initialDeliverySource: delivery.initialDeliverySource || null,
       outcome: "existing_in_flight",
     };
@@ -221,8 +246,8 @@ async function processCandidate({ target, candidate, input, report, now }) {
   if (report.mode === "dry_run") {
     report.deliveries.push({
       ...sanitizeWorkerLogEvent(candidate),
-      detectionSource: ATOM_SOURCE,
-      initialDeliverySource: ATOM_RECONCILIATION_SOURCE,
+      detectionSource,
+      initialDeliverySource,
       outcome: "eligible_dry_run",
     });
     return;
@@ -233,9 +258,9 @@ async function processCandidate({ target, candidate, input, report, now }) {
     event: target.event,
     entry: candidate,
     now,
-    rawBody: Buffer.from(JSON.stringify({ source: ATOM_RECONCILIATION_SOURCE }), "utf8"),
+    rawBody: Buffer.from(JSON.stringify({ source: initialDeliverySource }), "utf8"),
     queryClient: input.queryClient,
-    dependencies: { ...input, source: ATOM_RECONCILIATION_SOURCE },
+    dependencies: { ...input, source: initialDeliverySource },
   });
   const outcome = normalizeProcessResult(result);
   if (outcome === "completed") summary.processedCompleted += 1;
@@ -243,8 +268,8 @@ async function processCandidate({ target, candidate, input, report, now }) {
   else summary.processedTerminalFailed += 1;
   const deliveryReport = {
     ...sanitizeWorkerLogEvent(candidate),
-    detectionSource: ATOM_SOURCE,
-    initialDeliverySource: ATOM_RECONCILIATION_SOURCE,
+    detectionSource,
+    initialDeliverySource,
     outcome,
   };
   report.deliveries.push(deliveryReport);
@@ -261,7 +286,7 @@ async function recordDetectionObservation(input, candidate, deliveryReport, now,
       eventCode: candidate.eventCode,
       channelFingerprint: deliveryReport.channelFingerprint,
       videoId: candidate.videoId,
-      detectionSource: ATOM_SOURCE,
+      detectionSource: deliveryReport.detectionSource,
       outcome: deliveryReport.outcome,
       initialDeliverySource: deliveryReport.initialDeliverySource || null,
       observedAt: now.toISOString(),
@@ -328,6 +353,7 @@ async function processTarget(target, input, report, now) {
       report.errors.push({ code: "source_unavailable", message: "Upload source is unavailable" });
       return;
     }
+    const detectionSource = parseUploadSource(sourceResult.source, config.uploadSource);
     const uploads = [...(sourceResult.uploads || [])]
       .slice(0, config.maxEntriesPerSubscription)
       .sort((a, b) => Date.parse(a.publishedAt) - Date.parse(b.publishedAt));
@@ -335,7 +361,12 @@ async function processTarget(target, input, report, now) {
       summary.uploadsExamined += 1;
       let candidate;
       try {
-        candidate = normalizeUploadEntry(entry, target, ATOM_SOURCE, sourceResult.observedAt || now.toISOString());
+        candidate = normalizeUploadEntry(
+          entry,
+          target,
+          detectionSource,
+          sourceResult.observedAt || now.toISOString()
+        );
       } catch {
         summary.invalid += 1;
         continue;
@@ -454,7 +485,7 @@ async function processCodeClipYouTubeReconciliationRun(input = {}) {
       await processTarget(enriched, {
         queryClient: input.queryClient,
         config,
-        fetchUploads: input.fetchUploads || ((scanTarget, options) => fetchAtomUploads(scanTarget, options)),
+        fetchUploads: input.fetchUploads || createUploadSourceAdapter(config.uploadSource, input).fetchUploads,
         getDeliveryByIdentity: input.getDeliveryByIdentity || database.getCodeClipProviderDeliveryByIdentity,
         processEntry: input.processEntry || processCodeClipYouTubeWebSubEntry,
         claimSubscription: input.claimSubscription || database.claimCodeClipYouTubeReconciliationSubscription,
@@ -494,6 +525,7 @@ async function runCodeClipYouTubeReconciliationWorkerOnce(input = {}) {
 
 module.exports = {
   ATOM_RECONCILIATION_SOURCE,
+  DATA_API_POLLING_SOURCE,
   DEFAULTS,
   WORKER_VERSION,
   createCodeClipYouTubeReconciliationWorkerState,

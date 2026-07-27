@@ -22,6 +22,7 @@ const YOUTUBE_CHANNEL = "youtube";
 const PUBLISHED_VIDEO_EVENT = "published_video";
 const ATOM_SOURCE = "atom";
 const DATA_API_SOURCE = "data_api";
+const YOUTUBE_DATA_API_BASE_URL = "https://www.googleapis.com/youtube/v3";
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const DEFAULT_LOOKBACK_HOURS = 72;
@@ -129,6 +130,26 @@ function normalizeOptionalText(value, fieldName, maxLength = 180) {
 
 function normalizeYouTubeChannelId(value) {
   return normalizeCodeClipProviderAccountId(YOUTUBE_PROVIDER, value);
+}
+
+function normalizeYouTubeVideoId(value) {
+  const normalized = normalizeOptionalText(value, "videoId", 80);
+  if (!normalized || !/^[A-Za-z0-9_-]{6,80}$/.test(normalized)) {
+    throw scannerError("source_malformed_response", "YouTube Data API video id is malformed", {
+      fieldName: "videoId",
+    });
+  }
+  return normalized;
+}
+
+function normalizeDataApiTimestamp(value, fieldName) {
+  const date = new Date(String(value || "").trim());
+  if (!Number.isFinite(date.getTime())) {
+    throw scannerError("source_malformed_response", "YouTube Data API timestamp is malformed", {
+      fieldName,
+    });
+  }
+  return date.toISOString();
 }
 
 function canonicalUrl(value) {
@@ -285,8 +306,161 @@ async function fetchAtomUploads(target, options = {}) {
   };
 }
 
-async function fetchDataApiUploads() {
-  throw scannerError("source_unavailable", "data api source unavailable");
+function normalizeDataApiKey(options = {}) {
+  const value =
+    options.apiKey ||
+    options.api_key ||
+    options.env?.CODECLIP_YOUTUBE_DATA_API_KEY ||
+    process.env.CODECLIP_YOUTUBE_DATA_API_KEY;
+  if (typeof value !== "string" || !value.trim()) {
+    throw scannerError("source_unavailable", "YouTube Data API key is not configured", {
+      reason: "api_key_missing",
+    });
+  }
+  const normalized = value.trim();
+  if (/[\u0000-\u001f\u007f]/.test(normalized) || normalized.length > 256) {
+    throw scannerError("source_unavailable", "YouTube Data API key is invalid", {
+      reason: "api_key_invalid",
+    });
+  }
+  return normalized;
+}
+
+function buildDataApiUrl(path, params = {}, options = {}) {
+  const baseUrl = String(options.baseUrl || YOUTUBE_DATA_API_BASE_URL).trim();
+  const url = new URL(`${baseUrl.replace(/\/+$/, "")}/${String(path || "").replace(/^\/+/, "")}`);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") {
+      url.searchParams.set(key, String(value));
+    }
+  }
+  url.searchParams.set("key", normalizeDataApiKey(options));
+  return url.toString();
+}
+
+async function fetchDataApiJson(path, params, options = {}) {
+  const fetchImpl = options.fetchImpl || global.fetch;
+  if (typeof fetchImpl !== "function") {
+    throw scannerError("source_unavailable", "fetch unavailable");
+  }
+  const url = buildDataApiUrl(path, params, options);
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+  } catch {
+    throw scannerError("source_unavailable", "YouTube Data API request failed");
+  }
+  if (!response || !response.ok) {
+    throw scannerError("source_unavailable", "YouTube Data API request failed", {
+      httpStatus: response?.status || null,
+    });
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw scannerError("source_malformed_response", "YouTube Data API response is malformed");
+  }
+}
+
+function readDataApiUploadsPlaylistId(body, channelId) {
+  const items = Array.isArray(body?.items) ? body.items : null;
+  if (!items || items.length !== 1) {
+    throw scannerError("source_identity_mismatch", "YouTube Data API channel response is ambiguous");
+  }
+  const item = items[0];
+  if (item?.id !== channelId) {
+    throw scannerError("source_identity_mismatch", "YouTube Data API channel identity mismatch");
+  }
+  const uploadsPlaylistId = String(item?.contentDetails?.relatedPlaylists?.uploads || "").trim();
+  if (!uploadsPlaylistId) {
+    throw scannerError("source_malformed_response", "YouTube Data API uploads playlist missing", {
+      reason: "uploads_playlist_missing",
+    });
+  }
+  return uploadsPlaylistId;
+}
+
+function normalizeDataApiPlaylistItem(item, channelId) {
+  const rawPrivacyStatus = item?.status?.privacyStatus;
+  if (typeof rawPrivacyStatus !== "string" || !rawPrivacyStatus.trim()) {
+    throw scannerError("source_malformed_response", "YouTube Data API privacy status is malformed", {
+      fieldName: "privacyStatus",
+    });
+  }
+  const privacyStatus = rawPrivacyStatus.trim().toLowerCase();
+  if (privacyStatus !== "public") return null;
+
+  const ownerChannelId = String(
+    item?.snippet?.videoOwnerChannelId || item?.snippet?.channelId || ""
+  ).trim();
+  if (ownerChannelId !== channelId) {
+    throw scannerError("source_identity_mismatch", "YouTube Data API playlist item owner mismatch");
+  }
+
+  const videoId = normalizeYouTubeVideoId(
+    item?.contentDetails?.videoId || item?.snippet?.resourceId?.videoId
+  );
+  const publishedAt = normalizeDataApiTimestamp(
+    item?.contentDetails?.videoPublishedAt || item?.snippet?.publishedAt,
+    "publishedAt"
+  );
+  const updatedAt = normalizeDataApiTimestamp(
+    item?.snippet?.publishedAt || item?.contentDetails?.videoPublishedAt,
+    "updatedAt"
+  );
+
+  return {
+    eventType: PUBLISHED_VIDEO_EVENT,
+    activationIdentity: `youtube:${channelId}:${videoId}:published`,
+    externalMessageId: `youtube:${channelId}:${videoId}:published`,
+    videoId,
+    channelId,
+    title:
+      typeof item?.snippet?.title === "string" && item.snippet.title.trim()
+        ? item.snippet.title.trim()
+        : null,
+    publishedAt,
+    updatedAt,
+    alternateUrl: `https://www.youtube.com/watch?v=${videoId}`,
+  };
+}
+
+async function fetchDataApiUploads(target, options = {}) {
+  const channelId = normalizeYouTubeChannelId(target.channelId || target.providerAccountId);
+  const limit = normalizePositiveInteger(options.limit, "limit", 10, MAX_LIMIT);
+  const channelBody = await fetchDataApiJson(
+    "channels",
+    { part: "contentDetails", id: channelId },
+    options
+  );
+  const uploadsPlaylistId = readDataApiUploadsPlaylistId(channelBody, channelId);
+  const playlistBody = await fetchDataApiJson(
+    "playlistItems",
+    {
+      part: "snippet,contentDetails,status",
+      playlistId: uploadsPlaylistId,
+      maxResults: limit,
+    },
+    options
+  );
+  const items = Array.isArray(playlistBody?.items) ? playlistBody.items : null;
+  if (!items) {
+    throw scannerError("source_malformed_response", "YouTube Data API playlist response is malformed");
+  }
+  const uploads = [];
+  for (const item of items) {
+    const upload = normalizeDataApiPlaylistItem(item, channelId);
+    if (upload) uploads.push(upload);
+  }
+  return {
+    source: DATA_API_SOURCE,
+    sourceIdentity: uploadsPlaylistId,
+    observedAt: options.sourceObservedAt || isoNow(options.now),
+    uploads,
+  };
 }
 
 function createUploadSourceAdapter(source, options = {}) {
@@ -684,6 +858,7 @@ module.exports = {
   createUploadSourceAdapter,
   discoverEligibleTargets,
   fetchAtomUploads,
+  fetchDataApiUploads,
   formatHumanReport,
   normalizeUploadEntry,
   sanitizeOperationalError,

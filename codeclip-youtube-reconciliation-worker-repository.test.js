@@ -46,6 +46,19 @@ function createClaimClient() {
         return { rows: [current] };
       }
       if (/INSERT INTO codeclip_youtube_reconciliation_detection_observations/.test(sql)) {
+        if (!["atom", "data_api"].includes(params[3])) {
+          const error = new Error("detection_source check violation");
+          error.code = "23514";
+          throw error;
+        }
+        if (
+          params[5] !== null &&
+          !["websub", "operator_reconciliation_recovery", "atom_reconciliation", "data_api_polling"].includes(params[5])
+        ) {
+          const error = new Error("initial_delivery_source check violation");
+          error.code = "23514";
+          throw error;
+        }
         return { rows: [{ id: "1", created_at: params[5] || "2026-07-26T12:00:00.000Z" }] };
       }
       if (/INSERT INTO codeclip_youtube_reconciliation_worker_heartbeats/.test(sql)) {
@@ -72,9 +85,14 @@ test("YouTube reconciliation observability schema stores detection observations 
   await ensureCodeClipYouTubeReconciliationObservabilityTables(client);
   assert.match(client.calls[0].sql, /CREATE TABLE IF NOT EXISTS codeclip_youtube_reconciliation_detection_observations/);
   assert.match(client.calls[0].sql, /channel_fingerprint TEXT NOT NULL/);
-  assert.match(client.calls[1].sql, /codeclip_youtube_reconciliation_detection_observations_event_idx/);
-  assert.match(client.calls[2].sql, /CREATE TABLE IF NOT EXISTS codeclip_youtube_reconciliation_worker_heartbeats/);
-  assert.match(client.calls[2].sql, /worker_id TEXT PRIMARY KEY/);
+  assert.match(client.calls[0].sql, /CHECK \(detection_source IN \('atom', 'data_api'\)\)/);
+  assert.match(client.calls[0].sql, /initial_delivery_source TEXT/);
+  assert.match(client.calls[0].sql, /CHECK \(initial_delivery_source IS NULL OR initial_delivery_source IN \('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling'\)\)/);
+  assert.match(client.calls[1].sql, /codeclip_ytr_detection_source_chk/);
+  assert.match(client.calls[1].sql, /codeclip_ytr_initial_delivery_source_chk/);
+  assert.match(client.calls[2].sql, /codeclip_youtube_reconciliation_detection_observations_event_idx/);
+  assert.match(client.calls[3].sql, /CREATE TABLE IF NOT EXISTS codeclip_youtube_reconciliation_worker_heartbeats/);
+  assert.match(client.calls[3].sql, /worker_id TEXT PRIMARY KEY/);
 
   const observation = await recordCodeClipYouTubeReconciliationDetectionObservation({
     eventCode: "CC-YT-WORKER",
@@ -97,6 +115,55 @@ test("YouTube reconciliation observability schema stores detection observations 
   assert.equal(observation.status, "recorded");
   assert.equal(heartbeat.status, "recorded");
   assert.equal(JSON.stringify(client.calls).includes("UCvwiNkgNuGuizjo33NZhzPg"), false);
+});
+
+test("YouTube reconciliation observations accept truthful Data API detection and reject unknown sources", async () => {
+  const client = createClaimClient();
+  const atom = await recordCodeClipYouTubeReconciliationDetectionObservation({
+    eventCode: "CC-YT-WORKER",
+    channelFingerprint: "cb0961933f4f",
+    videoId: "atom123",
+    detectionSource: "atom",
+    outcome: "existing_completed",
+    initialDeliverySource: "atom_reconciliation",
+    observedAt: "2026-07-26T12:00:00.000Z",
+    queryClient: client,
+  });
+  const dataApi = await recordCodeClipYouTubeReconciliationDetectionObservation({
+    eventCode: "CC-YT-WORKER",
+    channelFingerprint: "cb0961933f4f",
+    videoId: "data123",
+    detectionSource: "data_api",
+    outcome: "processed_completed",
+    initialDeliverySource: "data_api_polling",
+    observedAt: "2026-07-26T12:01:00.000Z",
+    queryClient: client,
+  });
+  const invalidDetection = await recordCodeClipYouTubeReconciliationDetectionObservation({
+    eventCode: "CC-YT-WORKER",
+    channelFingerprint: "cb0961933f4f",
+    videoId: "bad123",
+    detectionSource: "manual",
+    outcome: "processed_completed",
+    initialDeliverySource: "data_api_polling",
+    observedAt: "2026-07-26T12:02:00.000Z",
+    queryClient: client,
+  });
+  const invalidInitial = await recordCodeClipYouTubeReconciliationDetectionObservation({
+    eventCode: "CC-YT-WORKER",
+    channelFingerprint: "cb0961933f4f",
+    videoId: "bad124",
+    detectionSource: "data_api",
+    outcome: "processed_completed",
+    initialDeliverySource: "bad_source",
+    observedAt: "2026-07-26T12:03:00.000Z",
+    queryClient: client,
+  });
+
+  assert.equal(atom.status, "recorded");
+  assert.equal(dataApi.status, "recorded");
+  assert.equal(invalidDetection.status, "failed");
+  assert.equal(invalidInitial.status, "failed");
 });
 
 test("YouTube reconciliation claim is atomic, blocks active contenders, allows stale takeover, and releases by owner only", async () => {

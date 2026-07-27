@@ -3,6 +3,7 @@ const test = require("node:test");
 
 const {
   ATOM_RECONCILIATION_SOURCE,
+  DATA_API_POLLING_SOURCE,
   createCodeClipYouTubeReconciliationWorkerState,
   loadCodeClipYouTubeReconciliationWorkerConfig,
   processCodeClipYouTubeReconciliationRun,
@@ -266,11 +267,21 @@ test("worker config uses safe defaults and rejects unsafe values", () => {
   assert.equal(config.maxAutoProcessAgeMs, 86400000);
   assert.equal(config.lookbackHours, 72);
   assert.equal(config.globalConcurrency, 2);
+  assert.equal(config.uploadSource, "atom");
+  assert.equal(loadCodeClipYouTubeReconciliationWorkerConfig({
+    CODECLIP_YOUTUBE_RECONCILIATION_SOURCE: "data_api",
+  }).uploadSource, "data_api");
   assert.throws(
     () => loadCodeClipYouTubeReconciliationWorkerConfig({
       CODECLIP_YOUTUBE_RECONCILIATION_INTERVAL_MS: "10",
     }),
     /interval/
+  );
+  assert.throws(
+    () => loadCodeClipYouTubeReconciliationWorkerConfig({
+      CODECLIP_YOUTUBE_RECONCILIATION_SOURCE: "manual",
+    }),
+    /unsupported YouTube reconciliation detection source/
   );
 });
 
@@ -286,6 +297,71 @@ test("eligible active binding and verified subscription processes one missing up
   assert.equal(state.processEntryCalls[0].dependencies.source, ATOM_RECONCILIATION_SOURCE);
   assert.equal(state.processEntryCalls[0].entry.videoId, "miss01");
   assert.equal(state.releaseCalls.length, 1);
+});
+
+test("Data API source uses the ordinary processEntry pipeline with Data API initial source", async () => {
+  const { state, input } = deps({
+    input: {
+      config: {
+        intervalMs: 300000,
+        jitterMs: 0,
+        graceMs: 180000,
+        maxEntriesPerSubscription: 10,
+        maxAutoProcessAgeMs: 86400000,
+        lookbackHours: 72,
+        globalConcurrency: 2,
+        claimLeaseMs: 300000,
+        dryRun: false,
+        uploadSource: "data_api",
+      },
+      fetchUploads: async () => ({
+        source: "data_api",
+        sourceIdentity: "UUuploadsPlaylist",
+        observedAt: NOW.toISOString(),
+        uploads: [upload("data01")],
+      }),
+    },
+  });
+  const report = await processCodeClipYouTubeReconciliationRun(input);
+
+  assert.equal(report.summary.processedCompleted, 1);
+  assert.equal(state.processEntryCalls.length, 1);
+  assert.equal(state.processEntryCalls[0].dependencies.source, DATA_API_POLLING_SOURCE);
+  assert.equal(report.deliveries[0].detectionSource, "data_api");
+  assert.equal(report.deliveries[0].initialDeliverySource, DATA_API_POLLING_SOURCE);
+});
+
+test("unsupported adapter source fails closed before processEntry", async () => {
+  const { state, input } = deps({
+    input: {
+      config: {
+        intervalMs: 300000,
+        jitterMs: 0,
+        graceMs: 180000,
+        maxEntriesPerSubscription: 10,
+        maxAutoProcessAgeMs: 86400000,
+        lookbackHours: 72,
+        globalConcurrency: 2,
+        claimLeaseMs: 300000,
+        dryRun: false,
+        uploadSource: "atom",
+      },
+      fetchUploads: async () => ({
+        source: "manual",
+        sourceIdentity: "manual-source",
+        observedAt: NOW.toISOString(),
+        uploads: [upload("badsrc")],
+      }),
+    },
+  });
+  const report = await processCodeClipYouTubeReconciliationRun(input);
+
+  assert.equal(report.summary.processedCompleted, 0);
+  assert.equal(report.summary.targetFailures, 1);
+  assert.equal(state.processEntryCalls.length, 0);
+  assert.equal(report.deliveries.length, 0);
+  assert.deepEqual(report.errors.map((error) => error.code), ["target_failed"]);
+  assert.equal(JSON.stringify(report).includes("atom_reconciliation"), false);
 });
 
 test("dry-run discovers and classifies without claim or processEntry writes", async () => {

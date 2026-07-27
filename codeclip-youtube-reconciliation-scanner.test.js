@@ -3,10 +3,12 @@ const test = require("node:test");
 
 const {
   ATOM_SOURCE,
+  DATA_API_SOURCE,
   buildDeliveryIdentity,
   classifyTargetUploads,
   discoverEligibleTargets,
   fetchAtomUploads,
+  fetchDataApiUploads,
   formatHumanReport,
   scanCodeClipYouTubeReconciliation,
 } = require("./verticals/codeclip/youtube-reconciliation-scanner");
@@ -320,17 +322,316 @@ test("Atom adapter validates channel identity", async () => {
   );
 });
 
-test("Data API adapter reports unavailable without credentials", async () => {
+test("Data API adapter requires explicit API key", async () => {
+  await assert.rejects(
+    () =>
+      fetchDataApiUploads(
+        { ...subscription(), eventCode: EVENT_CODE, channelId: CHANNEL_ID },
+        {
+          now: NOW,
+          fetchImpl: async () => {
+            throw new Error("must not call network without key");
+          },
+        }
+      ),
+    /source unavailable|api key/i
+  );
+});
+
+test("Data API adapter resolves uploads playlist and normalizes playlist uploads", async () => {
+  const calls = [];
+  const result = await fetchDataApiUploads(
+    { ...subscription(), eventCode: EVENT_CODE, channelId: CHANNEL_ID },
+    {
+      now: NOW,
+      apiKey: "test-api-key",
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        calls.push({
+          path: parsed.pathname,
+          part: parsed.searchParams.get("part"),
+          id: parsed.searchParams.get("id"),
+          playlistId: parsed.searchParams.get("playlistId"),
+          maxResults: parsed.searchParams.get("maxResults"),
+          key: parsed.searchParams.get("key"),
+        });
+        if (parsed.pathname.endsWith("/channels")) {
+          return {
+            ok: true,
+            json: async () => ({
+              items: [
+                {
+                  id: CHANNEL_ID,
+                  contentDetails: { relatedPlaylists: { uploads: "UUuploadsPlaylist" } },
+                },
+              ],
+            }),
+          };
+        }
+        if (parsed.pathname.endsWith("/playlistItems")) {
+          return {
+            ok: true,
+            json: async () => ({
+              items: [
+                {
+                  snippet: {
+                    title: "BeTwelve",
+                    channelId: CHANNEL_ID,
+                    videoOwnerChannelId: CHANNEL_ID,
+                  },
+                  contentDetails: {
+                    videoId: "fXATUaUPMQ0",
+                    videoPublishedAt: "2026-07-27T07:57:47Z",
+                  },
+                  status: { privacyStatus: "public" },
+                },
+              ],
+            }),
+          };
+        }
+        throw new Error("unexpected URL");
+      },
+    }
+  );
+
+  assert.equal(result.source, DATA_API_SOURCE);
+  assert.equal(result.sourceIdentity, "UUuploadsPlaylist");
+  assert.equal(result.uploads.length, 1);
+  assert.equal(result.uploads[0].videoId, "fXATUaUPMQ0");
+  assert.equal(result.uploads[0].channelId, CHANNEL_ID);
+  assert.equal(result.uploads[0].title, "BeTwelve");
+  assert.equal(result.uploads[0].publishedAt, "2026-07-27T07:57:47.000Z");
+  assert.equal(result.uploads[0].externalMessageId, `youtube:${CHANNEL_ID}:fXATUaUPMQ0:published`);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].path, "/youtube/v3/channels");
+  assert.equal(calls[0].part, "contentDetails");
+  assert.equal(calls[0].id, CHANNEL_ID);
+  assert.equal(calls[1].path, "/youtube/v3/playlistItems");
+  assert.equal(calls[1].part, "snippet,contentDetails,status");
+  assert.equal(calls[1].playlistId, "UUuploadsPlaylist");
+  assert.equal(calls[1].maxResults, "10");
+  assert.equal(calls.every((call) => call.key === "test-api-key"), true);
+});
+
+test("Data API scanner classifies uploads through the existing delivery identity", async () => {
+  const deliveries = new Map([
+    [
+      `youtube:${CHANNEL_ID}:fXATUaUPMQ0:published`,
+      {
+        id: "delivery-b12",
+        processingState: "completed",
+        corePersistenceState: "committed",
+        completionState: "completed",
+        terminalState: true,
+        retryEligible: false,
+        responseStatus: 202,
+        publicResponseJson: { ok: true },
+      },
+    ],
+  ]);
   const report = await scanCodeClipYouTubeReconciliation({
     now: NOW,
-    source: "data_api",
+    source: DATA_API_SOURCE,
+    apiKey: "test-api-key",
     queryClient: { query: async () => ({ rows: [] }) },
     listBindings: async () => ({ items: [binding()] }),
     listSubscriptions: async () => [subscription()],
     getEventByCode: async () => eventRecord(),
+    getDeliveryByIdentity: async (identity) => deliveries.get(identity.externalMessageId) || null,
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/channels")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [
+              { id: CHANNEL_ID, contentDetails: { relatedPlaylists: { uploads: "UUuploadsPlaylist" } } },
+            ],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              snippet: { title: "BeTwelve", channelId: CHANNEL_ID, videoOwnerChannelId: CHANNEL_ID },
+              contentDetails: { videoId: "fXATUaUPMQ0", videoPublishedAt: "2026-07-27T07:57:47Z" },
+              status: { privacyStatus: "public" },
+            },
+          ],
+        }),
+      };
+    },
   });
-  assert.equal(report.source, "data_api");
-  assert.equal(report.errors[0].code, "source_unavailable");
+
+  assert.equal(report.source, DATA_API_SOURCE);
+  assert.equal(report.summary.uploadsExamined, 1);
+  assert.equal(report.summary.existingDeliveries, 1);
+  assert.equal(report.summary.missingCandidates, 0);
+  assert.equal(report.candidates[0].classification, "existing_completed");
+});
+
+test("Data API adapter skips non-public uploads while preserving public uploads", async () => {
+  const result = await fetchDataApiUploads(
+    { ...subscription(), eventCode: EVENT_CODE, channelId: CHANNEL_ID },
+    {
+      now: NOW,
+      apiKey: "test-api-key",
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith("/channels")) {
+          return {
+            ok: true,
+            json: async () => ({
+              items: [
+                { id: CHANNEL_ID, contentDetails: { relatedPlaylists: { uploads: "UUuploadsPlaylist" } } },
+              ],
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            items: [
+              {
+                snippet: { title: "PrivateUpload", channelId: CHANNEL_ID, videoOwnerChannelId: CHANNEL_ID },
+                contentDetails: { videoId: "private1", videoPublishedAt: "2026-07-27T07:57:47Z" },
+                status: { privacyStatus: "private" },
+              },
+              {
+                snippet: { title: "PublicUpload", channelId: CHANNEL_ID, videoOwnerChannelId: CHANNEL_ID },
+                contentDetails: { videoId: "public1", videoPublishedAt: "2026-07-27T07:59:47Z" },
+                status: { privacyStatus: "public" },
+              },
+            ],
+          }),
+        };
+      },
+    }
+  );
+
+  assert.equal(result.uploads.length, 1);
+  assert.equal(result.uploads[0].videoId, "public1");
+  assert.equal(result.uploads[0].channelId, CHANNEL_ID);
+  assert.equal(result.uploads[0].publishedAt, "2026-07-27T07:59:47.000Z");
+  assert.equal(result.uploads[0].externalMessageId, `youtube:${CHANNEL_ID}:public1:published`);
+});
+
+test("Data API adapter fail-closes on malformed or mismatched channel identity", async () => {
+  await assert.rejects(
+    () =>
+      fetchDataApiUploads(
+        { ...subscription(), eventCode: EVENT_CODE, channelId: CHANNEL_ID },
+        {
+          now: NOW,
+          apiKey: "test-api-key",
+          fetchImpl: async (url) => {
+            const parsed = new URL(url);
+            if (parsed.pathname.endsWith("/channels")) {
+              return {
+                ok: true,
+                json: async () => ({
+                  items: [
+                    { id: CHANNEL_ID, contentDetails: { relatedPlaylists: { uploads: "UUuploadsPlaylist" } } },
+                  ],
+                }),
+              };
+            }
+            return {
+              ok: true,
+              json: async () => ({
+                items: [
+                  {
+                    snippet: { title: "WrongOwner", channelId: CHANNEL_ID, videoOwnerChannelId: OTHER_CHANNEL_ID },
+                    contentDetails: { videoId: "wrong1", videoPublishedAt: "2026-07-27T07:57:47Z" },
+                    status: { privacyStatus: "public" },
+                  },
+                ],
+              }),
+            };
+          },
+        }
+      ),
+    /identity|mismatch|source/i
+  );
+});
+
+test("Data API adapter fail-closes when privacy status is missing", async () => {
+  await assert.rejects(
+    () =>
+      fetchDataApiUploads(
+        { ...subscription(), eventCode: EVENT_CODE, channelId: CHANNEL_ID },
+        {
+          now: NOW,
+          apiKey: "test-api-key",
+          fetchImpl: async (url) => {
+            const parsed = new URL(url);
+            if (parsed.pathname.endsWith("/channels")) {
+              return {
+                ok: true,
+                json: async () => ({
+                  items: [
+                    { id: CHANNEL_ID, contentDetails: { relatedPlaylists: { uploads: "UUuploadsPlaylist" } } },
+                  ],
+                }),
+              };
+            }
+            return {
+              ok: true,
+              json: async () => ({
+                items: [
+                  {
+                    snippet: { title: "NoPrivacy", channelId: CHANNEL_ID, videoOwnerChannelId: CHANNEL_ID },
+                    contentDetails: { videoId: "nopub1", videoPublishedAt: "2026-07-27T07:57:47Z" },
+                  },
+                ],
+              }),
+            };
+          },
+        }
+      ),
+    /malformed|source/i
+  );
+});
+
+test("Data API adapter fail-closes before building identity for malformed video id", async () => {
+  await assert.rejects(
+    () =>
+      fetchDataApiUploads(
+        { ...subscription(), eventCode: EVENT_CODE, channelId: CHANNEL_ID },
+        {
+          now: NOW,
+          apiKey: "test-api-key",
+          fetchImpl: async (url) => {
+            const parsed = new URL(url);
+            if (parsed.pathname.endsWith("/channels")) {
+              return {
+                ok: true,
+                json: async () => ({
+                  items: [
+                    { id: CHANNEL_ID, contentDetails: { relatedPlaylists: { uploads: "UUuploadsPlaylist" } } },
+                  ],
+                }),
+              };
+            }
+            return {
+              ok: true,
+              json: async () => ({
+                items: [
+                  {
+                    snippet: { title: "BadVideo", channelId: CHANNEL_ID, videoOwnerChannelId: CHANNEL_ID },
+                    contentDetails: { videoId: "", videoPublishedAt: "2026-07-27T07:57:47Z" },
+                    status: { privacyStatus: "public" },
+                  },
+                ],
+              }),
+            };
+          },
+        }
+      ),
+    /malformed|source/i
+  );
 });
 
 test("scanner never invokes delivery creation", async () => {

@@ -2596,7 +2596,7 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
       UNIQUE (provider, provider_account_id, event_code, external_message_id),
       CHECK (attempt_count >= 1),
       CONSTRAINT codeclip_provider_deliveries_initial_source_chk
-      CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation'))
+      CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling'))
     )
   `);
 
@@ -2608,6 +2608,15 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
   await queryClient.query(`
     DO $$
     BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_deliveries_initial_source_chk'
+          AND pg_get_constraintdef(oid) NOT LIKE '%data_api_polling%'
+      ) THEN
+        ALTER TABLE codeclip_provider_deliveries
+        DROP CONSTRAINT codeclip_provider_deliveries_initial_source_chk;
+      END IF;
       IF NOT EXISTS (
         SELECT 1
         FROM pg_constraint
@@ -2615,7 +2624,7 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
       ) THEN
         ALTER TABLE codeclip_provider_deliveries
         ADD CONSTRAINT codeclip_provider_deliveries_initial_source_chk
-        CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation'));
+        CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling'));
       END IF;
     END $$;
   `);
@@ -2726,6 +2735,7 @@ const CODECLIP_PROVIDER_DELIVERY_INITIAL_SOURCES = new Set([
   'websub',
   'operator_reconciliation_recovery',
   'atom_reconciliation',
+  'data_api_polling',
 ]);
 
 function normalizeCodeClipProviderDeliveryInitialSource(value = 'websub') {
@@ -3004,9 +3014,64 @@ async function ensureCodeClipYouTubeReconciliationObservabilityTables(queryClien
       initial_delivery_source TEXT,
       observed_at TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      CHECK (detection_source IN ('atom')),
-      CHECK (initial_delivery_source IS NULL OR initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation'))
+      CONSTRAINT codeclip_ytr_detection_source_chk
+      CHECK (detection_source IN ('atom', 'data_api')),
+      CONSTRAINT codeclip_ytr_initial_delivery_source_chk
+      CHECK (initial_delivery_source IS NULL OR initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling'))
     )
+  `);
+  await queryClient.query(`
+    DO $$
+    DECLARE
+      existing_constraint_name TEXT;
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_ytr_detection_source_chk'
+          AND pg_get_constraintdef(oid) LIKE '%data_api%'
+      ) THEN
+        FOR existing_constraint_name IN
+          SELECT con.conname
+          FROM pg_constraint con
+          JOIN pg_class rel ON rel.oid = con.conrelid
+          WHERE rel.relname = 'codeclip_youtube_reconciliation_detection_observations'
+            AND con.contype = 'c'
+            AND pg_get_constraintdef(con.oid) LIKE '%detection_source%'
+        LOOP
+          EXECUTE format(
+            'ALTER TABLE codeclip_youtube_reconciliation_detection_observations DROP CONSTRAINT IF EXISTS %I',
+            existing_constraint_name
+          );
+        END LOOP;
+        ALTER TABLE codeclip_youtube_reconciliation_detection_observations
+        ADD CONSTRAINT codeclip_ytr_detection_source_chk
+        CHECK (detection_source IN ('atom', 'data_api'));
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_ytr_initial_delivery_source_chk'
+          AND pg_get_constraintdef(oid) LIKE '%data_api_polling%'
+      ) THEN
+        FOR existing_constraint_name IN
+          SELECT con.conname
+          FROM pg_constraint con
+          JOIN pg_class rel ON rel.oid = con.conrelid
+          WHERE rel.relname = 'codeclip_youtube_reconciliation_detection_observations'
+            AND con.contype = 'c'
+            AND pg_get_constraintdef(con.oid) LIKE '%initial_delivery_source%'
+        LOOP
+          EXECUTE format(
+            'ALTER TABLE codeclip_youtube_reconciliation_detection_observations DROP CONSTRAINT IF EXISTS %I',
+            existing_constraint_name
+          );
+        END LOOP;
+        ALTER TABLE codeclip_youtube_reconciliation_detection_observations
+        ADD CONSTRAINT codeclip_ytr_initial_delivery_source_chk
+        CHECK (initial_delivery_source IS NULL OR initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling'));
+      END IF;
+    END $$;
   `);
   await queryClient.query(`
     CREATE INDEX IF NOT EXISTS codeclip_youtube_reconciliation_detection_observations_event_idx
@@ -3032,6 +3097,16 @@ function normalizeSafeCodeClipReconciliationText(value, fieldName, maxLength = 1
   return normalized;
 }
 
+const CODECLIP_YOUTUBE_RECONCILIATION_DETECTION_SOURCES = new Set(['atom', 'data_api']);
+
+function normalizeCodeClipYouTubeReconciliationDetectionSource(value) {
+  const normalized = normalizeSafeCodeClipReconciliationText(value, 'detectionSource', 80).toLowerCase();
+  if (!CODECLIP_YOUTUBE_RECONCILIATION_DETECTION_SOURCES.has(normalized)) {
+    throw new Error('codeClip YouTube reconciliation detection_source is invalid');
+  }
+  return normalized;
+}
+
 async function recordCodeClipYouTubeReconciliationDetectionObservation({
   eventCode,
   channelFingerprint,
@@ -3045,42 +3120,46 @@ async function recordCodeClipYouTubeReconciliationDetectionObservation({
   if (!queryClient || typeof queryClient.query !== 'function') {
     throw new Error('queryClient is required');
   }
-  const normalized = {
-    eventCode: normalizeSafeCodeClipReconciliationText(eventCode, 'eventCode'),
-    channelFingerprint: normalizeSafeCodeClipReconciliationText(channelFingerprint, 'channelFingerprint', 64),
-    videoId: normalizeSafeCodeClipReconciliationText(videoId, 'videoId', 80),
-    detectionSource: normalizeSafeCodeClipReconciliationText(detectionSource, 'detectionSource', 80),
-    outcome: normalizeSafeCodeClipReconciliationText(outcome, 'outcome', 120),
-    initialDeliverySource: initialDeliverySource
-      ? normalizeCodeClipProviderDeliveryInitialSource(initialDeliverySource)
-      : null,
-    observedAt: normalizeIsoTimestamp(observedAt, 'observedAt'),
-  };
-  if (queryClient === pool) await ensureCodeClipYouTubeReconciliationObservabilityTables(queryClient);
-  await queryClient.query(
-    `
-      INSERT INTO codeclip_youtube_reconciliation_detection_observations (
-        event_code,
-        channel_fingerprint,
-        video_id,
-        detection_source,
-        outcome,
-        initial_delivery_source,
-        observed_at
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
-    `,
-    [
-      normalized.eventCode,
-      normalized.channelFingerprint,
-      normalized.videoId,
-      normalized.detectionSource,
-      normalized.outcome,
-      normalized.initialDeliverySource,
-      normalized.observedAt,
-    ]
-  );
-  return { status: 'recorded' };
+  try {
+    const normalized = {
+      eventCode: normalizeSafeCodeClipReconciliationText(eventCode, 'eventCode'),
+      channelFingerprint: normalizeSafeCodeClipReconciliationText(channelFingerprint, 'channelFingerprint', 64),
+      videoId: normalizeSafeCodeClipReconciliationText(videoId, 'videoId', 80),
+      detectionSource: normalizeCodeClipYouTubeReconciliationDetectionSource(detectionSource),
+      outcome: normalizeSafeCodeClipReconciliationText(outcome, 'outcome', 120),
+      initialDeliverySource: initialDeliverySource
+        ? normalizeCodeClipProviderDeliveryInitialSource(initialDeliverySource)
+        : null,
+      observedAt: normalizeIsoTimestamp(observedAt, 'observedAt'),
+    };
+    if (queryClient === pool) await ensureCodeClipYouTubeReconciliationObservabilityTables(queryClient);
+    await queryClient.query(
+      `
+        INSERT INTO codeclip_youtube_reconciliation_detection_observations (
+          event_code,
+          channel_fingerprint,
+          video_id,
+          detection_source,
+          outcome,
+          initial_delivery_source,
+          observed_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7)
+      `,
+      [
+        normalized.eventCode,
+        normalized.channelFingerprint,
+        normalized.videoId,
+        normalized.detectionSource,
+        normalized.outcome,
+        normalized.initialDeliverySource,
+        normalized.observedAt,
+      ]
+    );
+    return { status: 'recorded' };
+  } catch (error) {
+    return { status: 'failed', error };
+  }
 }
 
 async function recordCodeClipYouTubeReconciliationWorkerHeartbeat({

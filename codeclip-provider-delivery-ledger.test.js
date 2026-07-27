@@ -190,7 +190,7 @@ test('codeClip provider delivery schema defines durable identity and indexes', a
   );
   assert.match(client.calls[0].sql, /CHECK \(attempt_count >= 1\)/);
   assert.match(client.calls[0].sql, /initial_delivery_source TEXT NOT NULL DEFAULT 'websub'/);
-  assert.match(client.calls[0].sql, /CHECK \(initial_delivery_source IN \('websub', 'operator_reconciliation_recovery', 'atom_reconciliation'\)\)/);
+  assert.match(client.calls[0].sql, /CHECK \(initial_delivery_source IN \('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling'\)\)/);
   assert.match(client.calls[0].sql, /received_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[0].sql, /last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[0].sql, /created_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
@@ -260,6 +260,20 @@ test('codeClip provider delivery initial source is validated and never overwritt
   assert.equal(duplicate.row.initialDeliverySource, 'atom_reconciliation');
   assert.equal(invalid.status, 'failed');
   assert.match(invalid.error.message, /initial_delivery_source/);
+});
+
+test('codeClip provider delivery accepts Data API polling as an initial source', async () => {
+  const client = createStatefulDeliveryClient();
+  const created = await createCodeClipProviderDelivery({
+    provider: 'youtube',
+    providerAccountId: 'UCvwiNkgNuGuizjo33NZhzPg',
+    eventCode: 'CC-DATA-API-SOURCE',
+    externalMessageId: 'youtube:UCvwiNkgNuGuizjo33NZhzPg:video1:published',
+    initialDeliverySource: 'data_api_polling',
+  }, client);
+
+  assert.equal(created.status, 'created');
+  assert.equal(created.row.initialDeliverySource, 'data_api_polling');
 });
 
 test('codeClip provider delivery identity is account scoped', async () => {
