@@ -120,6 +120,10 @@ function normalizeSmsEnvelope(input) {
 
 function normalizeMetaEnvelope(input) {
   const { provider, rawProvider, body = {}, headers, query, metadata, receivedAt } = input;
+  const whatsappValue = body.entry?.[0]?.changes?.[0]?.value;
+  const isWhatsAppMessageEnvelope =
+    body.object === "whatsapp_business_account" ||
+    whatsappValue?.messaging_product === "whatsapp";
   const messageId = firstValue([
     body.messageId,
     body.providerEventId,
@@ -132,11 +136,13 @@ function normalizeMetaEnvelope(input) {
     body.entry?.[0]?.messaging?.[0]?.message?.text,
     body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body,
   ]);
-  const providerAccountId = firstValue([
-    body.recipient?.id,
-    body.entry?.[0]?.id,
-    body.entry?.[0]?.messaging?.[0]?.recipient?.id,
-  ]);
+  const providerAccountId = isWhatsAppMessageEnvelope
+    ? firstValue([whatsappValue?.metadata?.phone_number_id])
+    : firstValue([
+        body.recipient?.id,
+        body.entry?.[0]?.id,
+        body.entry?.[0]?.messaging?.[0]?.recipient?.id,
+      ]);
   const senderId = firstValue([
     body.sender?.id,
     body.entry?.[0]?.messaging?.[0]?.sender?.id,
@@ -145,6 +151,9 @@ function normalizeMetaEnvelope(input) {
 
   if (!messageId) return { ok: false, reason: "MESSAGE_ID_REQUIRED" };
   if (!text) return { ok: false, reason: "TEXT_REQUIRED" };
+  if (isWhatsAppMessageEnvelope && !providerAccountId) {
+    return { ok: false, reason: "PROVIDER_ACCOUNT_ID_REQUIRED" };
+  }
 
   return buildEnvelope({
     provider,

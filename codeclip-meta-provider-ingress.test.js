@@ -350,6 +350,41 @@ function metaBody({ messageId, accountId, senderId = "sender-1", text = " vip " 
   });
 }
 
+function metaWhatsAppBody({
+  messageId,
+  phoneNumberId,
+  wabaId = `waba-${phoneNumberId}`,
+  senderId = "whatsapp-sender-1",
+  text = " vip ",
+}) {
+  return JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [
+      {
+        id: wabaId,
+        changes: [
+          {
+            field: "messages",
+            value: {
+              messaging_product: "whatsapp",
+              metadata: {
+                phone_number_id: phoneNumberId,
+              },
+              messages: [
+                {
+                  from: senderId,
+                  id: messageId,
+                  text: { body: text },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  });
+}
+
 async function createCodeClipMetaEvent(baseUrl, {
   accountId,
   keyword = "VIP",
@@ -519,6 +554,92 @@ test("signed Meta request reaches existing codeClip provider runtime", async () 
         crypto.createHash("sha256").update(rawBody).digest("hex")
       );
     });
+  });
+});
+
+test("Meta envelopes route through channel-specific bindings using the provider account identity", async () => {
+  await withTestServer(async (baseUrl) => {
+    const instagramAccountId = `ig-account-${Date.now()}`;
+    const instagramKeyword = `INSTAGRAM-${Date.now()}`;
+    const instagramCode = await createCodeClipMetaEvent(baseUrl, {
+      accountId: instagramAccountId,
+      keyword: instagramKeyword,
+      activationChannels: ["Instagram"],
+      bindingChannel: "instagram",
+    });
+    const instagramBody = metaBody({
+      messageId: `meta-instagram-${Date.now()}`,
+      accountId: instagramAccountId,
+      text: instagramKeyword,
+    });
+
+    const whatsappPhoneNumberId = `wa-phone-${Date.now()}`;
+    const whatsappWabaId = `wa-waba-${Date.now()}`;
+    const whatsappKeyword = `WHATSAPP-${Date.now()}`;
+    const whatsappCode = await createCodeClipMetaEvent(baseUrl, {
+      accountId: whatsappPhoneNumberId,
+      keyword: whatsappKeyword,
+      activationChannels: ["WhatsApp"],
+      bindingChannel: "whatsapp",
+    });
+    const whatsappBody = metaWhatsAppBody({
+      messageId: `meta-whatsapp-${Date.now()}`,
+      phoneNumberId: whatsappPhoneNumberId,
+      wabaId: whatsappWabaId,
+      text: whatsappKeyword,
+    });
+
+    const cases = [
+      {
+        expectedAccountId: instagramAccountId,
+        expectedCode: instagramCode,
+        expectedKeyword: instagramKeyword,
+        rawBody: instagramBody,
+      },
+      {
+        expectedAccountId: whatsappPhoneNumberId,
+        expectedCode: whatsappCode,
+        expectedKeyword: whatsappKeyword,
+        rawBody: whatsappBody,
+      },
+    ];
+
+    for (const item of cases) {
+      let runtimeInput = null;
+
+      await withPatchedKeywordRuntime(async (input) => {
+        runtimeInput = input;
+        return {
+          httpStatus: 200,
+          payload: {
+            success: true,
+            eventCode: input.eventCode,
+            messageId: input.messageId,
+          },
+          internal: committedPersistenceInternal(),
+        };
+      }, async () => {
+        const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+          method: "POST",
+          headers: metaHeaders(item.rawBody),
+          body: item.rawBody,
+        });
+        const payload = await response.json();
+
+        assert.equal(response.status, 200);
+        assert.equal(runtimeInput.eventCode, item.expectedCode);
+        assert.equal(runtimeInput.keyword, item.expectedKeyword);
+        assert.equal(payload.eventCode, item.expectedCode);
+
+        const delivery = Array.from(providerDeliveries.values()).find(
+          (row) => row.externalMessageId === runtimeInput.messageId
+        );
+        assert.ok(delivery);
+        assert.equal(delivery.provider, "meta");
+        assert.equal(delivery.providerAccountId, item.expectedAccountId);
+        assert.equal(delivery.eventCode, item.expectedCode);
+      });
+    }
   });
 });
 

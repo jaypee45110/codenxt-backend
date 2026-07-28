@@ -158,12 +158,17 @@ test("codeClip provider envelope normalizer normalizes Meta WhatsApp-like change
   const result = normalizeCodeClipProviderEnvelope({
     provider: "meta",
     body: {
+      object: "whatsapp_business_account",
       entry: [
         {
-          id: " business-1 ",
+          id: " waba-1 ",
           changes: [
             {
               value: {
+                messaging_product: "whatsapp",
+                metadata: {
+                  phone_number_id: " phone-number-1 ",
+                },
                 messages: [
                   {
                     id: " wa-message-1 ",
@@ -183,9 +188,43 @@ test("codeClip provider envelope normalizer normalizes Meta WhatsApp-like change
   assert.equal(result.ok, true);
   assert.equal(result.envelope.messageId, "wa-message-1");
   assert.equal(result.envelope.text, "VIP");
-  assert.equal(result.envelope.providerAccountId, "business-1");
+  assert.equal(result.envelope.providerAccountId, "phone-number-1");
+  assert.notEqual(result.envelope.providerAccountId, "waba-1");
   assert.equal(result.envelope.senderId, "wa-sender-1");
   assert.equal(result.envelope.channel, "meta");
+});
+
+test("codeClip provider envelope normalizer fails closed for WhatsApp without phone number id", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "whatsapp_business_account",
+        entry: [
+          {
+            id: "waba-1",
+            changes: [
+              {
+                field: "messages",
+                value: {
+                  messaging_product: "whatsapp",
+                  messages: [
+                    {
+                      id: "wa-message-1",
+                      from: "wa-sender-1",
+                      text: { body: "VIP" },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "PROVIDER_ACCOUNT_ID_REQUIRED" }
+  );
 });
 
 test("codeClip provider envelope normalizer requires message id", () => {
