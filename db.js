@@ -6,6 +6,13 @@ const pool = process.env.DATABASE_URL
     })
   : null;
 
+const {
+  ensureCodeClipMetaMessengerOutboundSchema: ensureCodeClipMetaMessengerOutboundSchemaImpl,
+  createOrGetCodeClipMetaMessengerOutbound: createOrGetCodeClipMetaMessengerOutboundImpl,
+  getCodeClipMetaMessengerOutboundById: getCodeClipMetaMessengerOutboundByIdImpl,
+  getCodeClipMetaMessengerOutboundByIdempotencyKey: getCodeClipMetaMessengerOutboundByIdempotencyKeyImpl,
+} = require('./verticals/codeclip/meta-messenger-outbound-repository');
+
 async function testDbConnection() {
   if (!pool) {
     console.log('POSTGRES SKIPPED: DATABASE_URL not set');
@@ -100,6 +107,46 @@ async function withCodeClipCorePersistenceTransaction(work, queryPool = pool) {
       }
     }
   }
+}
+
+function codeClipMetaMessengerOutboundQueryClientRequiredResult() {
+  return {
+    ok: false,
+    status: 'failed',
+    reason: 'QUERY_CLIENT_REQUIRED',
+    details: {},
+    row: null,
+    error: new Error('codeClip Meta Messenger outbound persistence requires PostgreSQL query client'),
+  };
+}
+
+async function ensureCodeClipMetaMessengerOutboundSchema(queryClient = pool) {
+  if (!queryClient) return;
+  return ensureCodeClipMetaMessengerOutboundSchemaImpl(queryClient);
+}
+
+async function createOrGetCodeClipMetaMessengerOutbound(intent, queryClient = pool) {
+  if (!queryClient) return codeClipMetaMessengerOutboundQueryClientRequiredResult();
+  if (queryClient === pool) {
+    await ensureCodeClipMetaMessengerOutboundSchema(queryClient);
+  }
+  return createOrGetCodeClipMetaMessengerOutboundImpl(intent, queryClient);
+}
+
+async function getCodeClipMetaMessengerOutboundById(id, queryClient = pool) {
+  if (!queryClient) return codeClipMetaMessengerOutboundQueryClientRequiredResult();
+  if (queryClient === pool) {
+    await ensureCodeClipMetaMessengerOutboundSchema(queryClient);
+  }
+  return getCodeClipMetaMessengerOutboundByIdImpl(id, queryClient);
+}
+
+async function getCodeClipMetaMessengerOutboundByIdempotencyKey(idempotencyKey, queryClient = pool) {
+  if (!queryClient) return codeClipMetaMessengerOutboundQueryClientRequiredResult();
+  if (queryClient === pool) {
+    await ensureCodeClipMetaMessengerOutboundSchema(queryClient);
+  }
+  return getCodeClipMetaMessengerOutboundByIdempotencyKeyImpl(idempotencyKey, queryClient);
 }
 
 async function ensureCampaignsTable() {
@@ -4502,6 +4549,10 @@ module.exports = {
   getCodePodKeywordInteractionSummary,
   ensureCodeClipProviderAccountBindingsTable,
   ensureCodeClipProviderAccountBindingAuditTable,
+  ensureCodeClipMetaMessengerOutboundSchema,
+  createOrGetCodeClipMetaMessengerOutbound,
+  getCodeClipMetaMessengerOutboundById,
+  getCodeClipMetaMessengerOutboundByIdempotencyKey,
   ensureCodeClipYouTubeWebSubSubscriptionsTable,
   ensureCodeClipYouTubeWebSubDiagnosticProbeTables,
   ensureCodeClipYouTubeOAuthStatesTable,
