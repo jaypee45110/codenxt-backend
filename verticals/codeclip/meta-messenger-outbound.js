@@ -147,7 +147,6 @@ function validateMetaMessengerOutboundIntent(intent = {}) {
   const recipientId = normalizeString(intent.recipientId);
   const eventCode = normalizeString(intent.eventCode);
   const externalInboundMessageId = normalizeString(intent.externalInboundMessageId);
-  const inboundDeliveryId = normalizeString(intent.inboundDeliveryId);
   const outboundType = normalizeToken(intent.outboundType);
   const idempotencyKey = normalizeString(intent.idempotencyKey);
   const createdAt = normalizeString(intent.createdAt);
@@ -156,11 +155,17 @@ function validateMetaMessengerOutboundIntent(intent = {}) {
   if (!providerAccountId) return outboundError("PROVIDER_ACCOUNT_ID_REQUIRED");
   if (!recipientId) return outboundError("RECIPIENT_ID_REQUIRED");
   if (!eventCode) return outboundError("EVENT_CODE_REQUIRED");
-  if (!externalInboundMessageId && !inboundDeliveryId) {
-    return outboundError("INBOUND_IDENTITY_REQUIRED");
-  }
+  if (!externalInboundMessageId) return outboundError("INBOUND_IDENTITY_REQUIRED");
   if (!OUTBOUND_TYPES.has(outboundType)) return outboundError("OUTBOUND_TYPE_UNSUPPORTED");
   if (!idempotencyKey) return outboundError("IDEMPOTENCY_KEY_REQUIRED");
+  const expectedIdempotencyKey = buildMetaMessengerOutboundIdempotencyKey({
+    providerAccountId,
+    externalInboundMessageId,
+    outboundType,
+  });
+  if (idempotencyKey !== expectedIdempotencyKey) {
+    return outboundError("IDEMPOTENCY_KEY_MISMATCH");
+  }
   if (!createdAt || !Number.isFinite(Date.parse(createdAt))) {
     return outboundError("CREATED_AT_INVALID");
   }

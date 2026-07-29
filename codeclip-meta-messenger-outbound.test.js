@@ -122,6 +122,41 @@ test("rejects missing inbound identity", () => {
   assert.equal(result.reason, "INBOUND_IDENTITY_REQUIRED");
 });
 
+test("builder rejects missing external inbound message ID even when inboundDeliveryId exists", () => {
+  const result = buildMetaMessengerRewardOutboundIntent(
+    validIntentInput({
+      externalInboundMessageId: "",
+      inboundDeliveryId: "delivery-1",
+    })
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "INBOUND_IDENTITY_REQUIRED");
+});
+
+test("validator rejects missing external inbound message ID", () => {
+  const intent = buildValidIntent();
+  intent.externalInboundMessageId = "";
+  intent.inboundDeliveryId = "delivery-1";
+  intent.idempotencyKey = "";
+
+  const result = validateMetaMessengerOutboundIntent(intent);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "INBOUND_IDENTITY_REQUIRED");
+});
+
+test("validator rejects manipulated idempotency key", () => {
+  const intent = buildValidIntent();
+  intent.idempotencyKey = "codeclip:meta:messenger:outbound:page-123456789:mid-other:reward_link";
+
+  const result = validateMetaMessengerOutboundIntent(intent);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "IDEMPOTENCY_KEY_MISMATCH");
+});
+
+test("validator accepts correctly built intent", () => {
+  assert.deepEqual(validateMetaMessengerOutboundIntent(buildValidIntent()), { ok: true });
+});
+
 test("builds deterministic idempotency key", () => {
   const first = buildMetaMessengerOutboundIdempotencyKey({
     providerAccountId: "page-123456789",
@@ -151,6 +186,60 @@ test("different inbound message IDs produce different idempotency keys", () => {
   });
 
   assert.notEqual(first, second);
+});
+
+test("provider identifiers are case-sensitive in deterministic idempotency keys", () => {
+  const upper = buildMetaMessengerRewardOutboundIntent(
+    validIntentInput({
+      providerAccountId: "Page-ABC",
+      recipientId: "PSID-XYZ",
+      externalInboundMessageId: "Mid-ABC",
+    })
+  );
+  const lower = buildMetaMessengerRewardOutboundIntent(
+    validIntentInput({
+      providerAccountId: "page-abc",
+      recipientId: "psid-xyz",
+      externalInboundMessageId: "mid-abc",
+    })
+  );
+
+  assert.equal(upper.ok, true);
+  assert.equal(lower.ok, true);
+  assert.equal(
+    upper.intent.idempotencyKey,
+    "codeclip:meta:messenger:outbound:Page-ABC:Mid-ABC:reward_link"
+  );
+  assert.equal(
+    lower.intent.idempotencyKey,
+    "codeclip:meta:messenger:outbound:page-abc:mid-abc:reward_link"
+  );
+  assert.notEqual(upper.intent.idempotencyKey, lower.intent.idempotencyKey);
+  assert.equal(upper.intent.providerAccountId, "Page-ABC");
+  assert.equal(upper.intent.recipientId, "PSID-XYZ");
+  assert.equal(upper.intent.externalInboundMessageId, "Mid-ABC");
+});
+
+test("provider identifiers are trimmed before idempotency key construction", () => {
+  const result = buildMetaMessengerRewardOutboundIntent(
+    validIntentInput({
+      providerAccountId: " Page-ABC ",
+      recipientId: " PSID-XYZ ",
+      externalInboundMessageId: " Mid-ABC ",
+      bindingId: " binding-1 ",
+      inboundDeliveryId: " delivery-1 ",
+      interactionId: " interaction-1 ",
+    })
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.intent.providerAccountId, "Page-ABC");
+  assert.equal(result.intent.recipientId, "PSID-XYZ");
+  assert.equal(result.intent.externalInboundMessageId, "Mid-ABC");
+  assert.equal(
+    result.intent.idempotencyKey,
+    "codeclip:meta:messenger:outbound:Page-ABC:Mid-ABC:reward_link"
+  );
 });
 
 test("same input gives same semantic intent when createdAt is explicit", () => {
