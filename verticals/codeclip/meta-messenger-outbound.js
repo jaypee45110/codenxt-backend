@@ -12,6 +12,8 @@ const OUTBOUND_STATUSES = Object.freeze({
   SENT: "sent",
   RETRYABLE_FAILED: "retryable_failed",
   TERMINAL_FAILED: "terminal_failed",
+  /** Graph accepted send; durable sent record could not be confirmed. Hold — no auto-resend. */
+  PROVIDER_SENT_UNCONFIRMED: "provider_sent_unconfirmed",
 });
 
 const TERMINAL_STATUSES = new Set([
@@ -63,6 +65,7 @@ const VALID_STATUS_TRANSITIONS = Object.freeze({
     OUTBOUND_STATUSES.SENT,
     OUTBOUND_STATUSES.RETRYABLE_FAILED,
     OUTBOUND_STATUSES.TERMINAL_FAILED,
+    OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED,
   ]),
   [OUTBOUND_STATUSES.RETRYABLE_FAILED]: new Set([
     OUTBOUND_STATUSES.CLAIMED,
@@ -70,6 +73,11 @@ const VALID_STATUS_TRANSITIONS = Object.freeze({
   ]),
   [OUTBOUND_STATUSES.SENT]: new Set(),
   [OUTBOUND_STATUSES.TERMINAL_FAILED]: new Set(),
+  // Resolution paths are explicit and operator-driven (future); no auto-resend from here.
+  [OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED]: new Set([
+    OUTBOUND_STATUSES.SENT,
+    OUTBOUND_STATUSES.TERMINAL_FAILED,
+  ]),
 });
 
 function normalizeString(value) {

@@ -6,11 +6,14 @@ const {
 } = require("./verticals/codeclip/meta-messenger-outbound");
 const {
   buildExpectedIdempotencyKey,
+  claimCodeClipMetaMessengerOutboundDispatch,
   createOrGetCodeClipMetaMessengerOutbound,
   ensureCodeClipMetaMessengerOutboundSchema,
   findForbiddenPersistenceKeys,
   getCodeClipMetaMessengerOutboundById,
   getCodeClipMetaMessengerOutboundByIdempotencyKey,
+  listEligibleCodeClipMetaMessengerOutboundIds,
+  recordCodeClipMetaMessengerOutboundDispatchResult,
 } = require("./verticals/codeclip/meta-messenger-outbound-repository");
 
 const CREATED_AT = "2026-07-29T00:00:00.000Z";
@@ -137,9 +140,50 @@ function createFakeQueryClient(options = {}) {
       if (
         normalizedSql.startsWith("CREATE TABLE") ||
         normalizedSql.startsWith("CREATE INDEX") ||
-        normalizedSql.startsWith("ALTER TABLE")
+        normalizedSql.startsWith("ALTER TABLE") ||
+        normalizedSql.includes("DROP CONSTRAINT") ||
+        normalizedSql.includes("ADD CONSTRAINT")
       ) {
         return { rows: [] };
+      }
+
+      if (normalizedSql.startsWith("UPDATE codeclip_meta_messenger_outbounds")) {
+        const id = Number(params[0]);
+        const index = state.rows.findIndex((row) => Number(row.id) === id);
+        if (index < 0) return { rows: [] };
+        const current = state.rows[index];
+        if (
+          current.status !== params[12] ||
+          Number(current.attempt_count) !== Number(params[13]) ||
+          Boolean(current.terminal) !== Boolean(params[14]) ||
+          Boolean(current.retry_eligible) !== Boolean(params[15])
+        ) {
+          return { rows: [] };
+        }
+        let metadata = params[6];
+        if (typeof metadata === "string") {
+          try {
+            metadata = JSON.parse(metadata);
+          } catch {
+            metadata = null;
+          }
+        }
+        const updated = {
+          ...current,
+          status: params[1],
+          attempt_count: Number(params[2]),
+          retry_eligible: Boolean(params[3]),
+          terminal: Boolean(params[4]),
+          last_error_code: params[5],
+          last_error_metadata: metadata,
+          claimed_at: params[7],
+          sent_at: params[8],
+          failed_at: params[9],
+          next_attempt_at: params[10],
+          updated_at: params[11],
+        };
+        state.rows[index] = updated;
+        return { rows: [updated] };
       }
 
       if (normalizedSql.startsWith("INSERT INTO codeclip_meta_messenger_outbounds")) {
@@ -160,9 +204,31 @@ function createFakeQueryClient(options = {}) {
         return { rows: row ? [row] : [] };
       }
 
-      if (normalizedSql.includes("WHERE id = $1")) {
+      if (normalizedSql.includes("WHERE id = $1") && normalizedSql.startsWith("SELECT *")) {
         const row = state.rows.find((candidate) => Number(candidate.id) === Number(params[0]));
         return { rows: row ? [row] : [] };
+      }
+
+      if (normalizedSql.startsWith("SELECT id FROM codeclip_meta_messenger_outbounds")) {
+        const nowMs = Date.parse(params[2]);
+        const limit = Number(params[3]);
+        const ids = state.rows
+          .filter((row) => {
+            if (row.status === "pending") return true;
+            if (row.status !== "retryable_failed") return false;
+            if (!row.retry_eligible || row.terminal) return false;
+            if (!row.next_attempt_at) return false;
+            return Date.parse(row.next_attempt_at) <= nowMs;
+          })
+          .sort((a, b) => {
+            const aKey = Date.parse(a.next_attempt_at || a.created_at);
+            const bKey = Date.parse(b.next_attempt_at || b.created_at);
+            if (aKey !== bKey) return aKey - bKey;
+            return Number(a.id) - Number(b.id);
+          })
+          .slice(0, limit)
+          .map((row) => ({ id: row.id }));
+        return { rows: ids };
       }
 
       throw new Error(`Unexpected SQL: ${normalizedSql}`);
@@ -201,6 +267,9 @@ test("schema ensure is idempotent and defines B11.2A constraints", async () => {
   assert.match(sql, /next_attempt_at/);
   assert.match(sql, /ADD COLUMN IF NOT EXISTS next_attempt_at/);
   assert.match(sql, /codeclip_meta_messenger_outbounds_eligible_idx/);
+  assert.match(sql, /provider_sent_unconfirmed/);
+  assert.match(sql, /codeclip_meta_messenger_outbounds_status_chk/);
+  assert.match(sql, /codeclip_meta_messenger_outbounds_flags_chk/);
 });
 
 test("valid B11.1 intent is created and normalized", async () => {
@@ -423,4 +492,100 @@ test("stored records do not contain Graph transport payload or auth material", a
   assert.doesNotMatch(serialized, /accessToken|access_token|authorization|clientSecret|client_secret|appSecret|app_secret/);
   assert.doesNotMatch(serialized, /messaging_type/);
   assert.doesNotMatch(serialized, /graph\.facebook|graph\.meta/i);
+});
+
+test("record provider_sent_unconfirmed is authoritative hold state without providerMessageId", async () => {
+  const claimed = {
+    ...rowFromIntent(buildIntent()),
+    id: 42,
+    status: "claimed",
+    attempt_count: 2,
+    retry_eligible: false,
+    terminal: false,
+    last_error_metadata: { attemptId: "attempt-hold" },
+    claimed_at: CREATED_AT,
+    next_attempt_at: null,
+  };
+  const client = createFakeQueryClient({ rows: [claimed] });
+
+  const recorded = await recordCodeClipMetaMessengerOutboundDispatchResult(
+    {
+      outboundId: 42,
+      attemptId: "attempt-hold",
+      attemptNumber: 2,
+      outcome: "provider_sent_unconfirmed",
+      failureCode: "provider_sent_unconfirmed",
+      now: CREATED_AT,
+    },
+    client
+  );
+  assert.equal(recorded.ok, true);
+  assert.equal(recorded.status, "provider_sent_unconfirmed");
+  assert.equal(recorded.row.status, "provider_sent_unconfirmed");
+  assert.equal(recorded.row.terminal, false);
+  assert.equal(recorded.row.retryEligible, false);
+  assert.equal(recorded.row.nextAttemptAt, null);
+  assert.equal(recorded.row.lastErrorCode, "provider_sent_unconfirmed");
+  assert.deepEqual(recorded.row.lastErrorMetadata, { attemptId: "attempt-hold" });
+  assert.doesNotMatch(JSON.stringify(recorded.row), /mid\.|providerMessageId|message_id/);
+
+  const idempotent = await recordCodeClipMetaMessengerOutboundDispatchResult(
+    {
+      outboundId: 42,
+      attemptId: "attempt-hold",
+      attemptNumber: 2,
+      outcome: "provider_sent_unconfirmed",
+      now: CREATED_AT,
+    },
+    client
+  );
+  assert.equal(idempotent.ok, true);
+  assert.equal(idempotent.existing, true);
+
+  const wrongOwner = await recordCodeClipMetaMessengerOutboundDispatchResult(
+    {
+      outboundId: 42,
+      attemptId: "other-attempt",
+      attemptNumber: 2,
+      outcome: "provider_sent_unconfirmed",
+      now: CREATED_AT,
+    },
+    client
+  );
+  assert.equal(wrongOwner.ok, false);
+  assert.equal(wrongOwner.reason, "DISPATCH_STATE_INCONSISTENT");
+
+  const resent = await recordCodeClipMetaMessengerOutboundDispatchResult(
+    {
+      outboundId: 42,
+      attemptId: "attempt-hold",
+      attemptNumber: 2,
+      outcome: "sent",
+      now: CREATED_AT,
+    },
+    client
+  );
+  assert.equal(resent.ok, false);
+  assert.equal(resent.reason, "DISPATCH_DELIVERY_UNCONFIRMED");
+
+  const claimRejected = await claimCodeClipMetaMessengerOutboundDispatch(
+    {
+      outboundId: 42,
+      attemptId: "attempt-new",
+      staleAfterSeconds: 300,
+      now: CREATED_AT,
+    },
+    client
+  );
+  assert.equal(claimRejected.ok, false);
+  assert.equal(claimRejected.reason, "DISPATCH_NOT_CLAIMABLE");
+  assert.equal(claimRejected.details.status, "provider_sent_unconfirmed");
+
+  const listed = await listEligibleCodeClipMetaMessengerOutboundIds({
+    limit: 10,
+    now: CREATED_AT,
+    queryClient: client,
+  });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.ids.includes(42), false);
 });

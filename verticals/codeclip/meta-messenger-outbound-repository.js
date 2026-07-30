@@ -225,26 +225,59 @@ async function ensureCodeClipMetaMessengerOutboundSchema(queryClient) {
       CHECK (channel = '${CHANNEL}'),
       CHECK (outbound_type = '${OUTBOUND_TYPE}'),
       CHECK (deliverable_type = '${OUTBOUND_TYPE}'),
-      CHECK (status IN (
+      CONSTRAINT codeclip_meta_messenger_outbounds_status_chk CHECK (status IN (
         '${OUTBOUND_STATUSES.PENDING}',
         '${OUTBOUND_STATUSES.CLAIMED}',
         '${OUTBOUND_STATUSES.SENT}',
         '${OUTBOUND_STATUSES.RETRYABLE_FAILED}',
-        '${OUTBOUND_STATUSES.TERMINAL_FAILED}'
+        '${OUTBOUND_STATUSES.TERMINAL_FAILED}',
+        '${OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED}'
       )),
       CHECK (attempt_count >= 0),
-      CHECK (
+      CONSTRAINT codeclip_meta_messenger_outbounds_flags_chk CHECK (
         (status = '${OUTBOUND_STATUSES.PENDING}' AND terminal IS FALSE AND retry_eligible IS TRUE)
         OR (status = '${OUTBOUND_STATUSES.CLAIMED}' AND terminal IS FALSE AND retry_eligible IS FALSE)
         OR (status = '${OUTBOUND_STATUSES.RETRYABLE_FAILED}' AND terminal IS FALSE AND retry_eligible IS TRUE)
         OR (status = '${OUTBOUND_STATUSES.SENT}' AND terminal IS TRUE AND retry_eligible IS FALSE)
         OR (status = '${OUTBOUND_STATUSES.TERMINAL_FAILED}' AND terminal IS TRUE AND retry_eligible IS FALSE)
+        OR (status = '${OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED}' AND terminal IS FALSE AND retry_eligible IS FALSE)
       )
     )
   `);
   await queryClient.query(`
     ALTER TABLE ${TABLE_NAME}
     ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ
+  `);
+  // Expand status/flags checks for existing deployments created before provider_sent_unconfirmed.
+  await queryClient.query(`
+    ALTER TABLE ${TABLE_NAME}
+    DROP CONSTRAINT IF EXISTS codeclip_meta_messenger_outbounds_status_chk
+  `);
+  await queryClient.query(`
+    ALTER TABLE ${TABLE_NAME}
+    ADD CONSTRAINT codeclip_meta_messenger_outbounds_status_chk CHECK (status IN (
+      '${OUTBOUND_STATUSES.PENDING}',
+      '${OUTBOUND_STATUSES.CLAIMED}',
+      '${OUTBOUND_STATUSES.SENT}',
+      '${OUTBOUND_STATUSES.RETRYABLE_FAILED}',
+      '${OUTBOUND_STATUSES.TERMINAL_FAILED}',
+      '${OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED}'
+    ))
+  `);
+  await queryClient.query(`
+    ALTER TABLE ${TABLE_NAME}
+    DROP CONSTRAINT IF EXISTS codeclip_meta_messenger_outbounds_flags_chk
+  `);
+  await queryClient.query(`
+    ALTER TABLE ${TABLE_NAME}
+    ADD CONSTRAINT codeclip_meta_messenger_outbounds_flags_chk CHECK (
+      (status = '${OUTBOUND_STATUSES.PENDING}' AND terminal IS FALSE AND retry_eligible IS TRUE)
+      OR (status = '${OUTBOUND_STATUSES.CLAIMED}' AND terminal IS FALSE AND retry_eligible IS FALSE)
+      OR (status = '${OUTBOUND_STATUSES.RETRYABLE_FAILED}' AND terminal IS FALSE AND retry_eligible IS TRUE)
+      OR (status = '${OUTBOUND_STATUSES.SENT}' AND terminal IS TRUE AND retry_eligible IS FALSE)
+      OR (status = '${OUTBOUND_STATUSES.TERMINAL_FAILED}' AND terminal IS TRUE AND retry_eligible IS FALSE)
+      OR (status = '${OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED}' AND terminal IS FALSE AND retry_eligible IS FALSE)
+    )
   `);
   await queryClient.query(`CREATE INDEX IF NOT EXISTS codeclip_meta_messenger_outbounds_status_idx ON ${TABLE_NAME} (status)`);
   await queryClient.query(`CREATE INDEX IF NOT EXISTS codeclip_meta_messenger_outbounds_provider_account_idx ON ${TABLE_NAME} (provider_account_id)`);
@@ -460,6 +493,7 @@ function validateAuthoritativeDispatchState(row = {}) {
     [OUTBOUND_STATUSES.RETRYABLE_FAILED]: { terminal: false, retryEligible: true },
     [OUTBOUND_STATUSES.SENT]: { terminal: true, retryEligible: false },
     [OUTBOUND_STATUSES.TERMINAL_FAILED]: { terminal: true, retryEligible: false },
+    [OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED]: { terminal: false, retryEligible: false },
   }[status];
 
   if (!expected) {
@@ -502,6 +536,13 @@ function validateAuthoritativeDispatchState(row = {}) {
     return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID", {
       field: "failedAt",
     });
+  }
+  if (status === OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED) {
+    if (!claimedAt.value || attemptCountResult.attemptCount < 1) {
+      return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID", {
+        field: "provider_sent_unconfirmed",
+      });
+    }
   }
 
   return {
@@ -730,7 +771,8 @@ async function claimCodeClipMetaMessengerOutboundDispatch(input = {}, queryClien
       }
     } else if (
       authoritativeOnly.status === OUTBOUND_STATUSES.SENT ||
-      authoritativeOnly.status === OUTBOUND_STATUSES.TERMINAL_FAILED
+      authoritativeOnly.status === OUTBOUND_STATUSES.TERMINAL_FAILED ||
+      authoritativeOnly.status === OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED
     ) {
       return repositoryError("conflict", "DISPATCH_NOT_CLAIMABLE", {
         status: authoritativeOnly.status,
@@ -786,10 +828,10 @@ async function claimCodeClipMetaMessengerOutboundDispatch(input = {}, queryClien
   }
 }
 
-function normalizeFailureCode(value) {
+function normalizeFailureCode(value, fallback = null) {
   const normalized = normalizeString(value);
-  if (!normalized) return null;
-  if (normalized.length > 120) return null;
+  if (!normalized) return fallback;
+  if (normalized.length > 120) return fallback;
   return normalized.toLowerCase().replace(/[^a-z0-9_:-]/g, "_");
 }
 
@@ -823,6 +865,8 @@ async function recordCodeClipMetaMessengerOutboundDispatchResult(input = {}, que
     outcome = OUTBOUND_STATUSES.RETRYABLE_FAILED;
   } else if (rawOutcome === OUTBOUND_STATUSES.TERMINAL_FAILED) {
     outcome = OUTBOUND_STATUSES.TERMINAL_FAILED;
+  } else if (rawOutcome === OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED) {
+    outcome = OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED;
   } else if (rawOutcome === "failed") {
     outcome =
       input.retryable === true
@@ -844,7 +888,17 @@ async function recordCodeClipMetaMessengerOutboundDispatchResult(input = {}, que
   }
   lastErrorMetadata = lastErrorMetadata.metadata;
 
-  if (outcome !== OUTBOUND_STATUSES.SENT) {
+  if (outcome === OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED) {
+    // Durable hold after observed Graph success without confirmed sent write.
+    // Ownership token only — never providerMessageId or transport payloads.
+    lastErrorCode = normalizeFailureCode(
+      input.failureCode || "provider_sent_unconfirmed",
+      "provider_sent_unconfirmed"
+    );
+    if (!lastErrorCode) {
+      lastErrorCode = "provider_sent_unconfirmed";
+    }
+  } else if (outcome !== OUTBOUND_STATUSES.SENT) {
     lastErrorCode = normalizeFailureCode(input.failureCode || input.reason);
     if (!lastErrorCode) {
       return repositoryError("invalid_failure_code", "FAILURE_CODE_REQUIRED");
@@ -916,6 +970,11 @@ async function recordCodeClipMetaMessengerOutboundDispatchResult(input = {}, que
     if (authoritativeOnly.status === OUTBOUND_STATUSES.TERMINAL_FAILED) {
       return repositoryError("conflict", "DISPATCH_ALREADY_TERMINAL_FAILED");
     }
+    if (authoritativeOnly.status === OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED) {
+      return repositoryError("conflict", "DISPATCH_DELIVERY_UNCONFIRMED", {
+        status: authoritativeOnly.status,
+      });
+    }
 
     if (authoritativeOnly.status !== OUTBOUND_STATUSES.CLAIMED) {
       return repositoryError("conflict", "DISPATCH_NOT_CLAIMED");
@@ -958,17 +1017,25 @@ async function recordCodeClipMetaMessengerOutboundDispatchResult(input = {}, que
       nextAttemptAt = schedule.nextAttemptAt;
     }
 
+    const isRetryableOutcome = outcome === OUTBOUND_STATUSES.RETRYABLE_FAILED;
+    const isTerminalOutcome =
+      outcome === OUTBOUND_STATUSES.SENT || outcome === OUTBOUND_STATUSES.TERMINAL_FAILED;
+    // provider_sent_unconfirmed: terminal=false, retry_eligible=false (hold state).
+
     const values = {
       status: outcome,
       attemptCount: authoritativeOnly.attemptCount,
-      retryEligible: outcome === OUTBOUND_STATUSES.RETRYABLE_FAILED,
-      terminal: outcome !== OUTBOUND_STATUSES.RETRYABLE_FAILED,
+      retryEligible: isRetryableOutcome,
+      terminal: isTerminalOutcome,
       lastErrorCode: outcome === OUTBOUND_STATUSES.SENT ? null : lastErrorCode,
       lastErrorMetadata,
       claimedAt: current.row.claimedAt,
       sentAt: outcome === OUTBOUND_STATUSES.SENT ? nowResult.nowIso : current.row.sentAt,
       failedAt:
-        outcome === OUTBOUND_STATUSES.SENT ? current.row.failedAt : nowResult.nowIso,
+        outcome === OUTBOUND_STATUSES.RETRYABLE_FAILED ||
+        outcome === OUTBOUND_STATUSES.TERMINAL_FAILED
+          ? nowResult.nowIso
+          : current.row.failedAt,
       nextAttemptAt,
       updatedAt: nowResult.nowIso,
     };
@@ -991,9 +1058,15 @@ async function recordCodeClipMetaMessengerOutboundDispatchResult(input = {}, que
       });
     }
 
+    let resultStatus = "failed";
+    if (outcome === OUTBOUND_STATUSES.SENT) resultStatus = "sent";
+    if (outcome === OUTBOUND_STATUSES.PROVIDER_SENT_UNCONFIRMED) {
+      resultStatus = "provider_sent_unconfirmed";
+    }
+
     return {
       ok: true,
-      status: outcome === OUTBOUND_STATUSES.SENT ? "sent" : "failed",
+      status: resultStatus,
       outcome,
       recorded: true,
       existing: false,

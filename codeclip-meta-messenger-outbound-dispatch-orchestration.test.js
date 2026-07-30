@@ -552,9 +552,10 @@ test("transport retryable and terminal failures are recorded with allowlisted me
   assert.equal(terminal.result.providerAccepted, false);
 });
 
-test("provider success with record failure returns provider_sent_record_unconfirmed without second send", async () => {
+test("provider success with record failure durable-holds via provider_sent_unconfirmed without second send", async () => {
   const { dispatchCodeClipMetaMessengerOutbound } = loadOrchestration();
   let fetchCount = 0;
+  const recordCalls = [];
 
   const result = await dispatchCodeClipMetaMessengerOutbound({
     outboundId: 7,
@@ -571,12 +572,33 @@ test("provider success with record failure returns provider_sent_record_unconfir
       status: "existing",
       row: claimedRow("attempt-1", 3),
     }),
-    recordDispatchResult: async () => ({
-      ok: false,
-      status: "conflict",
-      reason: "DISPATCH_RECORD_RACE",
-      row: claimedRow("attempt-1", 3),
-    }),
+    recordDispatchResult: async (input) => {
+      recordCalls.push(input);
+      if (input.outcome === "sent") {
+        return {
+          ok: false,
+          status: "conflict",
+          reason: "DISPATCH_RECORD_RACE",
+          row: claimedRow("attempt-1", 3),
+        };
+      }
+      assert.equal(input.outcome, "provider_sent_unconfirmed");
+      assert.equal(Object.hasOwn(input, "providerMessageId"), false);
+      return {
+        ok: true,
+        status: "provider_sent_unconfirmed",
+        outcome: "provider_sent_unconfirmed",
+        recorded: true,
+        row: {
+          ...claimedRow("attempt-1", 3),
+          status: "provider_sent_unconfirmed",
+          retryEligible: false,
+          terminal: false,
+          nextAttemptAt: null,
+          lastErrorCode: "provider_sent_unconfirmed",
+        },
+      };
+    },
     buildRequest: () => ({
       ok: true,
       request: {
@@ -610,11 +632,71 @@ test("provider success with record failure returns provider_sent_record_unconfir
   assert.equal(result.attemptNumber, 3);
   assert.equal(result.providerAccepted, true);
   assert.equal(result.dispatchRecorded, false);
+  assert.equal(result.durableHold, true);
   assert.equal(result.retryable, false);
-  assert.equal(result.manualReviewRequired, true);
+  assert.equal(result.manualReviewRequired, false);
   assert.equal(result.providerMessageId, "mid.unconfirmed");
   assert.equal(fetchCount, 1);
+  assert.equal(recordCalls.length, 2);
+  assert.equal(result.row.status, "provider_sent_unconfirmed");
   assertSecretFree(result);
+});
+
+test("provider success with sent and unconfirmed record both failing sets durableHold false", async () => {
+  const { dispatchCodeClipMetaMessengerOutbound } = loadOrchestration();
+  let fetchCount = 0;
+
+  const result = await dispatchCodeClipMetaMessengerOutbound({
+    outboundId: 7,
+    attemptId: "attempt-1",
+    staleAfterSeconds: 300,
+    queryClient: {},
+    resolvePageAccessCredentials: async () => ({
+      ok: true,
+      pageAccessToken: "secret-token-value",
+      graphApiVersion: "v19.0",
+    }),
+    claimDispatch: async () => ({
+      ok: true,
+      status: "claimed",
+      row: claimedRow("attempt-1", 1),
+    }),
+    recordDispatchResult: async () => ({
+      ok: false,
+      status: "conflict",
+      reason: "DISPATCH_RECORD_RACE",
+    }),
+    buildRequest: () => ({
+      ok: true,
+      request: {
+        method: "POST",
+        url: "https://graph.facebook.com/v19.0/page/messages",
+        headers: { "Content-Type": "application/json" },
+        body: { recipient: { id: "x" }, messaging_type: "RESPONSE", message: { text: "t" } },
+        timeoutMs: 1000,
+      },
+    }),
+    executeSend: async () => {
+      fetchCount += 1;
+      return {
+        ok: true,
+        outcome: "sent",
+        provider: "meta",
+        channel: "messenger",
+        httpStatus: 200,
+        providerMessageId: "mid.x",
+        retryable: false,
+        terminal: true,
+        failureCode: null,
+        safeMetadata: {},
+      };
+    },
+  });
+
+  assert.equal(result.outcome, "provider_sent_record_unconfirmed");
+  assert.equal(result.durableHold, false);
+  assert.equal(result.manualReviewRequired, true);
+  assert.equal(fetchCount, 1);
 });
 
 test("record conflict on non-success path does not resend", async () => {

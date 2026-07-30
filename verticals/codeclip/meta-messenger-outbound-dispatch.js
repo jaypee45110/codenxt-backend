@@ -53,6 +53,7 @@ function baseResult(partial = {}) {
     attemptId: null,
     providerAccepted: false,
     dispatchRecorded: false,
+    durableHold: false,
     retryable: false,
     manualReviewRequired: false,
     providerMessageId: null,
@@ -156,7 +157,12 @@ async function recordOwnedResult({
   };
   if (outcome !== "sent") {
     payload.failureCode = failureCode;
-    if (failureMetadata && Object.keys(failureMetadata).length > 0) {
+    // provider_sent_unconfirmed: ownership token only — no failureMetadata details.
+    if (
+      outcome !== "provider_sent_unconfirmed" &&
+      failureMetadata &&
+      Object.keys(failureMetadata).length > 0
+    ) {
       payload.failureMetadata = failureMetadata;
     }
   }
@@ -467,6 +473,27 @@ async function dispatchCodeClipMetaMessengerOutbound({
   }
 
   if (providerAccepted && !(recorded?.ok && (recorded.recorded || recorded.existing))) {
+    // Best-effort durable hold via the same authoritative record API (no separate mark path).
+    let unconfirmedRecord = null;
+    try {
+      unconfirmedRecord = await recordOwnedResult({
+        recordDispatchResult,
+        queryClient,
+        outboundId: normalizedOutboundId,
+        attemptId: normalizedAttemptId,
+        attemptNumber,
+        outcome: "provider_sent_unconfirmed",
+        failureCode: "provider_sent_unconfirmed",
+        now,
+      });
+    } catch {
+      unconfirmedRecord = { ok: false, status: "failed", reason: "UNCONFIRMED_RECORD_FAILED" };
+    }
+
+    const durableHold = Boolean(
+      unconfirmedRecord?.ok && (unconfirmedRecord.recorded || unconfirmedRecord.existing)
+    );
+
     return withAttemptNumber(
       {
         ...baseResult({
@@ -475,16 +502,34 @@ async function dispatchCodeClipMetaMessengerOutbound({
           outcome: "provider_sent_record_unconfirmed",
           providerAccepted: true,
           dispatchRecorded: false,
+          durableHold,
           retryable: false,
-          manualReviewRequired: true,
+          manualReviewRequired: !durableHold,
           providerMessageId,
-          failureCode: normalizeFailureCode(recorded?.reason, "dispatch_record_unconfirmed"),
+          failureCode: normalizeFailureCode(
+            durableHold
+              ? "provider_sent_unconfirmed"
+              : recorded?.reason || unconfirmedRecord?.reason,
+            "dispatch_record_unconfirmed"
+          ),
           record: {
             ok: false,
             status: recorded?.status || "failed",
             reason: recorded?.reason || null,
+            unconfirmed: durableHold
+              ? {
+                  ok: true,
+                  status: unconfirmedRecord.status,
+                  recorded: Boolean(unconfirmedRecord.recorded),
+                  existing: Boolean(unconfirmedRecord.existing),
+                }
+              : {
+                  ok: false,
+                  status: unconfirmedRecord?.status || "failed",
+                  reason: unconfirmedRecord?.reason || null,
+                },
           },
-          row: recorded?.row || row,
+          row: unconfirmedRecord?.row || recorded?.row || row,
         }),
       },
       attemptNumber
