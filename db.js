@@ -13,6 +13,7 @@ const {
   getCodeClipMetaMessengerOutboundByIdempotencyKey: getCodeClipMetaMessengerOutboundByIdempotencyKeyImpl,
   claimCodeClipMetaMessengerOutboundDispatch: claimCodeClipMetaMessengerOutboundDispatchImpl,
   recordCodeClipMetaMessengerOutboundDispatchResult: recordCodeClipMetaMessengerOutboundDispatchResultImpl,
+  listEligibleCodeClipMetaMessengerOutboundIds: listEligibleCodeClipMetaMessengerOutboundIdsImpl,
 } = require('./verticals/codeclip/meta-messenger-outbound-repository');
 
 async function testDbConnection() {
@@ -165,6 +166,14 @@ async function recordCodeClipMetaMessengerOutboundDispatchResult(input, queryCli
     await ensureCodeClipMetaMessengerOutboundSchema(queryClient);
   }
   return recordCodeClipMetaMessengerOutboundDispatchResultImpl(input, queryClient);
+}
+
+async function listEligibleCodeClipMetaMessengerOutboundIds(input = {}, queryClient = pool) {
+  if (!queryClient) return codeClipMetaMessengerOutboundQueryClientRequiredResult();
+  if (queryClient === pool) {
+    await ensureCodeClipMetaMessengerOutboundSchema(queryClient);
+  }
+  return listEligibleCodeClipMetaMessengerOutboundIdsImpl({ ...input, queryClient });
 }
 
 async function ensureCampaignsTable() {
@@ -4573,6 +4582,7 @@ module.exports = {
   getCodeClipMetaMessengerOutboundByIdempotencyKey,
   claimCodeClipMetaMessengerOutboundDispatch,
   recordCodeClipMetaMessengerOutboundDispatchResult,
+  listEligibleCodeClipMetaMessengerOutboundIds,
   ensureCodeClipYouTubeWebSubSubscriptionsTable,
   ensureCodeClipYouTubeWebSubDiagnosticProbeTables,
   ensureCodeClipYouTubeOAuthStatesTable,

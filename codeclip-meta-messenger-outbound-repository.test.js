@@ -80,6 +80,7 @@ function rowFromIntent(intent, id = 1) {
     claimed_at: null,
     sent_at: null,
     failed_at: null,
+    next_attempt_at: null,
     created_at: CREATED_AT,
     updated_at: CREATED_AT,
   };
@@ -112,6 +113,7 @@ function rowFromInsertParams(params, id = 1) {
     claimed_at: null,
     sent_at: null,
     failed_at: null,
+    next_attempt_at: null,
     created_at: CREATED_AT,
     updated_at: CREATED_AT,
   };
@@ -132,7 +134,11 @@ function createFakeQueryClient(options = {}) {
       state.calls.push({ sql, params });
       const normalizedSql = String(sql).replace(/\s+/g, " ").trim();
 
-      if (normalizedSql.startsWith("CREATE TABLE") || normalizedSql.startsWith("CREATE INDEX")) {
+      if (
+        normalizedSql.startsWith("CREATE TABLE") ||
+        normalizedSql.startsWith("CREATE INDEX") ||
+        normalizedSql.startsWith("ALTER TABLE")
+      ) {
         return { rows: [] };
       }
 
@@ -192,6 +198,9 @@ test("schema ensure is idempotent and defines B11.2A constraints", async () => {
   assert.match(sql, /intent JSONB NOT NULL/);
   assert.match(sql, /provider_account_id/);
   assert.match(sql, /external_inbound_message_id/);
+  assert.match(sql, /next_attempt_at/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS next_attempt_at/);
+  assert.match(sql, /codeclip_meta_messenger_outbounds_eligible_idx/);
 });
 
 test("valid B11.1 intent is created and normalized", async () => {

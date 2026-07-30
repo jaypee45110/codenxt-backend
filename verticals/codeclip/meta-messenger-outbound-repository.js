@@ -3,6 +3,7 @@ const {
   OUTBOUND_STATUSES,
   buildDispatchOwnershipMetadata,
   buildMetaMessengerOutboundIdempotencyKey,
+  computeCodeClipMetaMessengerNextAttemptAt,
   normalizeDispatchAttemptId,
   normalizeDispatchAttemptNumber,
   normalizeDispatchNow,
@@ -180,6 +181,7 @@ function mapCodeClipMetaMessengerOutboundRow(row = null) {
     claimedAt: normalizeTimestamp(row.claimed_at),
     sentAt: normalizeTimestamp(row.sent_at),
     failedAt: normalizeTimestamp(row.failed_at),
+    nextAttemptAt: normalizeTimestamp(row.next_attempt_at),
     createdAt: normalizeTimestamp(row.created_at),
     updatedAt: normalizeTimestamp(row.updated_at),
   };
@@ -214,6 +216,7 @@ async function ensureCodeClipMetaMessengerOutboundSchema(queryClient) {
       claimed_at TIMESTAMPTZ,
       sent_at TIMESTAMPTZ,
       failed_at TIMESTAMPTZ,
+      next_attempt_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (idempotency_key),
@@ -239,9 +242,20 @@ async function ensureCodeClipMetaMessengerOutboundSchema(queryClient) {
       )
     )
   `);
+  await queryClient.query(`
+    ALTER TABLE ${TABLE_NAME}
+    ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ
+  `);
   await queryClient.query(`CREATE INDEX IF NOT EXISTS codeclip_meta_messenger_outbounds_status_idx ON ${TABLE_NAME} (status)`);
   await queryClient.query(`CREATE INDEX IF NOT EXISTS codeclip_meta_messenger_outbounds_provider_account_idx ON ${TABLE_NAME} (provider_account_id)`);
   await queryClient.query(`CREATE INDEX IF NOT EXISTS codeclip_meta_messenger_outbounds_external_inbound_idx ON ${TABLE_NAME} (external_inbound_message_id)`);
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_meta_messenger_outbounds_eligible_idx
+    ON ${TABLE_NAME} (next_attempt_at, created_at, id)
+    WHERE terminal IS FALSE
+      AND retry_eligible IS TRUE
+      AND status IN ('${OUTBOUND_STATUSES.PENDING}', '${OUTBOUND_STATUSES.RETRYABLE_FAILED}')
+  `);
 }
 
 function validateIntentForPersistence(input = {}) {
@@ -583,12 +597,13 @@ async function applyOutboundDispatchUpdate(id, expected, values, queryClient) {
         claimed_at = $8::timestamptz,
         sent_at = $9::timestamptz,
         failed_at = $10::timestamptz,
-        updated_at = $11::timestamptz
+        next_attempt_at = $11::timestamptz,
+        updated_at = $12::timestamptz
       WHERE id = $1
-        AND status = $12
-        AND attempt_count = $13
-        AND terminal IS NOT DISTINCT FROM $14
-        AND retry_eligible IS NOT DISTINCT FROM $15
+        AND status = $13
+        AND attempt_count = $14
+        AND terminal IS NOT DISTINCT FROM $15
+        AND retry_eligible IS NOT DISTINCT FROM $16
       RETURNING *
     `,
     [
@@ -602,6 +617,7 @@ async function applyOutboundDispatchUpdate(id, expected, values, queryClient) {
       values.claimedAt,
       values.sentAt,
       values.failedAt,
+      values.nextAttemptAt === undefined ? null : values.nextAttemptAt,
       values.updatedAt,
       expected.status,
       expected.attemptCount,
@@ -696,6 +712,22 @@ async function claimCodeClipMetaMessengerOutboundDispatch(input = {}, queryClien
           invariant: "ownership_token_not_source_of_truth",
         });
       }
+      const nextAttemptAt = parseAuthoritativeTimestamp(current.row.nextAttemptAt, false);
+      if (!nextAttemptAt.ok) {
+        return repositoryError("conflict", "RETRY_SCHEDULE_INVALID", {
+          field: "nextAttemptAt",
+        });
+      }
+      if (!nextAttemptAt.value) {
+        return repositoryError("conflict", "RETRY_SCHEDULE_INVALID", {
+          field: "nextAttemptAt",
+        });
+      }
+      if (nextAttemptAt.epochMs > nowResult.now.getTime()) {
+        return repositoryError("conflict", "RETRY_NOT_READY", {
+          nextAttemptAt: nextAttemptAt.value,
+        });
+      }
     } else if (
       authoritativeOnly.status === OUTBOUND_STATUSES.SENT ||
       authoritativeOnly.status === OUTBOUND_STATUSES.TERMINAL_FAILED
@@ -730,6 +762,7 @@ async function claimCodeClipMetaMessengerOutboundDispatch(input = {}, queryClien
         claimedAt: nowResult.nowIso,
         sentAt: current.row.sentAt,
         failedAt: current.row.failedAt,
+        nextAttemptAt: null,
         updatedAt: nowResult.nowIso,
       },
       queryClient
@@ -906,6 +939,25 @@ async function recordCodeClipMetaMessengerOutboundDispatchResult(input = {}, que
       });
     }
 
+    let nextAttemptAt = null;
+    if (outcome === OUTBOUND_STATUSES.RETRYABLE_FAILED) {
+      const retryAfterSeconds =
+        input.failureMetadata &&
+        typeof input.failureMetadata === "object" &&
+        !Array.isArray(input.failureMetadata)
+          ? input.failureMetadata.retryAfterSeconds
+          : undefined;
+      const schedule = computeCodeClipMetaMessengerNextAttemptAt({
+        now: nowResult.nowIso,
+        attemptNumber: attemptNumberResult.attemptNumber,
+        retryAfterSeconds,
+      });
+      if (!schedule.ok) {
+        return repositoryError("invalid_retry_schedule", schedule.reason, schedule.details || {});
+      }
+      nextAttemptAt = schedule.nextAttemptAt;
+    }
+
     const values = {
       status: outcome,
       attemptCount: authoritativeOnly.attemptCount,
@@ -917,6 +969,7 @@ async function recordCodeClipMetaMessengerOutboundDispatchResult(input = {}, que
       sentAt: outcome === OUTBOUND_STATUSES.SENT ? nowResult.nowIso : current.row.sentAt,
       failedAt:
         outcome === OUTBOUND_STATUSES.SENT ? current.row.failedAt : nowResult.nowIso,
+      nextAttemptAt,
       updatedAt: nowResult.nowIso,
     };
 
@@ -951,6 +1004,69 @@ async function recordCodeClipMetaMessengerOutboundDispatchResult(input = {}, que
   }
 }
 
+function normalizeEligibleListLimit(limit) {
+  if (limit === undefined || limit === null || limit === "") return 10;
+  const parsed = Number(limit);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+    return null;
+  }
+  return parsed;
+}
+
+/**
+ * Advisory candidate selection for Meta Messenger outbound dispatch.
+ * Claim remains the concurrency and cooldown authority.
+ * F0A excludes all claimed rows (including stale).
+ */
+async function listEligibleCodeClipMetaMessengerOutboundIds(
+  { limit, now, queryClient } = {}
+) {
+  if (!queryClient || typeof queryClient.query !== "function") {
+    return repositoryError("failed", "QUERY_CLIENT_REQUIRED");
+  }
+  const safeLimit = normalizeEligibleListLimit(limit);
+  if (safeLimit === null) {
+    return repositoryError("invalid_limit", "ELIGIBLE_LIMIT_INVALID");
+  }
+  const nowResult = normalizeDispatchNow(now);
+  if (!nowResult.ok) {
+    return repositoryError("invalid_now", nowResult.reason || "DISPATCH_NOW_INVALID");
+  }
+
+  try {
+    const result = await queryClient.query(
+      `
+        SELECT id
+        FROM ${TABLE_NAME}
+        WHERE (
+            status = $1
+            OR (
+              status = $2
+              AND retry_eligible IS TRUE
+              AND terminal IS FALSE
+              AND next_attempt_at IS NOT NULL
+              AND next_attempt_at <= $3::timestamptz
+            )
+          )
+        ORDER BY COALESCE(next_attempt_at, created_at) ASC, id ASC
+        LIMIT $4
+      `,
+      [
+        OUTBOUND_STATUSES.PENDING,
+        OUTBOUND_STATUSES.RETRYABLE_FAILED,
+        nowResult.nowIso,
+        safeLimit,
+      ]
+    );
+    const ids = (result.rows || [])
+      .map((row) => Number(row.id))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    return { ok: true, status: "listed", ids };
+  } catch (error) {
+    return repositoryError("failed", "REPOSITORY_ERROR", {}, error);
+  }
+}
+
 module.exports = {
   TABLE_NAME,
   applyOutboundDispatchUpdate,
@@ -960,6 +1076,7 @@ module.exports = {
   claimCodeClipMetaMessengerOutboundDispatch,
   createOrGetCodeClipMetaMessengerOutbound,
   ensureCodeClipMetaMessengerOutboundSchema,
+  listEligibleCodeClipMetaMessengerOutboundIds,
   findForbiddenPersistenceKeys,
   getCodeClipMetaMessengerOutboundById,
   getCodeClipMetaMessengerOutboundByIdempotencyKey,

@@ -68,10 +68,10 @@ function createDispatchQueryClient(seedRows = []) {
 
       if (normalizedSql.startsWith("UPDATE codeclip_meta_messenger_outbounds")) {
         const id = Number(params[0]);
-        const expectedStatus = params[11];
-        const expectedAttemptCount = Number(params[12]);
-        const expectedTerminal = params[13];
-        const expectedRetryEligible = params[14];
+        const expectedStatus = params[12];
+        const expectedAttemptCount = Number(params[13]);
+        const expectedTerminal = params[14];
+        const expectedRetryEligible = params[15];
         const index = state.rows.findIndex((candidate) => Number(candidate.id) === id);
         if (index < 0) return { rows: [] };
         const current = state.rows[index];
@@ -99,7 +99,8 @@ function createDispatchQueryClient(seedRows = []) {
           claimed_at: params[7],
           sent_at: params[8],
           failed_at: params[9],
-          updated_at: params[10],
+          next_attempt_at: params[10],
+          updated_at: params[11],
         };
         state.rows[index] = updated;
         return { rows: [structuredClone(updated)] };
@@ -132,6 +133,7 @@ function createDispatchQueryClient(seedRows = []) {
           claimed_at: null,
           sent_at: null,
           failed_at: null,
+          next_attempt_at: null,
           created_at: CREATED_AT,
           updated_at: CREATED_AT,
         };
@@ -589,6 +591,7 @@ test("attempt overflow fails closed", async () => {
       claimed_at: NOW,
       sent_at: null,
       failed_at: NOW,
+      next_attempt_at: NOW,
       created_at: CREATED_AT,
       updated_at: NOW,
     },

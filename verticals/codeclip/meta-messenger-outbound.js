@@ -26,6 +26,10 @@ const DISPATCH_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const DISPATCH_MAX_ATTEMPT_COUNT = 2147483646;
 const DISPATCH_MAX_STALE_AFTER_SECONDS = 7 * 24 * 60 * 60;
 const DISPATCH_DEFAULT_STALE_AFTER_SECONDS = 300;
+const NEXT_ATTEMPT_BASE_SECONDS = 30;
+const NEXT_ATTEMPT_CAP_SECONDS = 3600;
+const NEXT_ATTEMPT_RETRY_AFTER_MIN_SECONDS = 1;
+const NEXT_ATTEMPT_RETRY_AFTER_MAX_SECONDS = 3600;
 
 /**
  * Invariant: last_error_metadata.attemptId is an ownership token only.
@@ -444,6 +448,63 @@ function buildDispatchOwnershipMetadata(attemptId) {
   };
 }
 
+/**
+ * Pure, deterministic next-attempt scheduling for retryable Meta Messenger outbound failures.
+ * No jitter. Injected `now` only (no hidden wall clock).
+ */
+function computeCodeClipMetaMessengerNextAttemptAt({
+  now,
+  attemptNumber,
+  retryAfterSeconds,
+} = {}) {
+  const nowResult = normalizeDispatchNow(now);
+  if (!nowResult.ok) {
+    return outboundError(nowResult.reason || "DISPATCH_NOW_INVALID");
+  }
+
+  const attempt = Number(attemptNumber);
+  if (!Number.isInteger(attempt) || attempt < 1 || attempt > DISPATCH_MAX_ATTEMPT_COUNT) {
+    return outboundError("ATTEMPT_NUMBER_INVALID");
+  }
+
+  let normalizedRetryAfter = 0;
+  if (retryAfterSeconds !== undefined && retryAfterSeconds !== null) {
+    const parsed = Number(retryAfterSeconds);
+    if (
+      !Number.isInteger(parsed) ||
+      parsed < NEXT_ATTEMPT_RETRY_AFTER_MIN_SECONDS ||
+      parsed > NEXT_ATTEMPT_RETRY_AFTER_MAX_SECONDS
+    ) {
+      return outboundError("RETRY_AFTER_SECONDS_INVALID");
+    }
+    normalizedRetryAfter = parsed;
+  }
+
+  // Overflow-safe exponential: 30 * 2^(attemptNumber-1), capped at 3600.
+  let exponentialDelay = NEXT_ATTEMPT_BASE_SECONDS;
+  for (let step = 1; step < attempt; step += 1) {
+    if (exponentialDelay >= NEXT_ATTEMPT_CAP_SECONDS) {
+      exponentialDelay = NEXT_ATTEMPT_CAP_SECONDS;
+      break;
+    }
+    const doubled = exponentialDelay * 2;
+    exponentialDelay =
+      doubled >= NEXT_ATTEMPT_CAP_SECONDS ? NEXT_ATTEMPT_CAP_SECONDS : doubled;
+  }
+
+  const delaySeconds = Math.max(exponentialDelay, normalizedRetryAfter);
+  const nextMs = nowResult.now.getTime() + delaySeconds * 1000;
+  if (!Number.isFinite(nextMs)) {
+    return outboundError("NEXT_ATTEMPT_AT_OVERFLOW");
+  }
+
+  return {
+    ok: true,
+    nextAttemptAt: new Date(nextMs).toISOString(),
+    delaySeconds,
+  };
+}
+
 module.exports = {
   CHANNEL,
   DISPATCH_ATTEMPT_ID_MAX_LENGTH,
@@ -452,11 +513,14 @@ module.exports = {
   DISPATCH_MAX_STALE_AFTER_SECONDS,
   DISPATCH_OWNERSHIP_ATTEMPT_ID_KEY,
   DISPATCH_OWNERSHIP_TOKEN_INVARIANT,
+  NEXT_ATTEMPT_BASE_SECONDS,
+  NEXT_ATTEMPT_CAP_SECONDS,
   OUTBOUND_STATUSES,
   PROVIDER,
   buildDispatchOwnershipMetadata,
   buildMetaMessengerOutboundIdempotencyKey,
   buildMetaMessengerRewardOutboundIntent,
+  computeCodeClipMetaMessengerNextAttemptAt,
   createMetaMessengerOutboundStatus,
   maskMetaMessengerOutboundIdentifier: maskIdentifier,
   normalizeDispatchAttemptId,
