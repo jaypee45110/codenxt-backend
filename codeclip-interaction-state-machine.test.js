@@ -110,6 +110,7 @@ async function runKeywordPersistenceCase({
   saveCodeClipInteraction = async (interaction) => ({ id: 'interaction-row', state: interaction.state }),
   saveCodeClipRewardAssignments = async (snapshot) => snapshot.assignments,
   saveCodeClipXtraRedemption = async (record) => ({ id: 'clipxtra-row', token: record.token }),
+  persistProviderOutboundIntent,
   runCodeClipCorePersistenceTransaction,
 } = {}) {
   const eventCode = `CC-PERSIST-KEYWORD-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -132,6 +133,7 @@ async function runKeywordPersistenceCase({
     },
     saveCodeClipRewardAssignments,
     saveCodeClipXtraRedemption,
+    persistProviderOutboundIntent,
     runCodeClipCorePersistenceTransaction,
     async saveCodeClipOutboxEvent(event) {
       outboxEvents.push(event);
@@ -1494,6 +1496,145 @@ test('codeClip core transaction records write success only after transaction run
   assert.equal(result.internal.persistenceDecision.severity, 'ok');
   assert.equal(runtimeInteraction.persistenceStatus.interaction.committed, true);
   assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.committed, true);
+});
+
+test('codeClip keyword persistence leaves providerOutbound absent when no hook is injected', async () => {
+  const { result, runtimeInteraction } = await runKeywordPersistenceCase({
+    rewardAssignments: {
+      openClip: { assigned: true, tier: 'openClip' },
+      clipXtra: { assigned: false },
+    },
+  });
+
+  assert.equal(result.internal.persistenceDecision.severity, 'ok');
+  assert.equal(Object.hasOwn(runtimeInteraction.persistenceStatus, 'providerOutbound'), false);
+});
+
+test('codeClip keyword provider outbound skip creates dynamic skipped status only when hook exists', async () => {
+  const { result, runtimeInteraction } = await runKeywordPersistenceCase({
+    rewardAssignments: {},
+    persistProviderOutboundIntent: async () => ({
+      status: 'skipped',
+      reason: 'NO_DELIVERABLE_REWARD',
+    }),
+  });
+
+  assert.equal(result.internal.persistenceDecision.severity, 'ok');
+  assert.deepEqual(runtimeInteraction.persistenceStatus.providerOutbound, {
+    attempted: false,
+    ok: null,
+    error: null,
+    skipped: true,
+    reason: 'NO_DELIVERABLE_REWARD',
+  });
+});
+
+test('codeClip keyword provider outbound committed confirms write with same queryClient', async () => {
+  const transaction = createRecordingTransactionRunner();
+  let outboundQueryClient = null;
+  let receivedPersistedInteraction = null;
+  let receivedInteraction = null;
+
+  const { result, runtimeInteraction } = await runKeywordPersistenceCase({
+    rewardAssignments: {
+      openClip: { assigned: true, tier: 'openClip' },
+      clipXtra: { assigned: false },
+    },
+    runCodeClipCorePersistenceTransaction: transaction.run,
+    saveCodeClipInteraction: async () => ({ id: 'interaction-row-1' }),
+    persistProviderOutboundIntent: async ({ interaction, persistedInteraction, queryClient }) => {
+      receivedInteraction = interaction;
+      receivedPersistedInteraction = persistedInteraction;
+      outboundQueryClient = queryClient;
+      return {
+        status: 'committed',
+        outboundStatus: 'created',
+        outboundId: 'outbound-row-1',
+      };
+    },
+  });
+
+  assert.equal(result.internal.persistenceDecision.severity, 'ok');
+  assert.equal(outboundQueryClient, transaction.queryClient);
+  assert.equal(receivedInteraction, runtimeInteraction);
+  assert.deepEqual(receivedPersistedInteraction, { id: 'interaction-row-1' });
+  assert.equal(runtimeInteraction.interactionId, null);
+  assert.deepEqual(runtimeInteraction.persistenceStatus.providerOutbound, {
+    attempted: true,
+    ok: true,
+    error: null,
+    committed: true,
+  });
+});
+
+test('codeClip keyword provider outbound committed without outboundId fails closed', async () => {
+  const transaction = createRecordingTransactionRunner();
+  const { result, runtimeInteraction } = await runKeywordPersistenceCase({
+    rewardAssignments: {
+      openClip: { assigned: true, tier: 'openClip' },
+      clipXtra: { assigned: false },
+    },
+    runCodeClipCorePersistenceTransaction: transaction.run,
+    persistProviderOutboundIntent: async () => ({
+      status: 'committed',
+      outboundStatus: 'created',
+      outboundId: null,
+    }),
+  });
+
+  assert.deepEqual(transaction.calls, ['BEGIN', 'ROLLBACK']);
+  assert.equal(result.internal.persistenceDecision.severity, 'critical');
+  assert.equal(result.internal.persistenceDecision.criticalFailures.includes('providerOutbound'), true);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.rolledBack, true);
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.rolledBack, true);
+  assert.equal(runtimeInteraction.persistenceStatus.interaction.causeStep, 'providerOutbound');
+  assert.equal(runtimeInteraction.persistenceStatus.rewardAssignments.causeStep, 'providerOutbound');
+  assert.equal(runtimeInteraction.persistenceStatus.providerOutbound.attempted, true);
+  assert.equal(runtimeInteraction.persistenceStatus.providerOutbound.ok, false);
+  assert.match(runtimeInteraction.persistenceStatus.providerOutbound.error, /provider outbound persistence did not confirm write/);
+});
+
+test('codeClip keyword provider outbound failed result preserves original Error', async () => {
+  const transaction = createRecordingTransactionRunner();
+  const originalError = new Error('repository unavailable');
+  const { result, runtimeInteraction } = await runKeywordPersistenceCase({
+    rewardAssignments: {
+      openClip: { assigned: true, tier: 'openClip' },
+      clipXtra: { assigned: false },
+    },
+    runCodeClipCorePersistenceTransaction: transaction.run,
+    persistProviderOutboundIntent: async () => ({
+      status: 'failed',
+      critical: true,
+      reason: 'OUTBOUND_REPOSITORY_ERROR',
+      error: originalError,
+    }),
+  });
+
+  assert.deepEqual(transaction.calls, ['BEGIN', 'ROLLBACK']);
+  assert.equal(result.internal.persistenceDecision.severity, 'critical');
+  assert.equal(runtimeInteraction.persistenceStatus.providerOutbound.error, 'repository unavailable');
+  assert.equal(runtimeInteraction.persistenceStatus.providerOutbound.causeStep, 'providerOutbound');
+  assert.equal(runtimeInteraction.persistenceStatus.providerOutbound.transactionPhase, 'work');
+});
+
+test('codeClip keyword provider outbound thrown error is marked as providerOutbound failure', async () => {
+  const transaction = createRecordingTransactionRunner();
+  const { result, runtimeInteraction } = await runKeywordPersistenceCase({
+    rewardAssignments: {
+      openClip: { assigned: true, tier: 'openClip' },
+      clipXtra: { assigned: false },
+    },
+    runCodeClipCorePersistenceTransaction: transaction.run,
+    persistProviderOutboundIntent: async () => {
+      throw new Error('provider outbound exploded');
+    },
+  });
+
+  assert.deepEqual(transaction.calls, ['BEGIN', 'ROLLBACK']);
+  assert.equal(result.internal.persistenceDecision.severity, 'critical');
+  assert.equal(runtimeInteraction.persistenceStatus.providerOutbound.ok, false);
+  assert.match(runtimeInteraction.persistenceStatus.providerOutbound.error, /provider outbound exploded/);
 });
 
 test('codeClip core transaction rolls back pending interaction when reward persistence fails', async () => {

@@ -27,6 +27,7 @@ const dbModulePath = require.resolve("./db");
 const originalDb = require(dbModulePath);
 const providerDeliveries = new Map();
 const providerDeliveryCalls = [];
+const metaMessengerOutboundCalls = [];
 const providerBindings = [];
 const campaignsByCode = new Map();
 
@@ -42,22 +43,28 @@ function providerDeliveryKey(identity = {}) {
 function resetProviderDeliveryLedger() {
   providerDeliveries.clear();
   providerDeliveryCalls.length = 0;
+  metaMessengerOutboundCalls.length = 0;
   providerBindings.length = 0;
   campaignsByCode.clear();
   createCodeClipProviderDeliveryStub.fail = false;
   updateCodeClipProviderDeliveryStateStub.fail = false;
+  createOrGetCodeClipMetaMessengerOutboundStub.fail = false;
   providerBindingPool.failDeliveryLookup = false;
   providerBindingPool.failBindingLookup = false;
   providerBindingPool.bindingLookupCount = 0;
 }
 
 function createProviderDeliveryRow(delivery = {}) {
+  const provider = String(delivery.provider || "").trim().toLowerCase();
+  const eventCode = String(delivery.eventCode || "").trim();
+  const externalMessageId = String(delivery.externalMessageId || "").trim();
   return {
-    provider: String(delivery.provider || "").trim().toLowerCase(),
+    id: delivery.id || `${provider}-${eventCode}-${externalMessageId}`,
+    provider,
     providerAccountId: String(delivery.providerAccountId || "").trim(),
-    eventCode: String(delivery.eventCode || "").trim(),
+    eventCode,
     eventId: delivery.eventId || null,
-    externalMessageId: String(delivery.externalMessageId || "").trim(),
+    externalMessageId,
     idempotencyKey: delivery.idempotencyKey || null,
     payloadFingerprint: delivery.payloadFingerprint || null,
     verificationState: delivery.verificationState || "verified",
@@ -230,6 +237,48 @@ async function updateCodeClipProviderDeliveryStateStub(identity = {}, updates = 
   return { status: "updated", row };
 }
 
+async function withCodeClipCorePersistenceTransactionStub(work) {
+  return work({ queryClient: providerBindingPool });
+}
+
+async function saveCodeClipInteractionStub(interaction = {}) {
+  return {
+    id: `interaction-${interaction.eventCode}-${interaction.scanId}`,
+    ...interaction,
+  };
+}
+
+async function saveCodeClipRewardAssignmentsStub(snapshot = {}) {
+  return Array.isArray(snapshot.assignments)
+    ? snapshot.assignments.filter((assignment) => assignment?.tier)
+    : [];
+}
+
+async function saveCodeClipXtraRedemptionStub(record = {}) {
+  return record?.token ? { id: `clipxtra-${record.token}`, ...record } : null;
+}
+
+async function createOrGetCodeClipMetaMessengerOutboundStub(intent = {}, queryClient) {
+  metaMessengerOutboundCalls.push({ intent, queryClient });
+  if (createOrGetCodeClipMetaMessengerOutboundStub.fail) {
+    return {
+      ok: false,
+      status: "failed",
+      reason: "REPOSITORY_ERROR",
+      error: new Error("forced outbound repository failure"),
+    };
+  }
+
+  const existing = metaMessengerOutboundCalls
+    .slice(0, -1)
+    .find((call) => call.intent.idempotencyKey === intent.idempotencyKey);
+  return {
+    ok: true,
+    status: existing ? "existing" : "created",
+    row: { id: `outbound-${intent.idempotencyKey}` },
+  };
+}
+
 require.cache[dbModulePath] = {
   id: dbModulePath,
   filename: dbModulePath,
@@ -239,8 +288,13 @@ require.cache[dbModulePath] = {
     pool: providerBindingPool,
     saveCampaign: saveCampaignStub,
     getCampaignByCode: getCampaignByCodeStub,
+    saveCodeClipInteraction: saveCodeClipInteractionStub,
+    saveCodeClipRewardAssignments: saveCodeClipRewardAssignmentsStub,
+    saveCodeClipXtraRedemption: saveCodeClipXtraRedemptionStub,
+    withCodeClipCorePersistenceTransaction: withCodeClipCorePersistenceTransactionStub,
     createCodeClipProviderDelivery: createCodeClipProviderDeliveryStub,
     updateCodeClipProviderDeliveryState: updateCodeClipProviderDeliveryStateStub,
+    createOrGetCodeClipMetaMessengerOutbound: createOrGetCodeClipMetaMessengerOutboundStub,
   },
 };
 
@@ -394,6 +448,7 @@ async function createCodeClipMetaEvent(baseUrl, {
   bindAccount = true,
   bindingChannel = "messenger",
   legacyProviderAccountIds = false,
+  rewards = null,
 } = {}) {
   const code = `CC-META-${Date.now()}-${Math.random().toString(16).slice(2)}`.toUpperCase();
   const response = await fetch(`${baseUrl}/event`, {
@@ -411,7 +466,7 @@ async function createCodeClipMetaEvent(baseUrl, {
       activationKeyword: keyword,
       activationChannels,
       ...(legacyProviderAccountIds ? { providerAccountIds: [accountId] } : {}),
-      rewards: {
+      rewards: rewards || {
         openClip: {
           enabled: true,
           title: "OpenClip",
@@ -554,6 +609,165 @@ test("signed Meta request reaches existing codeClip provider runtime", async () 
         crypto.createHash("sha256").update(rawBody).digest("hex")
       );
     });
+  });
+});
+
+test("Meta Messenger reward flow persists outbound intent inside core persistence", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-outbound-${Date.now()}`;
+    const senderId = `psid-outbound-${Date.now()}`;
+    const keyword = `OUTBOUND-${Date.now()}`;
+    const messageId = `meta-outbound-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword,
+      rewards: {
+        openClip: {
+          enabled: true,
+          title: "OpenClip outbound",
+          type: "video",
+          contentUrl: "https://rewards.example/openclip-outbound",
+        },
+      },
+    });
+    const rawBody = metaBody({ messageId, accountId, senderId, text: keyword });
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider: "meta",
+      eventCode: code,
+      messageId,
+    });
+
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.success, true);
+    assertNoProviderInternals(payload);
+    assert.equal(metaMessengerOutboundCalls.length, 1);
+    assert.equal(metaMessengerOutboundCalls[0].queryClient, providerBindingPool);
+
+    const intent = metaMessengerOutboundCalls[0].intent;
+    assert.equal(intent.provider, "meta");
+    assert.equal(intent.channel, "messenger");
+    assert.equal(intent.outboundType, "reward_link");
+    assert.equal(intent.providerAccountId, accountId);
+    assert.equal(intent.recipientId, senderId);
+    assert.equal(intent.eventCode, code);
+    assert.equal(intent.bindingId, "binding-1");
+    assert.equal(intent.inboundDeliveryId, `meta-${code}-${messageId}`);
+    assert.equal(intent.externalInboundMessageId, messageId);
+    assert.match(String(intent.interactionId), /^interaction-/);
+    assert.equal(intent.deliverable.rewardTier, "openClip");
+    assert.equal(intent.deliverable.url, "https://rewards.example/openclip-outbound");
+    assert.equal(
+      intent.idempotencyKey,
+      `codeclip:meta:messenger:outbound:${accountId}:${messageId}:reward_link`
+    );
+    assert.equal(JSON.stringify(intent).includes("messaging_type"), false);
+    assert.equal(JSON.stringify(intent).includes("accessToken"), false);
+    assert.equal(JSON.stringify(intent).includes("Authorization"), false);
+
+    const delivery = Array.from(providerDeliveries.values()).find(
+      (row) => row.externalMessageId === messageId
+    );
+    assert.ok(delivery);
+    assert.equal(delivery.processingState, "completed");
+    assert.equal(delivery.corePersistenceState, "committed");
+    assert.equal(delivery.completionState, "completed");
+    assert.deepEqual(
+      JSON.parse(await redis.get(getProviderKeywordResponseKey(idempotencyKey))),
+      payload
+    );
+  });
+});
+
+test("Meta Messenger outbound repository failure fails closed before Redis cache and delivery completion", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-outbound-fail-${Date.now()}`;
+    const senderId = `psid-outbound-fail-${Date.now()}`;
+    const keyword = `OUTBOUNDFAIL-${Date.now()}`;
+    const messageId = `meta-outbound-fail-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword,
+      rewards: {
+        openClip: {
+          enabled: true,
+          title: "OpenClip outbound fail",
+          type: "video",
+          contentUrl: "https://rewards.example/openclip-outbound-fail",
+        },
+      },
+    });
+    const rawBody = metaBody({ messageId, accountId, senderId, text: keyword });
+    const idempotencyKey = buildProviderKeywordIdempotencyKey({
+      provider: "meta",
+      eventCode: code,
+      messageId,
+    });
+    createOrGetCodeClipMetaMessengerOutboundStub.fail = true;
+
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+
+    assertProviderUnavailable(response, payload);
+    assert.equal(metaMessengerOutboundCalls.length, 1);
+    assert.equal(await redis.get(getProviderKeywordResponseKey(idempotencyKey)), null);
+
+    const delivery = Array.from(providerDeliveries.values()).find(
+      (row) => row.externalMessageId === messageId
+    );
+    assert.ok(delivery);
+    assert.equal(delivery.processingState, "failed");
+    assert.equal(delivery.corePersistenceState, "failed");
+    assert.equal(delivery.completionState, "not_completed");
+    assert.equal(delivery.retryEligible, true);
+    assert.equal(delivery.terminalState, false);
+  });
+});
+
+test("Meta non-Messenger binding does not create Messenger outbound", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `page-not-messenger-${Date.now()}`;
+    const keyword = `NOMSG-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword,
+      activationChannels: ["Instagram"],
+      bindingChannel: "instagram",
+      rewards: {
+        openClip: {
+          enabled: true,
+          title: "OpenClip non messenger",
+          type: "video",
+          contentUrl: "https://rewards.example/openclip-non-messenger",
+        },
+      },
+    });
+    const rawBody = metaBody({
+      messageId: `meta-not-messenger-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.eventCode, code);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
   });
 });
 

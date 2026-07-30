@@ -1,6 +1,9 @@
 const codeClipVertical = require("./verticals/codeclip");
 const codePodVertical = require("./verticals/codepod");
 const { processCodeClipOutboxBatch } = require("./verticals/codeclip/outbox-worker");
+const {
+  persistMetaMessengerRewardOutboundIntent,
+} = require("./verticals/codeclip/meta-messenger-outbound-runtime");
 require("dotenv").config();
 
 const REDIS_ENABLED = !!process.env.REDIS_URL;
@@ -38,6 +41,7 @@ const {
   saveCodeClipXtraRedemption,
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
+  createOrGetCodeClipMetaMessengerOutbound,
   withCodeClipCorePersistenceTransaction,
   saveCodeClipOutboxEvent,
   createCodeClipProviderDelivery,
@@ -85,6 +89,9 @@ async function initializeCodeClipStartup({
   await databaseClient.ensureCodeClipProviderAccountBindingsTable();
   await databaseClient.ensureCodeClipProviderAccountBindingAuditTable();
   await databaseClient.ensureCodeClipProviderDeliveriesTable();
+  if (typeof databaseClient.ensureCodeClipMetaMessengerOutboundSchema === "function") {
+    await databaseClient.ensureCodeClipMetaMessengerOutboundSchema();
+  }
   await databaseClient.ensureCodeClipYouTubeWebSubSubscriptionsTable();
   await databaseClient.ensureCodeClipYouTubeWebSubDiagnosticProbeTables();
   await databaseClient.ensureCodeClipYouTubeOAuthStatesTable();
@@ -3994,6 +4001,7 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
     };
     const normalizedProviderInput = normalizeProviderKeywordIngress(req.params.provider, providerAdapterInput);
     let activationRequest = null;
+    let providerAccountBinding = null;
 
     if (liveProvider) {
       const keyword = String(normalizedProviderInput.keyword || "").trim();
@@ -4060,6 +4068,7 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
         });
         return sendCodeClipProviderLedgerFailure(res);
       }
+      providerAccountBinding = bindingRoute.binding || null;
 
       activationRequest = {
         ok: true,
@@ -4406,9 +4415,30 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
       saveCodeClipInteraction,
       saveCodeClipRewardAssignments,
       saveCodeClipXtraRedemption,
-      runCodeClipCorePersistenceTransaction: withCodeClipCorePersistenceTransaction,
-      saveCodeClipOutboxEvent,
-    });
+        runCodeClipCorePersistenceTransaction: withCodeClipCorePersistenceTransaction,
+        saveCodeClipOutboxEvent,
+        persistProviderOutboundIntent:
+          liveProvider &&
+          normalizedProvider === "meta" &&
+          String(providerAccountBinding?.channel || "").trim().toLowerCase() === "messenger"
+            ? ({ interaction, persistedInteraction, queryClient }) =>
+                persistMetaMessengerRewardOutboundIntent({
+                  outboundContext: {
+                    providerAccountId,
+                    recipientId: providerEnvelope.envelope.senderId,
+                    eventCode,
+                    bindingId: providerAccountBinding?.id || null,
+                    inboundDeliveryId: providerDeliveryRecord?.id || null,
+                    externalInboundMessageId: messageId,
+                    createdAt: providerEnvelope.envelope.receivedAt,
+                  },
+                  interaction,
+                  persistedInteraction,
+                  queryClient,
+                  createOrGetOutbound: createOrGetCodeClipMetaMessengerOutbound,
+                })
+            : undefined,
+      });
 
     const persistenceSeverity = String(result.internal?.persistenceDecision?.severity || "")
       .trim()

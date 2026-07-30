@@ -905,6 +905,13 @@ function createPersistenceStatus() {
   };
 }
 
+function initializeProviderOutboundPersistenceStatus(status = {}) {
+  if (!status.providerOutbound) {
+    status.providerOutbound = { attempted: false, ok: null, error: null };
+  }
+  return status.providerOutbound;
+}
+
 function recordPersistenceStep(status, step, ok, error = null, metadata = {}) {
   if (!status || !status[step]) return;
 
@@ -963,6 +970,7 @@ function buildPersistenceDecision(status = {}) {
     "interaction",
     "rewardAssignments",
     "clipXtraRedemption",
+    "providerOutbound",
   ]);
   const criticalFailures = failedSteps.filter((step) =>
     criticalSteps.has(step)
@@ -1240,6 +1248,7 @@ async function persistCodeClipCoreInteraction({
   saveCodeClipInteraction,
   saveCodeClipRewardAssignments,
   saveCodeClipXtraRedemption,
+  persistProviderOutboundIntent,
   runCodeClipCorePersistenceTransaction,
   logPrefix = "codeClip",
 }) {
@@ -1248,8 +1257,9 @@ async function persistCodeClipCoreInteraction({
 
   try {
     await runTransaction(async ({ queryClient } = {}) => {
+      let persistedInteraction = null;
       try {
-        const persistedInteraction = saveCodeClipInteraction
+        persistedInteraction = saveCodeClipInteraction
           ? await saveCodeClipInteraction(interaction, queryClient)
           : null;
         requireConfirmedPersistenceRow(persistedInteraction, "interaction");
@@ -1305,6 +1315,41 @@ async function persistCodeClipCoreInteraction({
                 "provider_event_has_no_individual_recipient"
               : "clipxtra_not_assigned",
         });
+      }
+
+      if (typeof persistProviderOutboundIntent === "function") {
+        initializeProviderOutboundPersistenceStatus(interaction.persistenceStatus);
+        try {
+          const providerOutboundResult = await persistProviderOutboundIntent({
+            interaction,
+            persistedInteraction,
+            queryClient,
+          });
+
+          if (providerOutboundResult?.status === "skipped") {
+            outcomes.push({
+              step: "providerOutbound",
+              type: "skipped",
+              reason: providerOutboundResult.reason || "not_required",
+            });
+          } else if (providerOutboundResult?.status === "committed") {
+            if (!providerOutboundResult.outboundId) {
+              throw new Error("provider outbound persistence did not confirm write");
+            }
+            outcomes.push({ step: "providerOutbound", type: "write" });
+          } else {
+            const failure =
+              providerOutboundResult?.error instanceof Error
+                ? providerOutboundResult.error
+                : new Error(providerOutboundResult?.reason || "provider outbound persistence failed");
+            if (providerOutboundResult?.reason) {
+              failure.persistenceReason = providerOutboundResult.reason;
+            }
+            throw failure;
+          }
+        } catch (dbError) {
+          throw markPersistenceError(dbError, "providerOutbound");
+        }
       }
     });
 
@@ -1433,6 +1478,7 @@ async function handleCodeClipKeywordEntry({
   saveCodeClipRewardAssignments,
   saveCodeClipXtraRedemption,
   saveCodeClipOutboxEvent,
+  persistProviderOutboundIntent,
   runCodeClipCorePersistenceTransaction,
   recordPersistenceAction: recordPersistenceActionHandler = recordPersistenceAction,
 }) {
@@ -1503,6 +1549,7 @@ async function handleCodeClipKeywordEntry({
     saveCodeClipInteraction,
     saveCodeClipRewardAssignments,
     saveCodeClipXtraRedemption,
+    persistProviderOutboundIntent,
     runCodeClipCorePersistenceTransaction,
     logPrefix: "codeClip keyword",
   });
