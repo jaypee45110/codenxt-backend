@@ -1,6 +1,13 @@
 const {
+  DISPATCH_MAX_ATTEMPT_COUNT,
   OUTBOUND_STATUSES,
+  buildDispatchOwnershipMetadata,
   buildMetaMessengerOutboundIdempotencyKey,
+  normalizeDispatchAttemptId,
+  normalizeDispatchAttemptNumber,
+  normalizeDispatchNow,
+  normalizeDispatchStaleAfterSeconds,
+  readDispatchOwnershipAttemptId,
   validateMetaMessengerOutboundIntent,
 } = require("./meta-messenger-outbound");
 
@@ -380,15 +387,584 @@ async function createOrGetCodeClipMetaMessengerOutbound(input = {}, queryClient)
   }
 }
 
+function parseAuthoritativeAttemptCount(row = {}) {
+  const attemptCount = Number(row.attemptCount);
+  if (!Number.isInteger(attemptCount) || attemptCount < 0) {
+    return { ok: false, reason: "DISPATCH_AUTHORITATIVE_STATE_INVALID" };
+  }
+  if (attemptCount > DISPATCH_MAX_ATTEMPT_COUNT + 1) {
+    return { ok: false, reason: "ATTEMPT_NUMBER_OVERFLOW" };
+  }
+  return { ok: true, attemptCount };
+}
+
+function parseAuthoritativeTimestamp(value, required) {
+  if (value === undefined || value === null || value === "") {
+    if (required) return { ok: false, reason: "DISPATCH_AUTHORITATIVE_STATE_INVALID" };
+    return { ok: true, value: null, epochMs: null };
+  }
+  const normalized =
+    value instanceof Date ? value.toISOString() : normalizeString(value);
+  const epochMs = Date.parse(normalized);
+  if (!normalized || !Number.isFinite(epochMs)) {
+    return { ok: false, reason: "DISPATCH_AUTHORITATIVE_STATE_INVALID" };
+  }
+  return { ok: true, value: normalized, epochMs };
+}
+
+/**
+ * Validates authoritative lifecycle fields only.
+ * Ownership token (last_error_metadata.attemptId) is never used to derive or repair state.
+ */
+function validateAuthoritativeDispatchState(row = {}) {
+  const status = normalizeString(row.status);
+  const terminal = Boolean(row.terminal);
+  const retryEligible = Boolean(row.retryEligible);
+  const attemptCountResult = parseAuthoritativeAttemptCount(row);
+  if (!attemptCountResult.ok) {
+    return repositoryError("conflict", attemptCountResult.reason, {
+      invariant: "authoritative_state",
+    });
+  }
+
+  const claimedAt = parseAuthoritativeTimestamp(row.claimedAt, false);
+  if (!claimedAt.ok) {
+    return repositoryError("conflict", claimedAt.reason, { field: "claimedAt" });
+  }
+  const sentAt = parseAuthoritativeTimestamp(row.sentAt, false);
+  if (!sentAt.ok) {
+    return repositoryError("conflict", sentAt.reason, { field: "sentAt" });
+  }
+  const failedAt = parseAuthoritativeTimestamp(row.failedAt, false);
+  if (!failedAt.ok) {
+    return repositoryError("conflict", failedAt.reason, { field: "failedAt" });
+  }
+
+  const expected = {
+    [OUTBOUND_STATUSES.PENDING]: { terminal: false, retryEligible: true },
+    [OUTBOUND_STATUSES.CLAIMED]: { terminal: false, retryEligible: false },
+    [OUTBOUND_STATUSES.RETRYABLE_FAILED]: { terminal: false, retryEligible: true },
+    [OUTBOUND_STATUSES.SENT]: { terminal: true, retryEligible: false },
+    [OUTBOUND_STATUSES.TERMINAL_FAILED]: { terminal: true, retryEligible: false },
+  }[status];
+
+  if (!expected) {
+    return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID", {
+      field: "status",
+      status,
+    });
+  }
+  if (terminal !== expected.terminal || retryEligible !== expected.retryEligible) {
+    return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID", {
+      field: "status_flags",
+      status,
+      terminal,
+      retryEligible,
+    });
+  }
+
+  if (status === OUTBOUND_STATUSES.CLAIMED) {
+    if (!claimedAt.value || attemptCountResult.attemptCount < 1) {
+      return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID", {
+        field: "claimed",
+      });
+    }
+  }
+  if (status === OUTBOUND_STATUSES.PENDING && attemptCountResult.attemptCount !== 0) {
+    return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID", {
+      field: "pending_attempt_count",
+    });
+  }
+  if (status === OUTBOUND_STATUSES.SENT && !sentAt.value) {
+    return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID", {
+      field: "sentAt",
+    });
+  }
+  if (
+    (status === OUTBOUND_STATUSES.RETRYABLE_FAILED ||
+      status === OUTBOUND_STATUSES.TERMINAL_FAILED) &&
+    !failedAt.value
+  ) {
+    return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID", {
+      field: "failedAt",
+    });
+  }
+
+  return {
+    ok: true,
+    status,
+    attemptCount: attemptCountResult.attemptCount,
+    terminal,
+    retryEligible,
+    claimedAt,
+    sentAt,
+    failedAt,
+  };
+}
+
+/**
+ * Ownership token must agree with caller when present for active ownership checks.
+ * Never reconstructs authoritative state from the token. Fail closed on inconsistency.
+ */
+function requireOwnershipTokenConsistency(row, expectedAttemptId = null) {
+  const ownership = readDispatchOwnershipAttemptId(row.lastErrorMetadata);
+  if (!ownership.ok) {
+    return repositoryError("conflict", ownership.reason || "DISPATCH_OWNERSHIP_METADATA_INVALID", {
+      invariant: "ownership_token_not_source_of_truth",
+    });
+  }
+
+  const authoritative = validateAuthoritativeDispatchState(row);
+  if (!authoritative.ok) return authoritative;
+
+  if (authoritative.status === OUTBOUND_STATUSES.PENDING) {
+    if (ownership.present) {
+      return repositoryError("conflict", "DISPATCH_STATE_INCONSISTENT", {
+        reason: "pending_with_ownership_token",
+        invariant: "ownership_token_not_source_of_truth",
+      });
+    }
+    return { ok: true, ownership, authoritative };
+  }
+
+  if (authoritative.status === OUTBOUND_STATUSES.CLAIMED) {
+    if (!ownership.present) {
+      return repositoryError("conflict", "DISPATCH_STATE_INCONSISTENT", {
+        reason: "claimed_without_ownership_token",
+        invariant: "ownership_token_not_source_of_truth",
+      });
+    }
+    if (expectedAttemptId && ownership.attemptId !== expectedAttemptId) {
+      return repositoryError("conflict", "DISPATCH_ATTEMPT_OWNERSHIP_MISMATCH", {
+        invariant: "ownership_token_not_source_of_truth",
+      });
+    }
+    return { ok: true, ownership, authoritative };
+  }
+
+  if (
+    authoritative.status === OUTBOUND_STATUSES.SENT ||
+    authoritative.status === OUTBOUND_STATUSES.RETRYABLE_FAILED ||
+    authoritative.status === OUTBOUND_STATUSES.TERMINAL_FAILED
+  ) {
+    if (!ownership.present) {
+      return repositoryError("conflict", "DISPATCH_STATE_INCONSISTENT", {
+        reason: "terminal_or_failed_without_ownership_token",
+        invariant: "ownership_token_not_source_of_truth",
+      });
+    }
+    if (expectedAttemptId && ownership.attemptId !== expectedAttemptId) {
+      return repositoryError("conflict", "DISPATCH_ATTEMPT_OWNERSHIP_MISMATCH", {
+        invariant: "ownership_token_not_source_of_truth",
+      });
+    }
+    return { ok: true, ownership, authoritative };
+  }
+
+  return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID");
+}
+
+function isClaimStale(claimedAtEpochMs, nowEpochMs, staleAfterSeconds) {
+  if (!Number.isFinite(claimedAtEpochMs) || !Number.isFinite(nowEpochMs)) return false;
+  return claimedAtEpochMs + staleAfterSeconds * 1000 <= nowEpochMs;
+}
+
+async function applyOutboundDispatchUpdate(id, expected, values, queryClient) {
+  const result = await queryClient.query(
+    `
+      UPDATE ${TABLE_NAME}
+      SET
+        status = $2,
+        attempt_count = $3,
+        retry_eligible = $4,
+        terminal = $5,
+        last_error_code = $6,
+        last_error_metadata = $7::jsonb,
+        claimed_at = $8::timestamptz,
+        sent_at = $9::timestamptz,
+        failed_at = $10::timestamptz,
+        updated_at = $11::timestamptz
+      WHERE id = $1
+        AND status = $12
+        AND attempt_count = $13
+        AND terminal IS NOT DISTINCT FROM $14
+        AND retry_eligible IS NOT DISTINCT FROM $15
+      RETURNING *
+    `,
+    [
+      id,
+      values.status,
+      values.attemptCount,
+      values.retryEligible,
+      values.terminal,
+      values.lastErrorCode,
+      values.lastErrorMetadata === null ? null : JSON.stringify(values.lastErrorMetadata),
+      values.claimedAt,
+      values.sentAt,
+      values.failedAt,
+      values.updatedAt,
+      expected.status,
+      expected.attemptCount,
+      expected.terminal,
+      expected.retryEligible,
+    ]
+  );
+  return mapCodeClipMetaMessengerOutboundRow(result.rows?.[0] || null);
+}
+
+async function claimCodeClipMetaMessengerOutboundDispatch(input = {}, queryClient) {
+  if (!queryClient || typeof queryClient.query !== "function") {
+    return repositoryError("failed", "QUERY_CLIENT_REQUIRED");
+  }
+
+  const outboundId = Number(input.outboundId);
+  if (!Number.isInteger(outboundId) || outboundId <= 0) {
+    return repositoryError("invalid_id", "OUTBOUND_ID_INVALID");
+  }
+  const attemptIdResult = normalizeDispatchAttemptId(input.attemptId);
+  if (!attemptIdResult.ok) {
+    return repositoryError("invalid_attempt_id", attemptIdResult.reason, attemptIdResult.details || {});
+  }
+  const staleResult = normalizeDispatchStaleAfterSeconds(input.staleAfterSeconds);
+  if (!staleResult.ok) {
+    return repositoryError("invalid_stale_after", staleResult.reason, staleResult.details || {});
+  }
+  const nowResult = normalizeDispatchNow(input.now);
+  if (!nowResult.ok) {
+    return repositoryError("invalid_now", nowResult.reason, nowResult.details || {});
+  }
+
+  const ownershipMetadata = buildDispatchOwnershipMetadata(attemptIdResult.attemptId);
+  if (!ownershipMetadata.ok) {
+    return repositoryError("invalid_attempt_id", ownershipMetadata.reason);
+  }
+
+  try {
+    const current = await getCodeClipMetaMessengerOutboundById(outboundId, queryClient);
+    if (!current.ok) return current;
+
+    // Authoritative lifecycle fields are source of truth. Ownership token is never used to
+    // derive or repair status/attempt_count/flags/timestamps.
+    const authoritativeOnly = validateAuthoritativeDispatchState(current.row);
+    if (!authoritativeOnly.ok) return authoritativeOnly;
+
+    const ownership = readDispatchOwnershipAttemptId(current.row.lastErrorMetadata);
+    if (!ownership.ok) {
+      return repositoryError("conflict", ownership.reason || "DISPATCH_OWNERSHIP_METADATA_INVALID", {
+        invariant: "ownership_token_not_source_of_truth",
+      });
+    }
+
+    if (authoritativeOnly.status === OUTBOUND_STATUSES.PENDING) {
+      if (ownership.present) {
+        return repositoryError("conflict", "DISPATCH_STATE_INCONSISTENT", {
+          reason: "pending_with_ownership_token",
+          invariant: "ownership_token_not_source_of_truth",
+        });
+      }
+    } else if (authoritativeOnly.status === OUTBOUND_STATUSES.CLAIMED) {
+      if (!ownership.present) {
+        return repositoryError("conflict", "DISPATCH_STATE_INCONSISTENT", {
+          reason: "claimed_without_ownership_token",
+          invariant: "ownership_token_not_source_of_truth",
+        });
+      }
+      const stale = isClaimStale(
+        authoritativeOnly.claimedAt.epochMs,
+        nowResult.now.getTime(),
+        staleResult.staleAfterSeconds
+      );
+      if (!stale) {
+        if (ownership.attemptId === attemptIdResult.attemptId) {
+          return {
+            ok: true,
+            status: "existing",
+            claimed: false,
+            existing: true,
+            row: current.row,
+          };
+        }
+        return repositoryError("conflict", "ACTIVE_CLAIM_NOT_STALE", {
+          invariant: "ownership_token_not_source_of_truth",
+        });
+      }
+      // Stale reclaim is driven only by authoritative claimed_at + cutoff.
+    } else if (authoritativeOnly.status === OUTBOUND_STATUSES.RETRYABLE_FAILED) {
+      if (!ownership.present) {
+        return repositoryError("conflict", "DISPATCH_STATE_INCONSISTENT", {
+          reason: "retryable_failed_without_ownership_token",
+          invariant: "ownership_token_not_source_of_truth",
+        });
+      }
+    } else if (
+      authoritativeOnly.status === OUTBOUND_STATUSES.SENT ||
+      authoritativeOnly.status === OUTBOUND_STATUSES.TERMINAL_FAILED
+    ) {
+      return repositoryError("conflict", "DISPATCH_NOT_CLAIMABLE", {
+        status: authoritativeOnly.status,
+      });
+    } else {
+      return repositoryError("conflict", "DISPATCH_AUTHORITATIVE_STATE_INVALID");
+    }
+
+    const nextAttemptCount = authoritativeOnly.attemptCount + 1;
+    if (nextAttemptCount > DISPATCH_MAX_ATTEMPT_COUNT) {
+      return repositoryError("conflict", "ATTEMPT_NUMBER_OVERFLOW");
+    }
+
+    const updated = await applyOutboundDispatchUpdate(
+      outboundId,
+      {
+        status: authoritativeOnly.status,
+        attemptCount: authoritativeOnly.attemptCount,
+        terminal: authoritativeOnly.terminal,
+        retryEligible: authoritativeOnly.retryEligible,
+      },
+      {
+        status: OUTBOUND_STATUSES.CLAIMED,
+        attemptCount: nextAttemptCount,
+        retryEligible: false,
+        terminal: false,
+        lastErrorCode: null,
+        lastErrorMetadata: ownershipMetadata.metadata,
+        claimedAt: nowResult.nowIso,
+        sentAt: current.row.sentAt,
+        failedAt: current.row.failedAt,
+        updatedAt: nowResult.nowIso,
+      },
+      queryClient
+    );
+
+    if (!updated) {
+      return repositoryError("conflict", "DISPATCH_CLAIM_RACE", {
+        invariant: "authoritative_optimistic_lock",
+      });
+    }
+
+    return {
+      ok: true,
+      status: "claimed",
+      claimed: true,
+      existing: false,
+      row: updated,
+    };
+  } catch (error) {
+    return repositoryError("failed", "REPOSITORY_ERROR", {}, error);
+  }
+}
+
+function normalizeFailureCode(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  if (normalized.length > 120) return null;
+  return normalized.toLowerCase().replace(/[^a-z0-9_:-]/g, "_");
+}
+
+async function recordCodeClipMetaMessengerOutboundDispatchResult(input = {}, queryClient) {
+  if (!queryClient || typeof queryClient.query !== "function") {
+    return repositoryError("failed", "QUERY_CLIENT_REQUIRED");
+  }
+
+  const outboundId = Number(input.outboundId);
+  if (!Number.isInteger(outboundId) || outboundId <= 0) {
+    return repositoryError("invalid_id", "OUTBOUND_ID_INVALID");
+  }
+  const attemptIdResult = normalizeDispatchAttemptId(input.attemptId);
+  if (!attemptIdResult.ok) {
+    return repositoryError("invalid_attempt_id", attemptIdResult.reason, attemptIdResult.details || {});
+  }
+  const attemptNumberResult = normalizeDispatchAttemptNumber(input.attemptNumber);
+  if (!attemptNumberResult.ok) {
+    return repositoryError(
+      "invalid_attempt_number",
+      attemptNumberResult.reason,
+      attemptNumberResult.details || {}
+    );
+  }
+
+  let outcome;
+  const rawOutcome = normalizeString(input.outcome).toLowerCase();
+  if (rawOutcome === OUTBOUND_STATUSES.SENT || rawOutcome === "accepted") {
+    outcome = OUTBOUND_STATUSES.SENT;
+  } else if (rawOutcome === OUTBOUND_STATUSES.RETRYABLE_FAILED) {
+    outcome = OUTBOUND_STATUSES.RETRYABLE_FAILED;
+  } else if (rawOutcome === OUTBOUND_STATUSES.TERMINAL_FAILED) {
+    outcome = OUTBOUND_STATUSES.TERMINAL_FAILED;
+  } else if (rawOutcome === "failed") {
+    outcome =
+      input.retryable === true
+        ? OUTBOUND_STATUSES.RETRYABLE_FAILED
+        : OUTBOUND_STATUSES.TERMINAL_FAILED;
+  } else {
+    return repositoryError("invalid_outcome", "DISPATCH_OUTCOME_INVALID");
+  }
+
+  const nowResult = normalizeDispatchNow(input.now);
+  if (!nowResult.ok) {
+    return repositoryError("invalid_now", nowResult.reason, nowResult.details || {});
+  }
+
+  let lastErrorCode = null;
+  let lastErrorMetadata = buildDispatchOwnershipMetadata(attemptIdResult.attemptId);
+  if (!lastErrorMetadata.ok) {
+    return repositoryError("invalid_attempt_id", lastErrorMetadata.reason);
+  }
+  lastErrorMetadata = lastErrorMetadata.metadata;
+
+  if (outcome !== OUTBOUND_STATUSES.SENT) {
+    lastErrorCode = normalizeFailureCode(input.failureCode || input.reason);
+    if (!lastErrorCode) {
+      return repositoryError("invalid_failure_code", "FAILURE_CODE_REQUIRED");
+    }
+    if (input.failureMetadata !== undefined && input.failureMetadata !== null) {
+      if (typeof input.failureMetadata !== "object" || Array.isArray(input.failureMetadata)) {
+        return repositoryError("invalid_failure_metadata", "FAILURE_METADATA_INVALID");
+      }
+      const forbidden = findForbiddenPersistenceKeys(input.failureMetadata);
+      if (forbidden.length > 0) {
+        return repositoryError("invalid_failure_metadata", "FORBIDDEN_PERSISTENCE_FIELD", {
+          fields: forbidden,
+        });
+      }
+      lastErrorMetadata = {
+        attemptId: attemptIdResult.attemptId,
+        details: canonicalize(input.failureMetadata),
+      };
+    }
+  }
+
+  // B11.2C does not persist providerMessageId (transport result deferred to B11.2D).
+  if (input.providerMessageId !== undefined && input.providerMessageId !== null && input.providerMessageId !== "") {
+    return repositoryError("invalid_result", "PROVIDER_MESSAGE_ID_NOT_SUPPORTED_IN_B11_2C");
+  }
+
+  try {
+    const current = await getCodeClipMetaMessengerOutboundById(outboundId, queryClient);
+    if (!current.ok) return current;
+
+    const authoritativeOnly = validateAuthoritativeDispatchState(current.row);
+    if (!authoritativeOnly.ok) return authoritativeOnly;
+
+    const ownership = readDispatchOwnershipAttemptId(current.row.lastErrorMetadata);
+    if (!ownership.ok) {
+      return repositoryError("conflict", ownership.reason || "DISPATCH_OWNERSHIP_METADATA_INVALID", {
+        invariant: "ownership_token_not_source_of_truth",
+      });
+    }
+
+    // Idempotent terminal/failed result for same authoritative attempt_count + ownership token.
+    if (
+      authoritativeOnly.status === outcome &&
+      authoritativeOnly.attemptCount === attemptNumberResult.attemptNumber
+    ) {
+      if (!ownership.present || ownership.attemptId !== attemptIdResult.attemptId) {
+        return repositoryError("conflict", "DISPATCH_STATE_INCONSISTENT", {
+          invariant: "ownership_token_not_source_of_truth",
+        });
+      }
+      if (outcome !== OUTBOUND_STATUSES.SENT) {
+        const existingCode = normalizeString(current.row.lastErrorCode).toLowerCase();
+        if (existingCode && existingCode !== lastErrorCode) {
+          return repositoryError("conflict", "DISPATCH_RESULT_MISMATCH");
+        }
+      }
+      return {
+        ok: true,
+        status: "existing",
+        recorded: false,
+        existing: true,
+        row: current.row,
+      };
+    }
+
+    if (authoritativeOnly.status === OUTBOUND_STATUSES.SENT) {
+      return repositoryError("conflict", "DISPATCH_ALREADY_SENT");
+    }
+    if (authoritativeOnly.status === OUTBOUND_STATUSES.TERMINAL_FAILED) {
+      return repositoryError("conflict", "DISPATCH_ALREADY_TERMINAL_FAILED");
+    }
+
+    if (authoritativeOnly.status !== OUTBOUND_STATUSES.CLAIMED) {
+      return repositoryError("conflict", "DISPATCH_NOT_CLAIMED");
+    }
+    if (!ownership.present) {
+      return repositoryError("conflict", "DISPATCH_STATE_INCONSISTENT", {
+        reason: "claimed_without_ownership_token",
+        invariant: "ownership_token_not_source_of_truth",
+      });
+    }
+    if (ownership.attemptId !== attemptIdResult.attemptId) {
+      return repositoryError("conflict", "DISPATCH_ATTEMPT_OWNERSHIP_MISMATCH", {
+        invariant: "ownership_token_not_source_of_truth",
+      });
+    }
+    // attempt_count is source of truth for attempt number; token never repairs it.
+    if (authoritativeOnly.attemptCount !== attemptNumberResult.attemptNumber) {
+      return repositoryError("conflict", "DISPATCH_ATTEMPT_NUMBER_MISMATCH", {
+        authoritativeAttemptCount: authoritativeOnly.attemptCount,
+        providedAttemptNumber: attemptNumberResult.attemptNumber,
+      });
+    }
+
+    const values = {
+      status: outcome,
+      attemptCount: authoritativeOnly.attemptCount,
+      retryEligible: outcome === OUTBOUND_STATUSES.RETRYABLE_FAILED,
+      terminal: outcome !== OUTBOUND_STATUSES.RETRYABLE_FAILED,
+      lastErrorCode: outcome === OUTBOUND_STATUSES.SENT ? null : lastErrorCode,
+      lastErrorMetadata,
+      claimedAt: current.row.claimedAt,
+      sentAt: outcome === OUTBOUND_STATUSES.SENT ? nowResult.nowIso : current.row.sentAt,
+      failedAt:
+        outcome === OUTBOUND_STATUSES.SENT ? current.row.failedAt : nowResult.nowIso,
+      updatedAt: nowResult.nowIso,
+    };
+
+    const updated = await applyOutboundDispatchUpdate(
+      outboundId,
+      {
+        status: OUTBOUND_STATUSES.CLAIMED,
+        attemptCount: authoritativeOnly.attemptCount,
+        terminal: false,
+        retryEligible: false,
+      },
+      values,
+      queryClient
+    );
+
+    if (!updated) {
+      return repositoryError("conflict", "DISPATCH_RECORD_RACE", {
+        invariant: "authoritative_optimistic_lock",
+      });
+    }
+
+    return {
+      ok: true,
+      status: outcome === OUTBOUND_STATUSES.SENT ? "sent" : "failed",
+      outcome,
+      recorded: true,
+      existing: false,
+      row: updated,
+    };
+  } catch (error) {
+    return repositoryError("failed", "REPOSITORY_ERROR", {}, error);
+  }
+}
+
 module.exports = {
   TABLE_NAME,
+  applyOutboundDispatchUpdate,
   buildExpectedIdempotencyKey,
   buildImmutableSnapshotFromIntent,
   buildValidatedIntent,
+  claimCodeClipMetaMessengerOutboundDispatch,
   createOrGetCodeClipMetaMessengerOutbound,
   ensureCodeClipMetaMessengerOutboundSchema,
   findForbiddenPersistenceKeys,
   getCodeClipMetaMessengerOutboundById,
   getCodeClipMetaMessengerOutboundByIdempotencyKey,
   mapCodeClipMetaMessengerOutboundRow,
+  recordCodeClipMetaMessengerOutboundDispatchResult,
+  requireOwnershipTokenConsistency,
+  validateAuthoritativeDispatchState,
 };

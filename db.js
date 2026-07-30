@@ -11,6 +11,8 @@ const {
   createOrGetCodeClipMetaMessengerOutbound: createOrGetCodeClipMetaMessengerOutboundImpl,
   getCodeClipMetaMessengerOutboundById: getCodeClipMetaMessengerOutboundByIdImpl,
   getCodeClipMetaMessengerOutboundByIdempotencyKey: getCodeClipMetaMessengerOutboundByIdempotencyKeyImpl,
+  claimCodeClipMetaMessengerOutboundDispatch: claimCodeClipMetaMessengerOutboundDispatchImpl,
+  recordCodeClipMetaMessengerOutboundDispatchResult: recordCodeClipMetaMessengerOutboundDispatchResultImpl,
 } = require('./verticals/codeclip/meta-messenger-outbound-repository');
 
 async function testDbConnection() {
@@ -147,6 +149,22 @@ async function getCodeClipMetaMessengerOutboundByIdempotencyKey(idempotencyKey, 
     await ensureCodeClipMetaMessengerOutboundSchema(queryClient);
   }
   return getCodeClipMetaMessengerOutboundByIdempotencyKeyImpl(idempotencyKey, queryClient);
+}
+
+async function claimCodeClipMetaMessengerOutboundDispatch(input, queryClient = pool) {
+  if (!queryClient) return codeClipMetaMessengerOutboundQueryClientRequiredResult();
+  if (queryClient === pool) {
+    await ensureCodeClipMetaMessengerOutboundSchema(queryClient);
+  }
+  return claimCodeClipMetaMessengerOutboundDispatchImpl(input, queryClient);
+}
+
+async function recordCodeClipMetaMessengerOutboundDispatchResult(input, queryClient = pool) {
+  if (!queryClient) return codeClipMetaMessengerOutboundQueryClientRequiredResult();
+  if (queryClient === pool) {
+    await ensureCodeClipMetaMessengerOutboundSchema(queryClient);
+  }
+  return recordCodeClipMetaMessengerOutboundDispatchResultImpl(input, queryClient);
 }
 
 async function ensureCampaignsTable() {
@@ -4553,6 +4571,8 @@ module.exports = {
   createOrGetCodeClipMetaMessengerOutbound,
   getCodeClipMetaMessengerOutboundById,
   getCodeClipMetaMessengerOutboundByIdempotencyKey,
+  claimCodeClipMetaMessengerOutboundDispatch,
+  recordCodeClipMetaMessengerOutboundDispatchResult,
   ensureCodeClipYouTubeWebSubSubscriptionsTable,
   ensureCodeClipYouTubeWebSubDiagnosticProbeTables,
   ensureCodeClipYouTubeOAuthStatesTable,

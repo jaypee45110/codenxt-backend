@@ -19,6 +19,36 @@ const TERMINAL_STATUSES = new Set([
   OUTBOUND_STATUSES.TERMINAL_FAILED,
 ]);
 
+/** Opaque ownership token key inside last_error_metadata. Never source of truth for lifecycle state. */
+const DISPATCH_OWNERSHIP_ATTEMPT_ID_KEY = "attemptId";
+const DISPATCH_ATTEMPT_ID_MAX_LENGTH = 128;
+const DISPATCH_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const DISPATCH_MAX_ATTEMPT_COUNT = 2147483646;
+const DISPATCH_MAX_STALE_AFTER_SECONDS = 7 * 24 * 60 * 60;
+const DISPATCH_DEFAULT_STALE_AFTER_SECONDS = 300;
+
+/**
+ * Invariant: last_error_metadata.attemptId is an ownership token only.
+ * Authoritative dispatch state is status, attempt_count, terminal, retry_eligible,
+ * claimed_at, sent_at, failed_at, and last_error_code. Never reconstruct or repair
+ * authoritative fields from the ownership token.
+ */
+const DISPATCH_OWNERSHIP_TOKEN_INVARIANT = Object.freeze({
+  sourceOfTruth: false,
+  role: "ownership_token_only",
+  field: `last_error_metadata.${DISPATCH_OWNERSHIP_ATTEMPT_ID_KEY}`,
+  authoritativeFields: Object.freeze([
+    "status",
+    "attemptCount",
+    "terminal",
+    "retryEligible",
+    "claimedAt",
+    "sentAt",
+    "failedAt",
+    "lastErrorCode",
+  ]),
+});
+
 const VALID_STATUS_TRANSITIONS = Object.freeze({
   [OUTBOUND_STATUSES.PENDING]: new Set([
     OUTBOUND_STATUSES.CLAIMED,
@@ -324,14 +354,116 @@ function toPublicMetaMessengerOutboundStatus(status = {}) {
   };
 }
 
+function normalizeDispatchAttemptId(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return outboundError("ATTEMPT_ID_REQUIRED");
+  if (normalized.length > DISPATCH_ATTEMPT_ID_MAX_LENGTH) {
+    return outboundError("ATTEMPT_ID_INVALID");
+  }
+  if (!DISPATCH_ATTEMPT_ID_PATTERN.test(normalized)) {
+    return outboundError("ATTEMPT_ID_INVALID");
+  }
+  return { ok: true, attemptId: normalized };
+}
+
+function normalizeDispatchAttemptNumber(value) {
+  const attemptNumber = Number(value);
+  if (!Number.isInteger(attemptNumber) || attemptNumber < 1) {
+    return outboundError("ATTEMPT_NUMBER_INVALID");
+  }
+  if (attemptNumber > DISPATCH_MAX_ATTEMPT_COUNT + 1) {
+    return outboundError("ATTEMPT_NUMBER_OVERFLOW");
+  }
+  return { ok: true, attemptNumber };
+}
+
+function normalizeDispatchStaleAfterSeconds(value = DISPATCH_DEFAULT_STALE_AFTER_SECONDS) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > DISPATCH_MAX_STALE_AFTER_SECONDS) {
+    return outboundError("STALE_AFTER_SECONDS_INVALID", {
+      max: DISPATCH_MAX_STALE_AFTER_SECONDS,
+    });
+  }
+  return { ok: true, staleAfterSeconds: parsed };
+}
+
+function normalizeDispatchNow(value) {
+  if (value === undefined || value === null || value === "") {
+    return { ok: true, now: new Date(), nowIso: new Date().toISOString() };
+  }
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) {
+      return outboundError("DISPATCH_NOW_INVALID");
+    }
+    return { ok: true, now: value, nowIso: value.toISOString() };
+  }
+  const normalized = normalizeString(value);
+  const parsed = Date.parse(normalized);
+  if (!normalized || !Number.isFinite(parsed)) {
+    return outboundError("DISPATCH_NOW_INVALID");
+  }
+  return { ok: true, now: new Date(parsed), nowIso: new Date(parsed).toISOString() };
+}
+
+/**
+ * Reads ownership token only. Does not interpret lifecycle state.
+ * Callers must use authoritative row fields for status decisions.
+ */
+function readDispatchOwnershipAttemptId(lastErrorMetadata) {
+  if (lastErrorMetadata === undefined || lastErrorMetadata === null) {
+    return { ok: true, present: false, attemptId: null };
+  }
+  if (typeof lastErrorMetadata !== "object" || Array.isArray(lastErrorMetadata)) {
+    return outboundError("DISPATCH_OWNERSHIP_METADATA_INVALID");
+  }
+  if (!Object.prototype.hasOwnProperty.call(lastErrorMetadata, DISPATCH_OWNERSHIP_ATTEMPT_ID_KEY)) {
+    return { ok: true, present: false, attemptId: null };
+  }
+  const raw = lastErrorMetadata[DISPATCH_OWNERSHIP_ATTEMPT_ID_KEY];
+  if (raw === undefined || raw === null || raw === "") {
+    return outboundError("DISPATCH_OWNERSHIP_METADATA_INVALID");
+  }
+  if (typeof raw !== "string") {
+    return outboundError("DISPATCH_OWNERSHIP_METADATA_INVALID");
+  }
+  const normalized = normalizeDispatchAttemptId(raw);
+  if (!normalized.ok) {
+    return outboundError("DISPATCH_OWNERSHIP_METADATA_INVALID", normalized.details || {});
+  }
+  return { ok: true, present: true, attemptId: normalized.attemptId };
+}
+
+function buildDispatchOwnershipMetadata(attemptId) {
+  const normalized = normalizeDispatchAttemptId(attemptId);
+  if (!normalized.ok) return normalized;
+  return {
+    ok: true,
+    metadata: {
+      [DISPATCH_OWNERSHIP_ATTEMPT_ID_KEY]: normalized.attemptId,
+    },
+  };
+}
+
 module.exports = {
   CHANNEL,
+  DISPATCH_ATTEMPT_ID_MAX_LENGTH,
+  DISPATCH_DEFAULT_STALE_AFTER_SECONDS,
+  DISPATCH_MAX_ATTEMPT_COUNT,
+  DISPATCH_MAX_STALE_AFTER_SECONDS,
+  DISPATCH_OWNERSHIP_ATTEMPT_ID_KEY,
+  DISPATCH_OWNERSHIP_TOKEN_INVARIANT,
   OUTBOUND_STATUSES,
   PROVIDER,
+  buildDispatchOwnershipMetadata,
   buildMetaMessengerOutboundIdempotencyKey,
   buildMetaMessengerRewardOutboundIntent,
   createMetaMessengerOutboundStatus,
   maskMetaMessengerOutboundIdentifier: maskIdentifier,
+  normalizeDispatchAttemptId,
+  normalizeDispatchAttemptNumber,
+  normalizeDispatchNow,
+  normalizeDispatchStaleAfterSeconds,
+  readDispatchOwnershipAttemptId,
   selectRewardLinkDeliverable,
   toPublicMetaMessengerOutboundStatus,
   transitionMetaMessengerOutboundStatus,
