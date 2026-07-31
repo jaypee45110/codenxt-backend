@@ -84,6 +84,30 @@ async function resolveCodeClipProviderAccountBindingRoute({
     };
   }
 
+  // Product-channel integrity for Meta surfaces: envelope channel must match
+  // durable binding channel. Lookup remains provider+providerAccountId unique;
+  // this check prevents Instagram traffic from consuming a Messenger binding
+  // (and the reverse) before activation, delivery processing, or outbound.
+  const PRODUCT_CHANNELS = new Set(["messenger", "instagram", "whatsapp"]);
+  const envelopeChannel = normalizeToken(channel).toLowerCase();
+  const bindingChannel = normalizeToken(binding.channel).toLowerCase();
+  if (
+    PRODUCT_CHANNELS.has(envelopeChannel) ||
+    PRODUCT_CHANNELS.has(bindingChannel)
+  ) {
+    if (!envelopeChannel || envelopeChannel !== bindingChannel) {
+      return {
+        ok: false,
+        reason: "PROVIDER_BINDING_CHANNEL_MISMATCH",
+        resolution: buildResolution({
+          provider: normalizedProvider,
+          providerAccountId: normalizedProviderAccountId,
+          eventCode: normalizeToken(binding.eventCode),
+        }),
+      };
+    }
+  }
+
   const eventCode = normalizeToken(binding.eventCode);
   let event = null;
   try {

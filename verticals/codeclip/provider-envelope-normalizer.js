@@ -183,6 +183,63 @@ function resolveMessagingProviderAccountId(body = {}, messaging = null) {
   return { ok: true, providerAccountId };
 }
 
+/**
+ * Count processable messaging items across all entry[] arrays.
+ * B13 policy (Alternative B): Messenger/Instagram keyword ingress does not
+ * silently process only the first event when multiple messaging items exist.
+ */
+function countMetaMessagingEvents(body = {}) {
+  const entries = Array.isArray(body.entry) ? body.entry : [];
+  let count = 0;
+  for (const entry of entries) {
+    if (Array.isArray(entry?.messaging)) {
+      count += entry.messaging.length;
+    }
+  }
+  return count;
+}
+
+/**
+ * True when message.attachments has at least one object-like attachment
+ * with a type and/or payload. Empty arrays and non-objects do not qualify.
+ */
+function hasValidMetaMessageAttachment(message = null) {
+  if (!message || typeof message !== "object") return false;
+  if (!Array.isArray(message.attachments) || message.attachments.length === 0) {
+    return false;
+  }
+  return message.attachments.some(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      !Array.isArray(item) &&
+      (normalizeValue(item.type) ||
+        (item.payload && typeof item.payload === "object"))
+  );
+}
+
+/**
+ * Classify non-keyword Messenger/Instagram messaging events.
+ * Returns a reason when the event must not enter keyword activation.
+ */
+function classifyMetaMessagingEventType(messaging = null) {
+  if (!messaging || typeof messaging !== "object") return null;
+
+  if (messaging.message && messaging.message.is_echo === true) {
+    return "MESSAGE_IS_ECHO";
+  }
+  if (messaging.delivery || messaging.read) {
+    return "NON_KEYWORD_EVENT";
+  }
+  if (messaging.postback || messaging.referral || messaging.reaction) {
+    return "NON_KEYWORD_EVENT";
+  }
+  if (messaging.message && messaging.message.is_deleted === true) {
+    return "NON_KEYWORD_EVENT";
+  }
+  return null;
+}
+
 function normalizeMetaEnvelope(input) {
   const { provider, rawProvider, body = {}, headers, query, metadata, receivedAt } = input;
   const whatsappValue = body.entry?.[0]?.changes?.[0]?.value;
@@ -195,7 +252,23 @@ function normalizeMetaEnvelope(input) {
   const isInstagramEnvelope = channel === "instagram";
   const isMessengerEnvelope = channel === "messenger";
 
+  // Alternative B multi-event policy for Messenger/Instagram keyword ingress.
+  if (isMessengerEnvelope || isInstagramEnvelope) {
+    const messagingEventCount = countMetaMessagingEvents(body);
+    if (messagingEventCount > 1) {
+      return { ok: false, reason: "MULTI_EVENT_UNSUPPORTED" };
+    }
+  }
+
   const messaging = body.entry?.[0]?.messaging?.[0] || null;
+
+  if (isMessengerEnvelope || isInstagramEnvelope) {
+    const nonKeywordReason = classifyMetaMessagingEventType(messaging);
+    if (nonKeywordReason) {
+      return { ok: false, reason: nonKeywordReason };
+    }
+  }
+
   const messageId = firstValue([
     body.messageId,
     body.providerEventId,
@@ -232,6 +305,16 @@ function normalizeMetaEnvelope(input) {
   ]);
 
   if (!messageId) return { ok: false, reason: "MESSAGE_ID_REQUIRED" };
+  // Legitimate non-keyword media: valid attachment(s) without text → ignore
+  // (retry-safe). Empty attachments[] or invalid shapes fall through to
+  // TEXT_REQUIRED / malformed handling and must not be treated as success.
+  if (
+    (isMessengerEnvelope || isInstagramEnvelope) &&
+    !text &&
+    hasValidMetaMessageAttachment(messaging?.message)
+  ) {
+    return { ok: false, reason: "NON_KEYWORD_EVENT" };
+  }
   if (!text) return { ok: false, reason: "TEXT_REQUIRED" };
   if (isWhatsAppMessageEnvelope && !providerAccountId) {
     return { ok: false, reason: "PROVIDER_ACCOUNT_ID_REQUIRED" };
@@ -293,4 +376,7 @@ module.exports = {
   normalizeCodeClipProviderEnvelope,
   resolveMetaProviderChannel,
   resolveMessagingProviderAccountId,
+  countMetaMessagingEvents,
+  classifyMetaMessagingEventType,
+  hasValidMetaMessageAttachment,
 };

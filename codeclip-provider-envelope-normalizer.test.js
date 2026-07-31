@@ -407,6 +407,292 @@ test("codeClip provider envelope normalizer fails closed for ambiguous Meta body
   );
 });
 
+test("codeClip provider envelope normalizer fails closed for multi messaging events", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "instagram",
+        entry: [
+          {
+            id: "ig-1",
+            messaging: [
+              {
+                sender: { id: "u1" },
+                recipient: { id: "ig-1" },
+                message: { mid: "m1", text: "one" },
+              },
+              {
+                sender: { id: "u2" },
+                recipient: { id: "ig-1" },
+                message: { mid: "m2", text: "two" },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "MULTI_EVENT_UNSUPPORTED" }
+  );
+});
+
+test("codeClip provider envelope normalizer fails closed for multi entry messaging events", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "page",
+        entry: [
+          {
+            id: "page-1",
+            messaging: [
+              {
+                sender: { id: "u1" },
+                recipient: { id: "page-1" },
+                message: { mid: "m1", text: "one" },
+              },
+            ],
+          },
+          {
+            id: "page-1",
+            messaging: [
+              {
+                sender: { id: "u2" },
+                recipient: { id: "page-1" },
+                message: { mid: "m2", text: "two" },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "MULTI_EVENT_UNSUPPORTED" }
+  );
+});
+
+test("codeClip provider envelope normalizer ignores Messenger echo as non-keyword", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "page",
+        entry: [
+          {
+            id: "page-1",
+            messaging: [
+              {
+                sender: { id: "page-1" },
+                recipient: { id: "user-1" },
+                message: { mid: "echo-1", text: "hello", is_echo: true },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "MESSAGE_IS_ECHO" }
+  );
+});
+
+test("codeClip provider envelope normalizer ignores delivery receipts as non-keyword", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "instagram",
+        entry: [
+          {
+            id: "ig-1",
+            messaging: [
+              {
+                sender: { id: "ig-1" },
+                recipient: { id: "user-1" },
+                delivery: { mids: ["m1"], watermark: 1 },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "NON_KEYWORD_EVENT" }
+  );
+});
+
+test("codeClip provider envelope normalizer ignores postback as non-keyword", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "page",
+        entry: [
+          {
+            id: "page-1",
+            messaging: [
+              {
+                sender: { id: "user-1" },
+                recipient: { id: "page-1" },
+                postback: { payload: "GET_STARTED", title: "Get Started" },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "NON_KEYWORD_EVENT" }
+  );
+});
+
+test("codeClip provider envelope normalizer treats image attachment without text as non-keyword", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "instagram",
+        entry: [
+          {
+            id: "ig-1",
+            messaging: [
+              {
+                sender: { id: "u1" },
+                recipient: { id: "ig-1" },
+                message: {
+                  mid: "att-1",
+                  attachments: [
+                    { type: "image", payload: { url: "https://example.com/a.jpg" } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "NON_KEYWORD_EVENT" }
+  );
+});
+
+test("codeClip provider envelope normalizer treats video attachment without text as non-keyword", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "page",
+        entry: [
+          {
+            id: "page-1",
+            messaging: [
+              {
+                sender: { id: "u1" },
+                recipient: { id: "page-1" },
+                message: {
+                  mid: "att-v1",
+                  attachments: [
+                    { type: "video", payload: { url: "https://example.com/v.mp4" } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "NON_KEYWORD_EVENT" }
+  );
+});
+
+test("codeClip provider envelope normalizer keeps text path when attachment has text", () => {
+  const result = normalizeCodeClipProviderEnvelope({
+    provider: "meta",
+    body: {
+      object: "instagram",
+      entry: [
+        {
+          id: "ig-1",
+          messaging: [
+            {
+              sender: { id: "u1" },
+              recipient: { id: "ig-1" },
+              message: {
+                mid: "att-text-1",
+                text: "CLIP",
+                attachments: [
+                  { type: "image", payload: { url: "https://example.com/a.jpg" } },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+    receivedAt: RECEIVED_AT,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.envelope.channel, "instagram");
+  assert.equal(result.envelope.text, "CLIP");
+  assert.equal(result.envelope.messageId, "att-text-1");
+});
+
+test("codeClip provider envelope normalizer rejects attachment without message id as malformed", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "instagram",
+        entry: [
+          {
+            id: "ig-1",
+            messaging: [
+              {
+                sender: { id: "u1" },
+                recipient: { id: "ig-1" },
+                message: {
+                  attachments: [
+                    { type: "image", payload: { url: "https://example.com/a.jpg" } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "MESSAGE_ID_REQUIRED" }
+  );
+});
+
+test("codeClip provider envelope normalizer keeps TEXT_REQUIRED for empty attachments array", () => {
+  assert.deepEqual(
+    normalizeCodeClipProviderEnvelope({
+      provider: "meta",
+      body: {
+        object: "page",
+        entry: [
+          {
+            id: "page-1",
+            messaging: [
+              {
+                sender: { id: "u1" },
+                recipient: { id: "page-1" },
+                message: { mid: "m-empty-att", attachments: [] },
+              },
+            ],
+          },
+        ],
+      },
+      receivedAt: RECEIVED_AT,
+    }),
+    { ok: false, reason: "TEXT_REQUIRED" }
+  );
+});
+
 test("codeClip provider envelope normalizer fails closed for Instagram without account id", () => {
   assert.deepEqual(
     normalizeCodeClipProviderEnvelope({

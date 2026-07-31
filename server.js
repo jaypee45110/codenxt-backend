@@ -3965,7 +3965,32 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
     });
 
     if (!providerEnvelope.ok) {
-      return res.status(400).json({ ok: false, error: "Invalid provider keyword payload" });
+      // Retry-safe Meta acknowledgements: legitimate non-keyword / unsupported
+      // batch shapes must not return non-2xx (Meta webhook retries).
+      // No delivery, interaction, reward, or outbound is created on this path.
+      if (
+        [
+          "NON_KEYWORD_EVENT",
+          "MESSAGE_IS_ECHO",
+          "MULTI_EVENT_UNSUPPORTED",
+        ].includes(providerEnvelope.reason)
+      ) {
+        console.warn("codeClip provider keyword ignored", {
+          provider: normalizedProvider,
+          route: "/codeclip/provider/:provider/keyword",
+          reason: providerEnvelope.reason,
+        });
+        return res.status(200).json({
+          ok: true,
+          ignored: true,
+          reason: providerEnvelope.reason,
+        });
+      }
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid provider keyword payload",
+        reason: providerEnvelope.reason || undefined,
+      });
     }
 
     const providerAccountId = String(providerEnvelope.envelope.providerAccountId || "").trim();
@@ -4058,6 +4083,21 @@ async function handleCodeClipProviderKeywordRoute(req, res) {
           return res.status(404).json({
             ok: false,
             error: "Event not found",
+          });
+        }
+
+        if (bindingRoute.reason === "PROVIDER_BINDING_CHANNEL_MISMATCH") {
+          // Operator configuration mismatch: Meta will not fix via retry.
+          // Acknowledge 200 ignored; no delivery/interaction/outbound.
+          console.warn("codeClip provider keyword ignored", {
+            provider: normalizedProvider,
+            route: "/codeclip/provider/:provider/keyword",
+            reason: "PROVIDER_BINDING_CHANNEL_MISMATCH",
+          });
+          return res.status(200).json({
+            ok: true,
+            ignored: true,
+            reason: "PROVIDER_BINDING_CHANNEL_MISMATCH",
           });
         }
 

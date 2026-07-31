@@ -984,6 +984,255 @@ test("Meta unknown object with messaging shape is rejected with controlled 400",
   });
 });
 
+test("Instagram envelope cannot use Messenger binding with same provider account id", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `shared-acc-${Date.now()}`;
+    const keyword = `SHARED-${Date.now()}`;
+    await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword,
+      activationChannels: ["Messenger", "Instagram"],
+      bindingChannel: "messenger",
+    });
+
+    const rawBody = metaInstagramBody({
+      messageId: `ig-mismatch-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.ignored, true);
+    assert.equal(payload.reason, "PROVIDER_BINDING_CHANNEL_MISMATCH");
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+    assert.equal(providerDeliveries.size, 0);
+  });
+});
+
+test("Instagram echo event is acknowledged without delivery or Messenger outbound", async () => {
+  await withTestServer(async (baseUrl) => {
+    const rawBody = JSON.stringify({
+      object: "instagram",
+      entry: [
+        {
+          id: "ig-echo-1",
+          messaging: [
+            {
+              sender: { id: "ig-echo-1" },
+              recipient: { id: "user-1" },
+              message: {
+                mid: `echo-${Date.now()}`,
+                text: "hello",
+                is_echo: true,
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.ignored, true);
+    assert.equal(payload.reason, "MESSAGE_IS_ECHO");
+    assert.equal(providerDeliveries.size, 0);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+  });
+});
+
+test("Instagram multi messaging payload is rejected fail-closed", async () => {
+  await withTestServer(async (baseUrl) => {
+    const rawBody = JSON.stringify({
+      object: "instagram",
+      entry: [
+        {
+          id: "ig-multi-1",
+          messaging: [
+            {
+              sender: { id: "u1" },
+              recipient: { id: "ig-multi-1" },
+              message: { mid: "m1", text: "one" },
+            },
+            {
+              sender: { id: "u2" },
+              recipient: { id: "ig-multi-1" },
+              message: { mid: "m2", text: "two" },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.ignored, true);
+    assert.equal(payload.reason, "MULTI_EVENT_UNSUPPORTED");
+    assert.equal(providerDeliveries.size, 0);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+  });
+});
+
+test("Meta multi-event with valid text and echo is acknowledged without persistens", async () => {
+  await withTestServer(async (baseUrl) => {
+    const rawBody = JSON.stringify({
+      object: "page",
+      entry: [
+        {
+          id: "page-multi-echo",
+          messaging: [
+            {
+              sender: { id: "u1" },
+              recipient: { id: "page-multi-echo" },
+              message: { mid: "m1", text: "keyword" },
+            },
+            {
+              sender: { id: "page-multi-echo" },
+              recipient: { id: "u1" },
+              message: { mid: "m2", text: "echo", is_echo: true },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.ignored, true);
+    assert.equal(payload.reason, "MULTI_EVENT_UNSUPPORTED");
+    assert.equal(providerDeliveries.size, 0);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+  });
+});
+
+test("Meta multi-event with valid and malformed items is acknowledged without persistens", async () => {
+  await withTestServer(async (baseUrl) => {
+    const rawBody = JSON.stringify({
+      object: "instagram",
+      entry: [
+        {
+          id: "ig-multi-malformed",
+          messaging: [
+            {
+              sender: { id: "u1" },
+              recipient: { id: "ig-multi-malformed" },
+              message: { mid: "m1", text: "one" },
+            },
+            {
+              sender: { id: "u2" },
+              recipient: { id: "ig-multi-malformed" },
+              message: { text: "missing mid" },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.ignored, true);
+    assert.equal(payload.reason, "MULTI_EVENT_UNSUPPORTED");
+    assert.equal(providerDeliveries.size, 0);
+  });
+});
+
+test("Instagram image attachment without text is acknowledged as non-keyword", async () => {
+  await withTestServer(async (baseUrl) => {
+    const rawBody = JSON.stringify({
+      object: "instagram",
+      entry: [
+        {
+          id: "ig-attach-1",
+          messaging: [
+            {
+              sender: { id: "u1" },
+              recipient: { id: "ig-attach-1" },
+              message: {
+                mid: `att-${Date.now()}`,
+                attachments: [{ type: "image", payload: { url: "https://example.com/a.jpg" } }],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.ignored, true);
+    assert.equal(payload.reason, "NON_KEYWORD_EVENT");
+    assert.equal(providerDeliveries.size, 0);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+  });
+});
+
+test("Messenger envelope against Instagram binding is acknowledged as channel mismatch", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `ig-bind-${Date.now()}`;
+    const keyword = `IGONLY-${Date.now()}`;
+    await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword,
+      activationChannels: ["Instagram"],
+      bindingChannel: "instagram",
+    });
+    const rawBody = JSON.stringify({
+      object: "page",
+      entry: [
+        {
+          id: accountId,
+          messaging: [
+            {
+              sender: { id: "user-1" },
+              recipient: { id: accountId },
+              message: { mid: `msg-${Date.now()}`, text: keyword },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.ignored, true);
+    assert.equal(payload.reason, "PROVIDER_BINDING_CHANNEL_MISMATCH");
+    assert.equal(providerDeliveries.size, 0);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+  });
+});
+
 test("Meta envelopes route through channel-specific bindings using the provider account identity", async () => {
   await withTestServer(async (baseUrl) => {
     const instagramAccountId = `ig-account-${Date.now()}`;
@@ -1663,10 +1912,9 @@ test("verified Meta payload without provider account is rejected before runtime"
     const payload = await response.json();
 
     assert.equal(response.status, 400);
-    assert.deepEqual(payload, {
-      ok: false,
-      error: "Invalid provider keyword payload",
-    });
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error, "Invalid provider keyword payload");
+    assert.equal(payload.reason, "UNSUPPORTED_META_OBJECT");
     assert.equal(providerDeliveryCalls.length, 0);
     assert.equal(providerDeliveries.size, 0);
     assertNoProviderInternals(payload);
