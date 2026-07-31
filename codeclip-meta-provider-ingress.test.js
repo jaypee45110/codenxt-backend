@@ -404,6 +404,32 @@ function metaBody({ messageId, accountId, senderId = "sender-1", text = " vip " 
   });
 }
 
+function metaInstagramBody({
+  messageId,
+  accountId,
+  senderId = "ig-sender-1",
+  text = " vip ",
+}) {
+  return JSON.stringify({
+    object: "instagram",
+    entry: [
+      {
+        id: accountId,
+        messaging: [
+          {
+            sender: { id: senderId },
+            recipient: { id: accountId },
+            message: {
+              mid: messageId,
+              text,
+            },
+          },
+        ],
+      },
+    ],
+  });
+}
+
 function metaWhatsAppBody({
   messageId,
   phoneNumberId,
@@ -752,7 +778,7 @@ test("Meta non-Messenger binding does not create Messenger outbound", async () =
         },
       },
     });
-    const rawBody = metaBody({
+    const rawBody = metaInstagramBody({
       messageId: `meta-not-messenger-${Date.now()}`,
       accountId,
       text: keyword,
@@ -771,6 +797,193 @@ test("Meta non-Messenger binding does not create Messenger outbound", async () =
   });
 });
 
+test("Instagram-native Meta webhook routes through Instagram binding without Messenger outbound", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `ig-native-${Date.now()}`;
+    const keyword = `IGNATIVE-${Date.now()}`;
+    const code = await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword,
+      activationChannels: ["Instagram"],
+      bindingChannel: "instagram",
+      rewards: {
+        openClip: {
+          enabled: true,
+          title: "OpenClip Instagram native",
+          type: "video",
+          contentUrl: "https://rewards.example/openclip-instagram-native",
+        },
+      },
+    });
+    const senderId = `ig-psid-${Date.now()}`;
+    const messageId = `ig-mid-${Date.now()}`;
+    const rawBody = metaInstagramBody({
+      messageId,
+      accountId,
+      senderId,
+      text: keyword,
+    });
+
+    let runtimeInput = null;
+    await withPatchedKeywordRuntime(async (input) => {
+      runtimeInput = input;
+      return {
+        httpStatus: 200,
+        payload: {
+          success: true,
+          eventCode: input.eventCode,
+          messageId: input.messageId,
+        },
+        internal: committedPersistenceInternal(),
+      };
+    }, async () => {
+      const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+        method: "POST",
+        headers: metaHeaders(rawBody),
+        body: rawBody,
+      });
+      const payload = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(payload.eventCode, code);
+      assert.equal(payload.messageId, messageId);
+      assert.ok(runtimeInput);
+      assert.equal(runtimeInput.eventCode, code);
+      assert.equal(runtimeInput.messageId, messageId);
+    });
+
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+
+    const delivery = Array.from(providerDeliveries.values()).find(
+      (row) => row.externalMessageId === messageId
+    );
+    assert.ok(delivery);
+    assert.equal(delivery.provider, "meta");
+    assert.equal(delivery.providerAccountId, accountId);
+    assert.equal(delivery.processingState, "completed");
+    assert.equal(delivery.completionState, "completed");
+  });
+});
+
+test("Instagram-native Meta webhook rejects invalid signature fail-closed", async () => {
+  await withTestServer(async (baseUrl) => {
+    const accountId = `ig-bad-sig-${Date.now()}`;
+    const keyword = `IGBAD-${Date.now()}`;
+    await createCodeClipMetaEvent(baseUrl, {
+      accountId,
+      keyword,
+      activationChannels: ["Instagram"],
+      bindingChannel: "instagram",
+    });
+    const rawBody = metaInstagramBody({
+      messageId: `ig-bad-sig-mid-${Date.now()}`,
+      accountId,
+      text: keyword,
+    });
+
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-hub-signature-256": "sha256=deadbeef",
+      },
+      body: rawBody,
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(payload.ok, false);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+  });
+});
+
+test("Meta Messenger account id conflict is rejected with controlled 400", async () => {
+  await withTestServer(async (baseUrl) => {
+    const rawBody = JSON.stringify({
+      object: "page",
+      entry: [
+        {
+          id: "page-A",
+          messaging: [
+            {
+              sender: { id: "sender-1" },
+              recipient: { id: "page-B" },
+              message: { mid: `mid-conflict-${Date.now()}`, text: "hello" },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(payload.ok, false);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+  });
+});
+
+test("Meta Instagram account id conflict is rejected with controlled 400", async () => {
+  await withTestServer(async (baseUrl) => {
+    const rawBody = JSON.stringify({
+      object: "instagram",
+      entry: [
+        {
+          id: "ig-A",
+          messaging: [
+            {
+              sender: { id: "ig-sender-1" },
+              recipient: { id: "ig-B" },
+              message: { mid: `ig-mid-conflict-${Date.now()}`, text: "hello" },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(payload.ok, false);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+  });
+});
+
+test("Meta unknown object with messaging shape is rejected with controlled 400", async () => {
+  await withTestServer(async (baseUrl) => {
+    const rawBody = JSON.stringify({
+      object: "something_else",
+      entry: [
+        {
+          id: "x-1",
+          messaging: [
+            {
+              sender: { id: "s-1" },
+              recipient: { id: "x-1" },
+              message: { mid: `mid-unknown-${Date.now()}`, text: "hello" },
+            },
+          ],
+        },
+      ],
+    });
+    const response = await fetch(`${baseUrl}/codeclip/provider/meta/keyword`, {
+      method: "POST",
+      headers: metaHeaders(rawBody),
+      body: rawBody,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(payload.ok, false);
+    assert.equal(metaMessengerOutboundCalls.length, 0);
+  });
+});
+
 test("Meta envelopes route through channel-specific bindings using the provider account identity", async () => {
   await withTestServer(async (baseUrl) => {
     const instagramAccountId = `ig-account-${Date.now()}`;
@@ -781,7 +994,7 @@ test("Meta envelopes route through channel-specific bindings using the provider 
       activationChannels: ["Instagram"],
       bindingChannel: "instagram",
     });
-    const instagramBody = metaBody({
+    const instagramBody = metaInstagramBody({
       messageId: `meta-instagram-${Date.now()}`,
       accountId: instagramAccountId,
       text: instagramKeyword,
