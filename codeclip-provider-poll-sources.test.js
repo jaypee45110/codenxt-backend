@@ -63,6 +63,12 @@ function createPollStoreClient(options = {}) {
       poll_claimed_at: row.poll_claimed_at ?? null,
       poll_claim_expires_at: row.poll_claim_expires_at ?? null,
       poll_claim_version: row.poll_claim_version ?? 0,
+      consecutive_failures: row.consecutive_failures ?? 0,
+      last_error_code: row.last_error_code ?? null,
+      last_success_at: row.last_success_at ?? null,
+      last_detection_at: row.last_detection_at ?? null,
+      last_attempt_duration_ms: row.last_attempt_duration_ms ?? null,
+      last_detections_count: row.last_detections_count ?? null,
       created_at: row.created_at || "2026-08-04T09:00:00.000Z",
       updated_at: row.updated_at || "2026-08-04T10:00:00.000Z",
       disabled_at: row.disabled_at ?? null,
@@ -130,6 +136,12 @@ function createPollStoreClient(options = {}) {
           poll_claimed_at: null,
           poll_claim_expires_at: null,
           poll_claim_version: 0,
+          consecutive_failures: 0,
+          last_error_code: null,
+          last_success_at: null,
+          last_detection_at: null,
+          last_attempt_duration_ms: null,
+          last_detections_count: null,
           created_at: params[8],
           updated_at: params[8],
           disabled_at: null,
@@ -237,7 +249,7 @@ function createPollStoreClient(options = {}) {
           };
         }
 
-        // Complete path: checkpoint + next_poll + claim clear
+        // Complete path: checkpoint + next_poll + claim clear (+ observability)
         if (/checkpoint = \$2::jsonb/.test(sql)) {
           const checkpoint =
             typeof params[1] === "string" ? JSON.parse(params[1]) : params[1];
@@ -254,6 +266,40 @@ function createPollStoreClient(options = {}) {
           row.poll_claim_owner = null;
           row.poll_claimed_at = null;
           row.poll_claim_expires_at = null;
+          if (params.length >= 14) {
+            row.consecutive_failures = params[7];
+            row.last_error_code = params[8];
+            row.last_success_at = params[9];
+            row.last_detection_at = params[10];
+            row.last_attempt_duration_ms = params[11];
+            row.last_detections_count = params[12];
+            row.status = params[13];
+          }
+          row.updated_at = operationNow;
+          return { rows: [{ ...row }] };
+        }
+
+        // Release path with scheduling (F1D2B)
+        if (
+          /poll_claim_owner = NULL/.test(sql) &&
+          /next_poll_at = \$6::timestamptz/.test(sql)
+        ) {
+          const operationNow = params[1];
+          const owner = params[3];
+          const version = params[4];
+          if (!claimFenceMatches(row, owner, version, operationNow)) {
+            return { rows: [] };
+          }
+          row.poll_claim_owner = null;
+          row.poll_claimed_at = null;
+          row.poll_claim_expires_at = null;
+          row.next_poll_at = params[5];
+          row.last_polled_at = operationNow;
+          row.consecutive_failures = params[6];
+          row.last_error_code = params[7];
+          row.last_attempt_duration_ms = params[8];
+          row.last_detections_count = params[9];
+          row.status = params[10];
           row.updated_at = operationNow;
           return { rows: [{ ...row }] };
         }
@@ -1067,6 +1113,148 @@ test("completeClaim requires expectedVersion", async () => {
       return true;
     }
   );
+});
+
+test("completeClaim beforeComplete receives frozen context and ignores return value", async () => {
+  const client = createPollStoreClient();
+  client.seed({
+    id: 50,
+    poll_claim_owner: "worker-1",
+    poll_claimed_at: OPERATION_NOW,
+    poll_claim_expires_at: EXPECTED_EXPIRES,
+    poll_claim_version: 1,
+    checkpoint: { seed: true },
+  });
+
+  let seen = null;
+  const completed = await completeCodeClipProviderPollSourceClaim(
+    {
+      pollSourceId: 50,
+      owner: "worker-1",
+      expectedVersion: 1,
+      checkpoint: { after: true },
+      now: OPERATION_NOW,
+    },
+    {
+      queryClient: client,
+      beforeComplete: async (ctx) => {
+        seen = ctx;
+        assert.equal(Object.isFrozen(ctx), true);
+        assert.equal(Object.isFrozen(ctx.pollSource), true);
+        assert.equal(Object.isFrozen(ctx.pollSource.checkpoint), true);
+        assert.deepEqual(ctx.pollSource.checkpoint, { seed: true });
+        // Mutating snapshot must not rewrite repository intent.
+        try {
+          ctx.pollSource.checkpoint.seed = false;
+        } catch {
+          // freeze may throw in strict mode
+        }
+        assert.equal(ctx.pollSource.checkpoint.seed, true);
+        return { shouldBeIgnored: true };
+      },
+    }
+  );
+
+  assert.ok(seen);
+  assert.equal(seen.operationNow, OPERATION_NOW);
+  assert.equal(typeof seen.queryClient.query, "function");
+  assert.equal(completed.status, "completed");
+  assert.deepEqual(completed.pollSource.checkpoint, { after: true });
+});
+
+test("completeClaim beforeComplete failure prevents complete and is safe", async () => {
+  const client = createPollStoreClient();
+  client.seed({
+    id: 51,
+    poll_claim_owner: "worker-1",
+    poll_claimed_at: OPERATION_NOW,
+    poll_claim_expires_at: EXPECTED_EXPIRES,
+    poll_claim_version: 2,
+    checkpoint: { keep: true },
+  });
+
+  await assert.rejects(
+    () =>
+      completeCodeClipProviderPollSourceClaim(
+        {
+          pollSourceId: 51,
+          owner: "worker-1",
+          expectedVersion: 2,
+          checkpoint: { leaked: true },
+          now: OPERATION_NOW,
+        },
+        {
+          queryClient: client,
+          beforeComplete: async () => {
+            throw new Error("raw SQL SELECT * FROM secrets token=abc");
+          },
+        }
+      ),
+    (error) => {
+      assertPollError(error, "FENCED_PERSISTENCE_FAILED");
+      assert.equal(error.message.includes("secrets"), false);
+      assert.equal(error.message.includes("token=abc"), false);
+      return true;
+    }
+  );
+
+  // Claim still held; checkpoint not advanced (complete UPDATE not applied).
+  assert.equal(client.rows[0].poll_claim_owner, "worker-1");
+  assert.deepEqual(client.rows[0].checkpoint, { keep: true });
+});
+
+test("completeClaim rejects non-function beforeComplete", async () => {
+  const client = createPollStoreClient();
+  await assert.rejects(
+    () =>
+      completeCodeClipProviderPollSourceClaim(
+        {
+          pollSourceId: 1,
+          owner: "worker-1",
+          expectedVersion: 1,
+          checkpoint: {},
+          now: OPERATION_NOW,
+        },
+        { queryClient: client, beforeComplete: "nope" }
+      ),
+    (error) => {
+      assertPollError(error, "INVALID_POLL_SOURCE_INPUT");
+      assert.equal(error.details.fieldName, "beforeComplete");
+      return true;
+    }
+  );
+});
+
+test("releaseClaim paused status clears next_poll_at", async () => {
+  const client = createPollStoreClient();
+  client.seed({
+    id: 52,
+    poll_claim_owner: "worker-1",
+    poll_claimed_at: OPERATION_NOW,
+    poll_claim_expires_at: EXPECTED_EXPIRES,
+    poll_claim_version: 1,
+    next_poll_at: OPERATION_NOW,
+  });
+
+  const released = await releaseCodeClipProviderPollSourceClaim(
+    {
+      pollSourceId: 52,
+      owner: "worker-1",
+      expectedVersion: 1,
+      now: OPERATION_NOW,
+      status: "paused",
+      consecutiveFailures: 2,
+      lastErrorCode: "credential_unusable",
+      nextPollAt: null,
+    },
+    { queryClient: client }
+  );
+
+  assert.equal(released.status, "released");
+  assert.equal(released.pollSource.status, "paused");
+  assert.equal(released.pollSource.nextPollAt, null);
+  assert.equal(released.pollSource.consecutiveFailures, 2);
+  assert.equal(released.pollSource.lastErrorCode, "credential_unusable");
 });
 
 // ---------------------------------------------------------------------------

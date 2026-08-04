@@ -2818,25 +2818,52 @@ async function ensureCodeClipProviderPollSourcesTable(queryClient = pool) {
       provider_account_id TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active',
       poll_interval_ms BIGINT NOT NULL,
-      next_poll_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      next_poll_at TIMESTAMPTZ DEFAULT NOW(),
       last_polled_at TIMESTAMPTZ,
       checkpoint JSONB NOT NULL DEFAULT '{}'::jsonb,
       poll_claim_owner TEXT,
       poll_claimed_at TIMESTAMPTZ,
       poll_claim_expires_at TIMESTAMPTZ,
       poll_claim_version BIGINT NOT NULL DEFAULT 0,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      last_error_code TEXT,
+      last_success_at TIMESTAMPTZ,
+      last_detection_at TIMESTAMPTZ,
+      last_attempt_duration_ms INTEGER,
+      last_detections_count INTEGER,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       disabled_at TIMESTAMPTZ,
       CHECK (vertical = 'codeclip'),
       CHECK (environment IN ('sandbox', 'production')),
-      CHECK (status IN ('active', 'disabled')),
+      CONSTRAINT codeclip_provider_poll_sources_status_check
+        CHECK (status IN ('active', 'paused', 'disabled')),
       CHECK (char_length(provider) BETWEEN 1 AND 64),
       CHECK (char_length(account_lookup_key) BETWEEN 1 AND 512),
       CHECK (char_length(provider_account_id) BETWEEN 1 AND 256),
       CHECK (poll_interval_ms >= 30000 AND poll_interval_ms <= 86400000),
       CHECK (jsonb_typeof(checkpoint) = 'object'),
       CHECK (poll_claim_version >= 0),
+      CONSTRAINT codeclip_provider_poll_sources_consecutive_failures_chk
+        CHECK (consecutive_failures >= 0),
+      CONSTRAINT codeclip_provider_poll_sources_last_error_code_chk
+        CHECK (
+          last_error_code IS NULL
+          OR (
+            char_length(last_error_code) BETWEEN 1 AND 64
+            AND last_error_code ~ '^[a-z0-9][a-z0-9._-]*$'
+          )
+        ),
+      CONSTRAINT codeclip_provider_poll_sources_last_attempt_duration_chk
+        CHECK (
+          last_attempt_duration_ms IS NULL
+          OR last_attempt_duration_ms >= 0
+        ),
+      CONSTRAINT codeclip_provider_poll_sources_last_detections_count_chk
+        CHECK (
+          last_detections_count IS NULL
+          OR last_detections_count >= 0
+        ),
       CHECK (
         (
           poll_claim_owner IS NULL
@@ -2860,6 +2887,125 @@ async function ensureCodeClipProviderPollSourcesTable(queryClient = pool) {
       ),
       UNIQUE (vertical, provider, environment, account_lookup_key)
     )
+  `);
+
+  // Existing installs: add observability columns (idempotent).
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_poll_sources
+    ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0
+  `);
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_poll_sources
+    ADD COLUMN IF NOT EXISTS last_error_code TEXT
+  `);
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_poll_sources
+    ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ
+  `);
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_poll_sources
+    ADD COLUMN IF NOT EXISTS last_detection_at TIMESTAMPTZ
+  `);
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_poll_sources
+    ADD COLUMN IF NOT EXISTS last_attempt_duration_ms INTEGER
+  `);
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_poll_sources
+    ADD COLUMN IF NOT EXISTS last_detections_count INTEGER
+  `);
+
+  // paused/disabled: next_poll_at is non-authoritative and stored as NULL.
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_poll_sources
+    ALTER COLUMN next_poll_at DROP NOT NULL
+  `);
+
+  // Status enum + observability CHECKs for tables created before F1D2B.
+  await queryClient.query(`
+    DO $$
+    DECLARE
+      r RECORD;
+    BEGIN
+      FOR r IN
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        JOIN pg_namespace n ON t.relnamespace = n.oid
+        WHERE t.relname = 'codeclip_provider_poll_sources'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'
+          AND pg_get_constraintdef(c.oid) ILIKE '%status%'
+          AND pg_get_constraintdef(c.oid) NOT ILIKE '%paused%'
+      LOOP
+        EXECUTE format(
+          'ALTER TABLE codeclip_provider_poll_sources DROP CONSTRAINT %I',
+          r.conname
+        );
+      END LOOP;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_poll_sources_status_check'
+      ) THEN
+        ALTER TABLE codeclip_provider_poll_sources
+        ADD CONSTRAINT codeclip_provider_poll_sources_status_check
+        CHECK (status IN ('active', 'paused', 'disabled'));
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_poll_sources_consecutive_failures_chk'
+      ) THEN
+        ALTER TABLE codeclip_provider_poll_sources
+        ADD CONSTRAINT codeclip_provider_poll_sources_consecutive_failures_chk
+        CHECK (consecutive_failures >= 0);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_poll_sources_last_error_code_chk'
+      ) THEN
+        ALTER TABLE codeclip_provider_poll_sources
+        ADD CONSTRAINT codeclip_provider_poll_sources_last_error_code_chk
+        CHECK (
+          last_error_code IS NULL
+          OR (
+            char_length(last_error_code) BETWEEN 1 AND 64
+            AND last_error_code ~ '^[a-z0-9][a-z0-9._-]*$'
+          )
+        );
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_poll_sources_last_attempt_duration_chk'
+      ) THEN
+        ALTER TABLE codeclip_provider_poll_sources
+        ADD CONSTRAINT codeclip_provider_poll_sources_last_attempt_duration_chk
+        CHECK (
+          last_attempt_duration_ms IS NULL
+          OR last_attempt_duration_ms >= 0
+        );
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_poll_sources_last_detections_count_chk'
+      ) THEN
+        ALTER TABLE codeclip_provider_poll_sources
+        ADD CONSTRAINT codeclip_provider_poll_sources_last_detections_count_chk
+        CHECK (
+          last_detections_count IS NULL
+          OR last_detections_count >= 0
+        );
+      END IF;
+    END $$;
   `);
 
   await queryClient.query(`

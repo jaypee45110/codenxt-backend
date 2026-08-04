@@ -44,7 +44,11 @@ const CHECKPOINT_MAX_DEPTH = 3;
 const CHECKPOINT_MAX_NODES = 50;
 const CHECKPOINT_MAX_ARRAY_ELEMENTS = 20;
 
-const POLL_SOURCE_STATUSES = Object.freeze(["active", "disabled"]);
+const POLL_SOURCE_STATUSES = Object.freeze(["active", "paused", "disabled"]);
+const ERROR_CODE_MAX = 64;
+const ERROR_CODE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
+const MAX_ATTEMPT_DURATION_MS = 3_600_000;
+const MAX_DETECTIONS_COUNT = 10_000;
 
 const SAFE_SELECT_COLUMNS = `
   id,
@@ -62,6 +66,12 @@ const SAFE_SELECT_COLUMNS = `
   poll_claimed_at,
   poll_claim_expires_at,
   poll_claim_version,
+  consecutive_failures,
+  last_error_code,
+  last_success_at,
+  last_detection_at,
+  last_attempt_duration_ms,
+  last_detections_count,
   created_at,
   updated_at,
   disabled_at
@@ -589,6 +599,12 @@ function toPublicPollSource(row) {
       ? Number(pollIntervalRaw)
       : Number(pollIntervalRaw);
 
+  function asNonNegInt(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const n = typeof value === "bigint" ? Number(value) : Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
   return {
     id: String(row.id),
     vertical: row.vertical,
@@ -607,10 +623,95 @@ function toPublicPollSource(row) {
       row.poll_claim_expires_at ?? row.pollClaimExpiresAt
     ),
     pollClaimVersion: claimVersion,
+    consecutiveFailures: asNonNegInt(
+      row.consecutive_failures ?? row.consecutiveFailures
+    ) ?? 0,
+    lastErrorCode: row.last_error_code ?? row.lastErrorCode ?? null,
+    lastSuccessAt: toIsoTimestamp(row.last_success_at ?? row.lastSuccessAt),
+    lastDetectionAt: toIsoTimestamp(
+      row.last_detection_at ?? row.lastDetectionAt
+    ),
+    lastAttemptDurationMs: asNonNegInt(
+      row.last_attempt_duration_ms ?? row.lastAttemptDurationMs
+    ),
+    lastDetectionsCount: asNonNegInt(
+      row.last_detections_count ?? row.lastDetectionsCount
+    ),
     createdAt: toIsoTimestamp(row.created_at ?? row.createdAt),
     updatedAt: toIsoTimestamp(row.updated_at ?? row.updatedAt),
     disabledAt: toIsoTimestamp(row.disabled_at ?? row.disabledAt),
   };
+}
+
+function normalizeOptionalErrorCode(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      "lastErrorCode is invalid",
+      { fieldName: "lastErrorCode" }
+    );
+  }
+  const normalized = value.trim().toLowerCase();
+  if (
+    !normalized ||
+    normalized.length > ERROR_CODE_MAX ||
+    !ERROR_CODE_PATTERN.test(normalized)
+  ) {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      "lastErrorCode is invalid",
+      { fieldName: "lastErrorCode" }
+    );
+  }
+  return normalized;
+}
+
+function normalizeNonNegativeInt(value, fieldName, { allowNull = true } = {}) {
+  if (value === undefined || value === null || value === "") {
+    if (allowNull) return null;
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      `${fieldName} is required`,
+      { fieldName }
+    );
+  }
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      `${fieldName} is invalid`,
+      { fieldName }
+    );
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      `${fieldName} is invalid`,
+      { fieldName }
+    );
+  }
+  return value;
+}
+
+function normalizePollSourceStatus(value, { allowPaused = true } = {}) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") {
+    throw pollSourceError("INVALID_POLL_SOURCE_INPUT", "status is invalid", {
+      fieldName: "status",
+    });
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!POLL_SOURCE_STATUSES.includes(normalized)) {
+    throw pollSourceError("INVALID_POLL_SOURCE_INPUT", "status is invalid", {
+      fieldName: "status",
+    });
+  }
+  if (!allowPaused && normalized === "paused") {
+    throw pollSourceError("INVALID_POLL_SOURCE_INPUT", "status is invalid", {
+      fieldName: "status",
+    });
+  }
+  return normalized;
 }
 
 function isUniqueViolation(error) {
@@ -699,6 +800,12 @@ async function createCodeClipProviderPollSource(
             poll_claimed_at,
             poll_claim_expires_at,
             poll_claim_version,
+            consecutive_failures,
+            last_error_code,
+            last_success_at,
+            last_detection_at,
+            last_attempt_duration_ms,
+            last_detections_count,
             created_at,
             updated_at,
             disabled_at
@@ -712,6 +819,8 @@ async function createCodeClipProviderPollSource(
             $8::jsonb,
             NULL, NULL, NULL,
             0,
+            0,
+            NULL, NULL, NULL, NULL, NULL,
             $9::timestamptz,
             $9::timestamptz,
             NULL
@@ -828,6 +937,7 @@ async function listDueCodeClipProviderPollSources(
   const filters = [
     "vertical = $1",
     "status = 'active'",
+    "next_poll_at IS NOT NULL",
     "next_poll_at <= $2::timestamptz",
     `(
       poll_claim_expires_at IS NULL
@@ -983,8 +1093,41 @@ async function claimCodeClipProviderPollSource(
 }
 
 /**
+ * Build a frozen, defensive poll-source snapshot for fenced persistence hooks.
+ * Callers must not mutate repository lock state through this object.
+ */
+function freezePollSourceSnapshot(row) {
+  const publicRow = toPublicPollSource(row);
+  if (!publicRow) return null;
+  const checkpoint = Object.freeze(deepCopyJson(publicRow.checkpoint));
+  return Object.freeze({
+    ...publicRow,
+    checkpoint,
+  });
+}
+
+/**
+ * Fenced short-lived DB persistence hook only (not a general lifecycle API).
+ * Production call-site: provider-polling/delivery-ingest.js for ledger inserts.
+ * HTTP, adapter calls, credential reads, and core/reward work are forbidden here.
+ */
+function buildBeforeCompleteContext({ queryClient, pollSource, operationNow }) {
+  return Object.freeze({
+    queryClient,
+    pollSource,
+    operationNow,
+  });
+}
+
+/**
  * Complete a fenced claim in one guarded UPDATE:
- * checkpoint + claim clear + next_poll_at (+ last_polled_at).
+ * checkpoint + claim clear + next_poll_at (+ last_polled_at + observability).
+ *
+ * Optional beforeComplete({ queryClient, pollSource, operationNow }) runs after
+ * fence verification and before the complete UPDATE on the same client.
+ * This is an internal fenced-persistence hook only (ledger inserts), not a
+ * general lifecycle callback. Return value is ignored.
+ * Throws roll back pool-owned TX (no complete UPDATE / claim clear / checkpoint).
  */
 async function completeCodeClipProviderPollSourceClaim(
   {
@@ -996,10 +1139,29 @@ async function completeCodeClipProviderPollSourceClaim(
     nextPollAt,
     next_poll_at,
     now,
+    consecutiveFailures,
+    lastErrorCode,
+    lastSuccessAt,
+    lastDetectionAt,
+    lastAttemptDurationMs,
+    lastDetectionsCount,
+    status,
   } = {},
-  { queryClient } = {}
+  { queryClient, beforeComplete } = {}
 ) {
   const client = requireQueryClient(queryClient);
+
+  if (
+    beforeComplete !== undefined &&
+    beforeComplete !== null &&
+    typeof beforeComplete !== "function"
+  ) {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      "beforeComplete must be a function",
+      { fieldName: "beforeComplete" }
+    );
+  }
 
   const normalizedId = normalizePositiveBigIntId(
     pollSourceId ?? id,
@@ -1025,6 +1187,65 @@ async function completeCodeClipProviderPollSourceClaim(
       ? null
       : normalizeOptionalTimestamp(nextPollAtInput, "nextPollAt");
 
+  const normalizedFailures =
+    consecutiveFailures === undefined
+      ? 0
+      : normalizeNonNegativeInt(consecutiveFailures, "consecutiveFailures", {
+          allowNull: false,
+        });
+  const normalizedErrorCode =
+    lastErrorCode === undefined
+      ? null
+      : normalizeOptionalErrorCode(lastErrorCode);
+  const normalizedDuration =
+    lastAttemptDurationMs === undefined
+      ? null
+      : normalizeNonNegativeInt(
+          lastAttemptDurationMs,
+          "lastAttemptDurationMs"
+        );
+  if (
+    normalizedDuration !== null &&
+    normalizedDuration > MAX_ATTEMPT_DURATION_MS
+  ) {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      "lastAttemptDurationMs is out of range",
+      { fieldName: "lastAttemptDurationMs" }
+    );
+  }
+  const normalizedDetectionsCount =
+    lastDetectionsCount === undefined
+      ? null
+      : normalizeNonNegativeInt(lastDetectionsCount, "lastDetectionsCount");
+  if (
+    normalizedDetectionsCount !== null &&
+    normalizedDetectionsCount > MAX_DETECTIONS_COUNT
+  ) {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      "lastDetectionsCount is out of range",
+      { fieldName: "lastDetectionsCount" }
+    );
+  }
+  const normalizedStatus =
+    status === undefined
+      ? "active"
+      : normalizePollSourceStatus(status) || "active";
+
+  const lastSuccessAtOverride =
+    lastSuccessAt === undefined
+      ? undefined
+      : lastSuccessAt === null
+        ? null
+        : normalizeOptionalTimestamp(lastSuccessAt, "lastSuccessAt");
+  const lastDetectionAtOverride =
+    lastDetectionAt === undefined
+      ? undefined
+      : lastDetectionAt === null
+        ? null
+        : normalizeOptionalTimestamp(lastDetectionAt, "lastDetectionAt");
+
   return withPollSourceTransaction(client, async (tx) => {
     const { operationNowIso, operationNowMs } = await resolveOperationNow(
       tx,
@@ -1062,8 +1283,41 @@ async function completeCodeClipProviderPollSourceClaim(
       );
     }
 
+    if (typeof beforeComplete === "function") {
+      const frozenSource = freezePollSourceSnapshot(current);
+      const hookContext = buildBeforeCompleteContext({
+        queryClient: tx,
+        pollSource: frozenSource,
+        operationNow: operationNowIso,
+      });
+      try {
+        // Return value intentionally ignored — not part of the public contract.
+        await beforeComplete(hookContext);
+      } catch (error) {
+        if (error instanceof CodeClipProviderPollSourceError) throw error;
+        // Preserve typed ingest errors without leaking raw messages into repo layer.
+        if (
+          error &&
+          error.name === "CodeClipProviderPollingIngestError" &&
+          typeof error.code === "string"
+        ) {
+          throw error;
+        }
+        throw pollSourceError(
+          "FENCED_PERSISTENCE_FAILED",
+          "fenced persistence failed before complete"
+        );
+      }
+    }
+
     let resolvedNextPollAt = nextPollAtOverride;
-    if (!resolvedNextPollAt) {
+    if (
+      normalizedStatus === "paused" ||
+      normalizedStatus === "disabled"
+    ) {
+      // Scheduler never polls paused/disabled; next_poll_at is non-authoritative.
+      resolvedNextPollAt = null;
+    } else if (!resolvedNextPollAt) {
       const intervalMs =
         typeof current.poll_interval_ms === "bigint"
           ? Number(current.poll_interval_ms)
@@ -1083,6 +1337,15 @@ async function completeCodeClipProviderPollSourceClaim(
       ).toISOString();
     }
 
+    const resolvedLastSuccessAt =
+      lastSuccessAtOverride === undefined
+        ? operationNowIso
+        : lastSuccessAtOverride;
+    const resolvedLastDetectionAt =
+      lastDetectionAtOverride === undefined
+        ? null
+        : lastDetectionAtOverride;
+
     // Single atomic UPDATE — no two-step claim clear + schedule write.
     const updated = await tx.query(
       `
@@ -1094,6 +1357,13 @@ async function completeCodeClipProviderPollSourceClaim(
           poll_claim_owner = NULL,
           poll_claimed_at = NULL,
           poll_claim_expires_at = NULL,
+          consecutive_failures = $8,
+          last_error_code = $9,
+          last_success_at = $10::timestamptz,
+          last_detection_at = $11::timestamptz,
+          last_attempt_duration_ms = $12,
+          last_detections_count = $13,
+          status = $14,
           updated_at = $4::timestamptz
         WHERE id = $1
           AND vertical = $5
@@ -1110,6 +1380,13 @@ async function completeCodeClipProviderPollSourceClaim(
         CODECLIP_VERTICAL,
         normalizedOwner,
         normalizedVersion,
+        normalizedFailures,
+        normalizedErrorCode,
+        resolvedLastSuccessAt,
+        resolvedLastDetectionAt,
+        normalizedDuration,
+        normalizedDetectionsCount,
+        normalizedStatus,
       ]
     );
 
@@ -1129,11 +1406,24 @@ async function completeCodeClipProviderPollSourceClaim(
 }
 
 /**
- * Release a fenced claim without advancing checkpoint / next_poll_at.
+ * Release a fenced claim. Optionally apply failure scheduling/observability
+ * in the same guarded UPDATE (F1D2B). Checkpoint is never advanced.
  * Old workers must not clear a newer claim (owner + version + not-stale).
  */
 async function releaseCodeClipProviderPollSourceClaim(
-  { pollSourceId, id, owner, expectedVersion, now } = {},
+  {
+    pollSourceId,
+    id,
+    owner,
+    expectedVersion,
+    now,
+    nextPollAt,
+    consecutiveFailures,
+    lastErrorCode,
+    lastAttemptDurationMs,
+    lastDetectionsCount,
+    status,
+  } = {},
   { queryClient } = {}
 ) {
   const client = requireQueryClient(queryClient);
@@ -1145,6 +1435,58 @@ async function releaseCodeClipProviderPollSourceClaim(
   const normalizedOwner = normalizeClaimOwner(owner);
   const normalizedVersion = normalizeExpectedVersion(expectedVersion);
   const injectedNow = normalizeInjectedNow(now);
+
+  const hasScheduling =
+    nextPollAt !== undefined ||
+    consecutiveFailures !== undefined ||
+    lastErrorCode !== undefined ||
+    lastAttemptDurationMs !== undefined ||
+    lastDetectionsCount !== undefined ||
+    status !== undefined;
+
+  // Explicit null clears next_poll_at (paused/disabled). Undefined means default.
+  let nextPollAtOverride;
+  if (nextPollAt === undefined) {
+    nextPollAtOverride = undefined;
+  } else if (nextPollAt === null) {
+    nextPollAtOverride = null;
+  } else {
+    nextPollAtOverride = normalizeOptionalTimestamp(nextPollAt, "nextPollAt");
+  }
+  const normalizedFailures =
+    consecutiveFailures === undefined
+      ? null
+      : normalizeNonNegativeInt(consecutiveFailures, "consecutiveFailures", {
+          allowNull: false,
+        });
+  const normalizedErrorCode =
+    lastErrorCode === undefined
+      ? undefined
+      : normalizeOptionalErrorCode(lastErrorCode);
+  const normalizedDuration =
+    lastAttemptDurationMs === undefined
+      ? undefined
+      : normalizeNonNegativeInt(
+          lastAttemptDurationMs,
+          "lastAttemptDurationMs"
+        );
+  if (
+    normalizedDuration !== undefined &&
+    normalizedDuration !== null &&
+    normalizedDuration > MAX_ATTEMPT_DURATION_MS
+  ) {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      "lastAttemptDurationMs is out of range",
+      { fieldName: "lastAttemptDurationMs" }
+    );
+  }
+  const normalizedDetectionsCount =
+    lastDetectionsCount === undefined
+      ? undefined
+      : normalizeNonNegativeInt(lastDetectionsCount, "lastDetectionsCount");
+  const normalizedStatus =
+    status === undefined ? null : normalizePollSourceStatus(status);
 
   return withPollSourceTransaction(client, async (tx) => {
     const { operationNowIso, operationNowMs } = await resolveOperationNow(
@@ -1183,29 +1525,94 @@ async function releaseCodeClipProviderPollSourceClaim(
       );
     }
 
-    const updated = await tx.query(
-      `
-        UPDATE codeclip_provider_poll_sources
-        SET
-          poll_claim_owner = NULL,
-          poll_claimed_at = NULL,
-          poll_claim_expires_at = NULL,
-          updated_at = $2::timestamptz
-        WHERE id = $1
-          AND vertical = $3
-          AND poll_claim_owner = $4
-          AND poll_claim_version = $5::bigint
-          AND poll_claim_expires_at > $2::timestamptz
-        RETURNING ${SAFE_SELECT_COLUMNS}
-      `,
-      [
-        normalizedId,
-        operationNowIso,
-        CODECLIP_VERTICAL,
-        normalizedOwner,
-        normalizedVersion,
-      ]
-    );
+    let updated;
+    if (!hasScheduling) {
+      updated = await tx.query(
+        `
+          UPDATE codeclip_provider_poll_sources
+          SET
+            poll_claim_owner = NULL,
+            poll_claimed_at = NULL,
+            poll_claim_expires_at = NULL,
+            updated_at = $2::timestamptz
+          WHERE id = $1
+            AND vertical = $3
+            AND poll_claim_owner = $4
+            AND poll_claim_version = $5::bigint
+            AND poll_claim_expires_at > $2::timestamptz
+          RETURNING ${SAFE_SELECT_COLUMNS}
+        `,
+        [
+          normalizedId,
+          operationNowIso,
+          CODECLIP_VERTICAL,
+          normalizedOwner,
+          normalizedVersion,
+        ]
+      );
+    } else {
+      const setStatus = normalizedStatus || current.status || "active";
+      let setNextPollAt;
+      if (setStatus === "paused" || setStatus === "disabled") {
+        // Not scheduled; reactivation must set active + explicit next_poll_at later.
+        setNextPollAt = null;
+      } else if (nextPollAtOverride !== undefined && nextPollAtOverride !== null) {
+        setNextPollAt = nextPollAtOverride;
+      } else {
+        setNextPollAt = operationNowIso;
+      }
+      const setFailures =
+        normalizedFailures !== null
+          ? normalizedFailures
+          : Number(current.consecutive_failures || 0) + 1;
+      const setErrorCode =
+        normalizedErrorCode === undefined
+          ? current.last_error_code || null
+          : normalizedErrorCode;
+      const setDuration =
+        normalizedDuration === undefined ? null : normalizedDuration;
+      const setDetectionsCount =
+        normalizedDetectionsCount === undefined
+          ? 0
+          : normalizedDetectionsCount;
+
+      updated = await tx.query(
+        `
+          UPDATE codeclip_provider_poll_sources
+          SET
+            poll_claim_owner = NULL,
+            poll_claimed_at = NULL,
+            poll_claim_expires_at = NULL,
+            next_poll_at = $6::timestamptz,
+            last_polled_at = $2::timestamptz,
+            consecutive_failures = $7,
+            last_error_code = $8,
+            last_attempt_duration_ms = $9,
+            last_detections_count = $10,
+            status = $11,
+            updated_at = $2::timestamptz
+          WHERE id = $1
+            AND vertical = $3
+            AND poll_claim_owner = $4
+            AND poll_claim_version = $5::bigint
+            AND poll_claim_expires_at > $2::timestamptz
+          RETURNING ${SAFE_SELECT_COLUMNS}
+        `,
+        [
+          normalizedId,
+          operationNowIso,
+          CODECLIP_VERTICAL,
+          normalizedOwner,
+          normalizedVersion,
+          setNextPollAt,
+          setFailures,
+          setErrorCode,
+          setDuration,
+          setDetectionsCount,
+          setStatus,
+        ]
+      );
+    }
 
     const row = updated.rows?.[0] || null;
     if (!row) {

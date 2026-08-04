@@ -35,7 +35,9 @@ test("codeClip provider poll sources schema defines required columns and constra
   assert.match(createSql, /provider_account_id TEXT NOT NULL/);
   assert.match(createSql, /status TEXT NOT NULL DEFAULT 'active'/);
   assert.match(createSql, /poll_interval_ms BIGINT NOT NULL/);
-  assert.match(createSql, /next_poll_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
+  assert.match(createSql, /next_poll_at TIMESTAMPTZ DEFAULT NOW\(\)/);
+  // Nullable so paused/disabled can clear schedule (scheduler only reads active + non-null).
+  assert.equal(/next_poll_at TIMESTAMPTZ NOT NULL/.test(createSql), false);
   assert.match(createSql, /last_polled_at TIMESTAMPTZ/);
   assert.match(createSql, /checkpoint JSONB NOT NULL DEFAULT '\{\}'::jsonb/);
   assert.match(createSql, /poll_claim_owner TEXT/);
@@ -48,7 +50,14 @@ test("codeClip provider poll sources schema defines required columns and constra
 
   assert.match(createSql, /CHECK \(vertical = 'codeclip'\)/);
   assert.match(createSql, /CHECK \(environment IN \('sandbox', 'production'\)\)/);
-  assert.match(createSql, /CHECK \(status IN \('active', 'disabled'\)\)/);
+  assert.match(createSql, /CHECK \(status IN \('active', 'paused', 'disabled'\)\)/);
+  assert.match(createSql, /consecutive_failures INTEGER NOT NULL DEFAULT 0/);
+  assert.match(createSql, /last_error_code TEXT/);
+  assert.match(createSql, /last_success_at TIMESTAMPTZ/);
+  assert.match(createSql, /last_detection_at TIMESTAMPTZ/);
+  assert.match(createSql, /last_attempt_duration_ms INTEGER/);
+  assert.match(createSql, /last_detections_count INTEGER/);
+  assert.match(createSql, /consecutive_failures >= 0/);
   assert.match(createSql, /char_length\(provider\) BETWEEN 1 AND 64/);
   assert.match(createSql, /char_length\(account_lookup_key\) BETWEEN 1 AND 512/);
   assert.match(createSql, /char_length\(provider_account_id\) BETWEEN 1 AND 256/);
@@ -86,6 +95,7 @@ test("codeClip provider poll sources schema defines required columns and constra
   assert.match(indexSql, /WHERE status = 'active'/);
   assert.match(indexSql, /codeclip_provider_poll_sources_provider_env_status_idx/);
   assert.match(indexSql, /codeclip_provider_poll_sources_claim_expires_idx/);
+  assert.match(indexSql, /ALTER COLUMN next_poll_at DROP NOT NULL/);
 });
 
 test("codeClip provider poll sources ensure is null-safe and idempotent", async () => {

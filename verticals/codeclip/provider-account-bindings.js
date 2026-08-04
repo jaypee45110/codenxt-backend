@@ -684,6 +684,21 @@ async function findActiveCodeClipProviderAccountBinding(
   return getActiveBindingByIdentity(normalized, client);
 }
 
+/**
+ * List active bindings for a provider account (0..1 under current uniqueness).
+ * Returns an array so callers can treat fan-out as list-shaped without schema change.
+ */
+async function listActiveCodeClipProviderAccountBindings(
+  { provider, providerAccountId } = {},
+  { queryClient } = {}
+) {
+  const active = await findActiveCodeClipProviderAccountBinding(
+    { provider, providerAccountId },
+    { queryClient }
+  );
+  return active ? [active] : [];
+}
+
 async function listCodeClipProviderAccountBindingsForEvent(
   eventCode,
   { includeDisabled = false, queryClient } = {}
@@ -931,6 +946,7 @@ module.exports = {
   createCodeClipProviderAccountBinding,
   getCodeClipProviderAccountBindingById,
   findActiveCodeClipProviderAccountBinding,
+  listActiveCodeClipProviderAccountBindings,
   getCodeClipProviderAccountBindingOperationsSummary,
   getCodeClipProviderBindingSupportedChannels,
   listCodeClipProviderAccountBindings,
