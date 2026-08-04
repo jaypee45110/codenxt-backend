@@ -2669,6 +2669,9 @@ async function ensureCodeClipProviderCredentialsTable(queryClient = pool) {
       disabled_at TIMESTAMPTZ,
       revoked_at TIMESTAMPTZ,
       last_refreshed_at TIMESTAMPTZ,
+      refresh_claim_owner TEXT,
+      refresh_claimed_at TIMESTAMPTZ,
+      refresh_claim_expires_at TIMESTAMPTZ,
       CHECK (vertical = 'codeclip'),
       CHECK (environment IN ('sandbox', 'production')),
       CHECK (status IN ('active', 'reauthorization_required', 'revoked', 'disabled')),
@@ -2685,8 +2688,97 @@ async function ensureCodeClipProviderCredentialsTable(queryClient = pool) {
         OR (has_refresh_token = TRUE AND refresh_token_envelope IS NOT NULL)
       ),
       CHECK (jsonb_typeof(metadata) = 'object'),
+      CHECK (
+        (
+          refresh_claim_owner IS NULL
+          AND refresh_claimed_at IS NULL
+          AND refresh_claim_expires_at IS NULL
+        )
+        OR
+        (
+          refresh_claim_owner IS NOT NULL
+          AND refresh_claimed_at IS NOT NULL
+          AND refresh_claim_expires_at IS NOT NULL
+        )
+      ),
+      CHECK (
+        refresh_claim_expires_at IS NULL
+        OR refresh_claim_expires_at > refresh_claimed_at
+      ),
+      CHECK (
+        refresh_claim_owner IS NULL
+        OR char_length(refresh_claim_owner) BETWEEN 1 AND 128
+      ),
       UNIQUE (vertical, provider, environment, account_lookup_key)
     )
+  `);
+
+  // Existing installs: add claim columns without defaults (idempotent).
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_credentials
+    ADD COLUMN IF NOT EXISTS refresh_claim_owner TEXT
+  `);
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_credentials
+    ADD COLUMN IF NOT EXISTS refresh_claimed_at TIMESTAMPTZ
+  `);
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_credentials
+    ADD COLUMN IF NOT EXISTS refresh_claim_expires_at TIMESTAMPTZ
+  `);
+
+  // Named constraints for existing tables created before claim columns.
+  await queryClient.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_credentials_refresh_claim_triplet_chk'
+      ) THEN
+        ALTER TABLE codeclip_provider_credentials
+        ADD CONSTRAINT codeclip_provider_credentials_refresh_claim_triplet_chk
+        CHECK (
+          (
+            refresh_claim_owner IS NULL
+            AND refresh_claimed_at IS NULL
+            AND refresh_claim_expires_at IS NULL
+          )
+          OR
+          (
+            refresh_claim_owner IS NOT NULL
+            AND refresh_claimed_at IS NOT NULL
+            AND refresh_claim_expires_at IS NOT NULL
+          )
+        );
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_credentials_refresh_claim_expiry_chk'
+      ) THEN
+        ALTER TABLE codeclip_provider_credentials
+        ADD CONSTRAINT codeclip_provider_credentials_refresh_claim_expiry_chk
+        CHECK (
+          refresh_claim_expires_at IS NULL
+          OR refresh_claim_expires_at > refresh_claimed_at
+        );
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'codeclip_provider_credentials_refresh_claim_owner_len_chk'
+      ) THEN
+        ALTER TABLE codeclip_provider_credentials
+        ADD CONSTRAINT codeclip_provider_credentials_refresh_claim_owner_len_chk
+        CHECK (
+          refresh_claim_owner IS NULL
+          OR char_length(refresh_claim_owner) BETWEEN 1 AND 128
+        );
+      END IF;
+    END $$;
   `);
 
   await queryClient.query(`
@@ -2699,6 +2791,12 @@ async function ensureCodeClipProviderCredentialsTable(queryClient = pool) {
     ON codeclip_provider_credentials (access_token_expires_at)
     WHERE status = 'active'
       AND access_token_expires_at IS NOT NULL
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_credentials_refresh_claim_expires_idx
+    ON codeclip_provider_credentials (refresh_claim_expires_at)
+    WHERE refresh_claim_expires_at IS NOT NULL
   `);
 }
 
@@ -2735,13 +2833,62 @@ async function ensureCodeClipProviderCredentialAuditTable(queryClient = pool) {
         'reauthorization_required',
         'revoked',
         'disabled',
-        'reactivated'
+        'reactivated',
+        'refresh_claimed'
       )),
       CHECK (actor_type IN ('operator', 'operator_key', 'system')),
       CHECK (jsonb_typeof(metadata) = 'object'),
       CHECK (before_state IS NULL OR jsonb_typeof(before_state) = 'object'),
       CHECK (after_state IS NULL OR jsonb_typeof(after_state) = 'object')
     )
+  `);
+
+  // Existing installs: upgrade action CHECK to include refresh_claimed (F1C3A).
+  await queryClient.query(`
+    DO $$
+    DECLARE
+      constraint_name TEXT;
+      definition TEXT;
+    BEGIN
+      SELECT c.conname, pg_get_constraintdef(c.oid)
+        INTO constraint_name, definition
+      FROM pg_constraint c
+      WHERE c.conrelid = 'codeclip_provider_credential_audit'::regclass
+        AND c.contype = 'c'
+        AND pg_get_constraintdef(c.oid) ILIKE '%action%IN%'
+      ORDER BY c.conname
+      LIMIT 1;
+
+      IF definition IS NULL THEN
+        ALTER TABLE codeclip_provider_credential_audit
+        ADD CONSTRAINT codeclip_provider_credential_audit_action_check
+        CHECK (action IN (
+          'created',
+          'token_updated',
+          'reauthorization_required',
+          'revoked',
+          'disabled',
+          'reactivated',
+          'refresh_claimed'
+        ));
+      ELSIF definition NOT ILIKE '%refresh_claimed%' THEN
+        EXECUTE format(
+          'ALTER TABLE codeclip_provider_credential_audit DROP CONSTRAINT IF EXISTS %I',
+          constraint_name
+        );
+        ALTER TABLE codeclip_provider_credential_audit
+        ADD CONSTRAINT codeclip_provider_credential_audit_action_check
+        CHECK (action IN (
+          'created',
+          'token_updated',
+          'reauthorization_required',
+          'revoked',
+          'disabled',
+          'reactivated',
+          'refresh_claimed'
+        ));
+      END IF;
+    END $$;
   `);
 
   await queryClient.query(`

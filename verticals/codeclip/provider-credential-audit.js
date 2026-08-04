@@ -32,6 +32,7 @@ const AUDIT_ACTIONS = Object.freeze([
   "revoked",
   "disabled",
   "reactivated",
+  "refresh_claimed",
 ]);
 const AUDIT_ACTION_SET = new Set(AUDIT_ACTIONS);
 

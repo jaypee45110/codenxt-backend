@@ -350,6 +350,7 @@ test("codeClip credential audit actions and state invariants", async () => {
     "revoked",
     "disabled",
     "reactivated",
+    "refresh_claimed",
   ];
 
   for (const action of allActions) {

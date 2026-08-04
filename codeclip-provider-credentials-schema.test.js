@@ -50,6 +50,9 @@ test("codeClip provider credentials schema defines required columns and constrai
   assert.match(createSql, /disabled_at TIMESTAMPTZ/);
   assert.match(createSql, /revoked_at TIMESTAMPTZ/);
   assert.match(createSql, /last_refreshed_at TIMESTAMPTZ/);
+  assert.match(createSql, /refresh_claim_owner TEXT/);
+  assert.match(createSql, /refresh_claimed_at TIMESTAMPTZ/);
+  assert.match(createSql, /refresh_claim_expires_at TIMESTAMPTZ/);
 
   assert.match(createSql, /CHECK \(vertical = 'codeclip'\)/);
   assert.match(createSql, /CHECK \(environment IN \('sandbox', 'production'\)\)/);
@@ -85,19 +88,42 @@ test("codeClip provider credentials schema defines required columns and constrai
     /has_refresh_token = TRUE AND refresh_token_envelope IS NOT NULL/
   );
 
-  // No defaults for required identity/crypto fields
+  // Refresh claim triplet: all-null or all-set
+  assert.match(createSql, /refresh_claim_owner IS NULL/);
+  assert.match(createSql, /refresh_claimed_at IS NULL/);
+  assert.match(createSql, /refresh_claim_expires_at IS NULL/);
+  assert.match(createSql, /refresh_claim_owner IS NOT NULL/);
+  assert.match(createSql, /refresh_claimed_at IS NOT NULL/);
+  assert.match(createSql, /refresh_claim_expires_at IS NOT NULL/);
+  // expiry > claimed
+  assert.match(
+    createSql,
+    /refresh_claim_expires_at > refresh_claimed_at/
+  );
+  // owner length 1..128
+  assert.match(
+    createSql,
+    /char_length\(refresh_claim_owner\) BETWEEN 1 AND 128/
+  );
+
+  // No defaults for required identity/crypto fields or claim fields
   assert.equal(/provider TEXT NOT NULL DEFAULT/.test(createSql), false);
   assert.equal(/environment TEXT NOT NULL DEFAULT/.test(createSql), false);
   assert.equal(/account_lookup_key TEXT NOT NULL DEFAULT/.test(createSql), false);
   assert.equal(/provider_account_id TEXT NOT NULL DEFAULT/.test(createSql), false);
   assert.equal(/encryption_key_version INTEGER NOT NULL DEFAULT/.test(createSql), false);
+  assert.equal(/refresh_claim_owner TEXT NOT NULL DEFAULT/.test(createSql), false);
+  assert.equal(/refresh_claimed_at TIMESTAMPTZ NOT NULL DEFAULT/.test(createSql), false);
+  assert.equal(
+    /refresh_claim_expires_at TIMESTAMPTZ NOT NULL DEFAULT/.test(createSql),
+    false
+  );
 
-  // No refresh claim or expired or fingerprint columns
-  assert.equal(/refresh_claim_owner/.test(createSql), false);
-  assert.equal(/refresh_claimed_at/.test(createSql), false);
-  assert.equal(/refresh_claim_expires_at/.test(createSql), false);
+  // No expired status column or fingerprint columns
   assert.equal(/\bexpired\b/.test(createSql), false);
   assert.equal(/account_fingerprint/.test(createSql), false);
+  assert.equal(/refresh_attempt_number/.test(createSql), false);
+  assert.equal(/last_refresh_error_code/.test(createSql), false);
 
   const indexSql = client.calls.map((call) => call.sql).join("\n");
   assert.match(
@@ -107,7 +133,24 @@ test("codeClip provider credentials schema defines required columns and constrai
   assert.match(indexSql, /codeclip_provider_credentials_expires_at_idx/);
   assert.match(indexSql, /WHERE status = 'active'/);
   assert.match(indexSql, /access_token_expires_at IS NOT NULL/);
-  assert.equal(/refresh_claim/.test(indexSql), false);
+  assert.match(
+    indexSql,
+    /codeclip_provider_credentials_refresh_claim_expires_idx/
+  );
+  assert.match(
+    indexSql,
+    /ON codeclip_provider_credentials \(refresh_claim_expires_at\)/
+  );
+  assert.match(indexSql, /WHERE refresh_claim_expires_at IS NOT NULL/);
+
+  // Idempotent ALTER / named constraint ensure paths are present
+  assert.match(indexSql, /ADD COLUMN IF NOT EXISTS refresh_claim_owner/);
+  assert.match(indexSql, /ADD COLUMN IF NOT EXISTS refresh_claimed_at/);
+  assert.match(indexSql, /ADD COLUMN IF NOT EXISTS refresh_claim_expires_at/);
+  assert.match(
+    indexSql,
+    /codeclip_provider_credentials_refresh_claim_triplet_chk/
+  );
 });
 
 test("codeClip provider credential audit schema defines FK restrict and action enums", async () => {
@@ -146,7 +189,7 @@ test("codeClip provider credential audit schema defines FK restrict and action e
   assert.match(auditSql, /CHECK \(environment IN \('sandbox', 'production'\)\)/);
   assert.match(
     auditSql,
-    /CHECK \(action IN \(\s*'created',\s*'token_updated',\s*'reauthorization_required',\s*'revoked',\s*'disabled',\s*'reactivated'\s*\)\)/
+    /CHECK \(action IN \(\s*'created',\s*'token_updated',\s*'reauthorization_required',\s*'revoked',\s*'disabled',\s*'reactivated',\s*'refresh_claimed'\s*\)\)/
   );
   assert.match(
     auditSql,
@@ -162,9 +205,21 @@ test("codeClip provider credential audit schema defines FK restrict and action e
     /after_state IS NULL OR jsonb_typeof\(after_state\) = 'object'/
   );
 
-  // No refresh audit actions yet
-  assert.equal(/refresh_claimed/.test(auditSql), false);
+  // F1C3A: only refresh_claimed among refresh_* actions
+  assert.match(auditSql, /refresh_claimed/);
+  assert.equal(/refresh_succeeded/.test(auditSql), false);
+  assert.equal(/refresh_failed/.test(auditSql), false);
+  assert.equal(/refresh_released/.test(auditSql), false);
+  assert.equal(/refresh_reclaimed/.test(auditSql), false);
   assert.equal(/key_rotated/.test(auditSql), false);
+
+  // Existing actions retained
+  assert.match(auditSql, /'created'/);
+  assert.match(auditSql, /'token_updated'/);
+  assert.match(auditSql, /'reauthorization_required'/);
+  assert.match(auditSql, /'revoked'/);
+  assert.match(auditSql, /'disabled'/);
+  assert.match(auditSql, /'reactivated'/);
 
   assert.match(sqlJoined, /codeclip_provider_credential_audit_credential_created_idx/);
   assert.match(sqlJoined, /codeclip_provider_credential_audit_provider_env_created_idx/);
