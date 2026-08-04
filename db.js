@@ -2801,6 +2801,86 @@ async function ensureCodeClipProviderCredentialsTable(queryClient = pool) {
 }
 
 /**
+ * Provider poll sources foundation (F1D1).
+ * Durable poll schedule + claim lease with fencing version.
+ * No ledger, adapters, workers, or provider HTTP in this ensure.
+ */
+async function ensureCodeClipProviderPollSourcesTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_provider_poll_sources (
+      id BIGSERIAL PRIMARY KEY,
+      vertical TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      account_lookup_key TEXT NOT NULL,
+      provider_account_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      poll_interval_ms BIGINT NOT NULL,
+      next_poll_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_polled_at TIMESTAMPTZ,
+      checkpoint JSONB NOT NULL DEFAULT '{}'::jsonb,
+      poll_claim_owner TEXT,
+      poll_claimed_at TIMESTAMPTZ,
+      poll_claim_expires_at TIMESTAMPTZ,
+      poll_claim_version BIGINT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      disabled_at TIMESTAMPTZ,
+      CHECK (vertical = 'codeclip'),
+      CHECK (environment IN ('sandbox', 'production')),
+      CHECK (status IN ('active', 'disabled')),
+      CHECK (char_length(provider) BETWEEN 1 AND 64),
+      CHECK (char_length(account_lookup_key) BETWEEN 1 AND 512),
+      CHECK (char_length(provider_account_id) BETWEEN 1 AND 256),
+      CHECK (poll_interval_ms >= 30000 AND poll_interval_ms <= 86400000),
+      CHECK (jsonb_typeof(checkpoint) = 'object'),
+      CHECK (poll_claim_version >= 0),
+      CHECK (
+        (
+          poll_claim_owner IS NULL
+          AND poll_claimed_at IS NULL
+          AND poll_claim_expires_at IS NULL
+        )
+        OR
+        (
+          poll_claim_owner IS NOT NULL
+          AND poll_claimed_at IS NOT NULL
+          AND poll_claim_expires_at IS NOT NULL
+        )
+      ),
+      CHECK (
+        poll_claim_expires_at IS NULL
+        OR poll_claim_expires_at > poll_claimed_at
+      ),
+      CHECK (
+        poll_claim_owner IS NULL
+        OR char_length(poll_claim_owner) BETWEEN 1 AND 128
+      ),
+      UNIQUE (vertical, provider, environment, account_lookup_key)
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_poll_sources_due_idx
+    ON codeclip_provider_poll_sources (next_poll_at, id)
+    WHERE status = 'active'
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_poll_sources_provider_env_status_idx
+    ON codeclip_provider_poll_sources (provider, environment, status)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_poll_sources_claim_expires_idx
+    ON codeclip_provider_poll_sources (poll_claim_expires_at)
+    WHERE poll_claim_expires_at IS NOT NULL
+  `);
+}
+
+/**
  * Credential audit log. Ensures credential table exists first (idempotent).
  */
 async function ensureCodeClipProviderCredentialAuditTable(queryClient = pool) {
@@ -4843,6 +4923,7 @@ module.exports = {
   ensureCodeClipProviderAccountBindingAuditTable,
   ensureCodeClipProviderCredentialsTable,
   ensureCodeClipProviderCredentialAuditTable,
+  ensureCodeClipProviderPollSourcesTable,
   ensureCodeClipMetaMessengerOutboundSchema,
   createOrGetCodeClipMetaMessengerOutbound,
   getCodeClipMetaMessengerOutboundById,

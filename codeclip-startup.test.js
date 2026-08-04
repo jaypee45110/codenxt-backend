@@ -19,6 +19,7 @@ const CODECLIP_STARTUP_ENSURES = [
   ["ensureCodeClipProviderAccountBindingAuditTable", "ensure-codeclip-provider-binding-audit"],
   ["ensureCodeClipProviderCredentialsTable", "ensure-codeclip-provider-credentials"],
   ["ensureCodeClipProviderCredentialAuditTable", "ensure-codeclip-provider-credential-audit"],
+  ["ensureCodeClipProviderPollSourcesTable", "ensure-codeclip-provider-poll-sources"],
   ["ensureCodeClipProviderDeliveriesTable", "ensure-codeclip-provider-deliveries"],
   ["ensureCodeClipYouTubeWebSubSubscriptionsTable", "ensure-codeclip-youtube-websub-subscriptions"],
   ["ensureCodeClipYouTubeWebSubDiagnosticProbeTables", "ensure-codeclip-youtube-websub-diagnostic-probes"],
@@ -168,6 +169,49 @@ test("codeClip startup wires credential schema ensures after bindings and before
       calls.filter((label) => label === "ensure-codeclip-provider-credential-audit").length,
       1
     );
+  } finally {
+    if (previousKeys === undefined) {
+      delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS;
+    } else {
+      process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS = previousKeys;
+    }
+    if (previousActive === undefined) {
+      delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION;
+    } else {
+      process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION = previousActive;
+    }
+  }
+});
+
+test("codeClip startup wires poll sources schema after credentials and before deliveries", async () => {
+  const calls = [];
+  const previousKeys = process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS;
+  const previousActive = process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION;
+  delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS;
+  delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION;
+
+  try {
+    await initializeCodeClipStartup({
+      databaseClient: createCodeClipStartupDatabaseClient(calls),
+    });
+
+    const credentialsIndex = calls.indexOf("ensure-codeclip-provider-credentials");
+    const credentialAuditIndex = calls.indexOf("ensure-codeclip-provider-credential-audit");
+    const pollSourcesIndex = calls.indexOf("ensure-codeclip-provider-poll-sources");
+    const deliveriesIndex = calls.indexOf("ensure-codeclip-provider-deliveries");
+    const youtubeIndex = calls.indexOf("ensure-codeclip-youtube-websub-subscriptions");
+
+    assert.ok(pollSourcesIndex >= 0, "poll sources ensure must run");
+    assert.equal(credentialAuditIndex < pollSourcesIndex, true);
+    assert.equal(credentialsIndex < pollSourcesIndex, true);
+    assert.equal(pollSourcesIndex < deliveriesIndex, true);
+    assert.equal(pollSourcesIndex < youtubeIndex, true);
+    assert.equal(
+      calls.filter((label) => label === "ensure-codeclip-provider-poll-sources").length,
+      1
+    );
+    // No auto-create of poll sources; ensure only.
+    assert.equal(calls.includes("create-codeclip-provider-poll-source"), false);
   } finally {
     if (previousKeys === undefined) {
       delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS;
