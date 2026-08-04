@@ -1,9 +1,11 @@
 /**
- * codeClip provider credential repository (F1C2B1 + F1C2B2A).
+ * codeClip provider credential repository (F1C2B1 + F1C2B2A + F1C2B2B).
  *
  * Public surface:
  * - create + safe get/find/list (B1)
  * - updateCodeClipProviderCredentialTokens (B2A token lifecycle)
+ * - getCodeClipProviderCredentialSecretsForUse (B2B secret-read)
+ * - inspectCodeClipProviderCredentialUsability (B2B safe inspect)
  *
  * Encryption invariant:
  * - Access and refresh tokens for a credential are always stored with the same
@@ -12,16 +14,15 @@
  *   credential token set. Any token update re-encrypts the full resulting set
  *   with the active key so both envelopes stay aligned.
  *
- * Mutation APIs (token update) must not be wired to production consumers or
- * routes before F1C2C audit integration.
+ * Mutation and secret-read APIs must not be wired to production consumers
+ * or routes before F1C2C audit integration.
  *
  * Token-update transaction ownership:
  * - Pass a pool (connect): repository owns BEGIN/COMMIT/ROLLBACK.
  * - Pass an explicit query client: caller owns the transaction; repository
  *   will not BEGIN/COMMIT/ROLLBACK. Caller must already be in an active TX.
  *
- * TODO(F1C2B2B): secret-read (provider_api, refresh) and usability inspect.
- * No audit, status setter, token clearing, refresh claims, or routes in B2A.
+ * No audit, status setter, token clearing, refresh claims, or routes in B2.
  */
 
 const database = require("../../db");
@@ -34,6 +35,7 @@ const {
   normalizeCodeClipProviderCredentialStatus,
   normalizeCodeClipProviderCredentialScopes,
   normalizeCodeClipProviderCredentialMetadata,
+  normalizeCodeClipProviderCredentialPurpose,
   isCodeClipProviderCredentialExpired,
 } = require("./provider-credential-validators");
 const {
@@ -81,10 +83,47 @@ const TOKEN_UPDATE_SELECT_COLUMNS = `
   refresh_token_envelope
 `.replace(/\s+/g, " ").trim();
 
+/** Secret-read: provider_api — access envelope only. */
+const SECRET_PROVIDER_API_COLUMNS = `
+  id,
+  provider,
+  environment,
+  status,
+  token_type,
+  access_token_expires_at,
+  has_access_token,
+  access_token_envelope
+`.replace(/\s+/g, " ").trim();
+
+/** Secret-read: refresh — refresh envelope only. */
+const SECRET_REFRESH_COLUMNS = `
+  id,
+  provider,
+  environment,
+  status,
+  has_access_token,
+  access_token_expires_at,
+  has_refresh_token,
+  refresh_token_envelope
+`.replace(/\s+/g, " ").trim();
+
+/** Inspect usability — no envelopes, no operator fields. */
+const INSPECT_SELECT_COLUMNS = `
+  id,
+  provider,
+  environment,
+  status,
+  has_access_token,
+  has_refresh_token,
+  access_token_expires_at
+`.replace(/\s+/g, " ").trim();
+
 const TOKEN_UPDATE_ALLOWED_STATUSES = Object.freeze([
   "active",
   "reauthorization_required",
 ]);
+
+const SECRET_READ_PURPOSES = Object.freeze(["provider_api", "refresh"]);
 
 class CodeClipProviderCredentialError extends Error {
   constructor(code, message, details = {}) {
@@ -205,6 +244,22 @@ function decryptToken(envelope, env) {
     );
   }
   return result.plaintext;
+}
+
+/** Secret-read decrypt: result-object, never throws for crypto failure. */
+function tryDecryptForSecretRead(envelope, env) {
+  if (!envelope || typeof envelope !== "string") {
+    return { ok: false, reason: "TOKEN_NOT_PRESENT" };
+  }
+  const result = decryptCodeClipProviderCredentialSecret({ envelope, env });
+  if (!result.ok) {
+    return { ok: false, reason: "CREDENTIAL_DECRYPTION_FAILED" };
+  }
+  return { ok: true, plaintext: result.plaintext };
+}
+
+function secretReadFailure(reason) {
+  return { ok: false, reason };
 }
 
 function hasOwn(object, key) {
@@ -1107,6 +1162,205 @@ async function updateCodeClipProviderCredentialTokens(
   });
 }
 
+/**
+ * Explicit secret-read. Only purposes: provider_api | refresh.
+ * Domain denials and decrypt failures return { ok: false, reason }.
+ * Invalid id / missing queryClient throw typed errors (programming / infra).
+ */
+async function getCodeClipProviderCredentialSecretsForUse(
+  { id, purpose, now = new Date() } = {},
+  { queryClient, env = process.env } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  if (typeof client.query !== "function") {
+    throw credentialError(
+      "DATABASE_UNAVAILABLE",
+      "secret-read requires a query-capable client"
+    );
+  }
+  await ensureCredentialsSchema(client);
+  const normalizedId = normalizePositiveBigIntId(id, "id");
+
+  const purposeResult = normalizeCodeClipProviderCredentialPurpose(purpose);
+  if (!purposeResult.ok || !SECRET_READ_PURPOSES.includes(purposeResult.purpose)) {
+    return secretReadFailure("INVALID_SECRET_PURPOSE");
+  }
+  const normalizedPurpose = purposeResult.purpose;
+
+  try {
+    if (normalizedPurpose === "provider_api") {
+      const result = await client.query(
+        `
+          SELECT ${SECRET_PROVIDER_API_COLUMNS}
+          FROM codeclip_provider_credentials
+          WHERE id = $1
+            AND vertical = $2
+          LIMIT 1
+        `,
+        [normalizedId, CODECLIP_VERTICAL]
+      );
+      const row = result.rows?.[0] || null;
+      if (!row) return secretReadFailure("CREDENTIAL_NOT_FOUND");
+
+      if (row.status === "reauthorization_required") {
+        return secretReadFailure("REAUTHORIZATION_REQUIRED");
+      }
+      if (row.status === "disabled" || row.status === "revoked") {
+        return secretReadFailure("CREDENTIAL_NOT_USABLE");
+      }
+      if (row.status !== "active") {
+        return secretReadFailure("CREDENTIAL_NOT_USABLE");
+      }
+      if (!row.has_access_token || !row.access_token_envelope) {
+        return secretReadFailure("TOKEN_NOT_PRESENT");
+      }
+
+      const expiresAt = normalizeExpiresForSafeRow(row.access_token_expires_at);
+      const expiry = isCodeClipProviderCredentialExpired({
+        accessTokenExpiresAt: expiresAt,
+        now,
+      });
+      if (!expiry.ok) {
+        return secretReadFailure("CREDENTIAL_DECRYPTION_FAILED");
+      }
+      if (expiry.expired) {
+        return secretReadFailure("TOKEN_EXPIRED");
+      }
+
+      const decrypted = tryDecryptForSecretRead(row.access_token_envelope, env);
+      if (!decrypted.ok) {
+        return secretReadFailure(decrypted.reason);
+      }
+
+      return {
+        ok: true,
+        purpose: "provider_api",
+        accessToken: decrypted.plaintext,
+        credential: {
+          id: row.id,
+          provider: row.provider,
+          environment: row.environment,
+          tokenType: row.token_type ?? null,
+          accessTokenExpiresAt: expiresAt,
+          expired: false,
+        },
+      };
+    }
+
+    // refresh
+    const result = await client.query(
+      `
+        SELECT ${SECRET_REFRESH_COLUMNS}
+        FROM codeclip_provider_credentials
+        WHERE id = $1
+          AND vertical = $2
+        LIMIT 1
+      `,
+      [normalizedId, CODECLIP_VERTICAL]
+    );
+    const row = result.rows?.[0] || null;
+    if (!row) return secretReadFailure("CREDENTIAL_NOT_FOUND");
+
+    if (row.status === "disabled" || row.status === "revoked") {
+      return secretReadFailure("CREDENTIAL_NOT_USABLE");
+    }
+    if (row.status !== "active" && row.status !== "reauthorization_required") {
+      return secretReadFailure("CREDENTIAL_NOT_USABLE");
+    }
+    if (!row.has_refresh_token || !row.refresh_token_envelope) {
+      return secretReadFailure("TOKEN_NOT_PRESENT");
+    }
+
+    const expiresAt = normalizeExpiresForSafeRow(row.access_token_expires_at);
+    const expiry = isCodeClipProviderCredentialExpired({
+      accessTokenExpiresAt: expiresAt,
+      now,
+    });
+    const expired = expiry.ok ? expiry.expired : false;
+
+    const decrypted = tryDecryptForSecretRead(row.refresh_token_envelope, env);
+    if (!decrypted.ok) {
+      return secretReadFailure(decrypted.reason);
+    }
+
+    return {
+      ok: true,
+      purpose: "refresh",
+      refreshToken: decrypted.plaintext,
+      credential: {
+        id: row.id,
+        provider: row.provider,
+        environment: row.environment,
+        status: row.status,
+        hasAccessToken: Boolean(row.has_access_token),
+        accessTokenExpiresAt: expiresAt,
+        expired,
+      },
+    };
+  } catch (error) {
+    if (error instanceof CodeClipProviderCredentialError) throw error;
+    return secretReadFailure("DATABASE_ERROR");
+  }
+}
+
+/**
+ * Safe usability inspection. Never decrypts. Does not use operator getById surface.
+ * Own SQL projection — no envelopes, mask, metadata, or scopes.
+ * Returns null when not found (same as getById).
+ */
+async function inspectCodeClipProviderCredentialUsability(
+  { id, now = new Date() } = {},
+  { queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  if (typeof client.query !== "function") {
+    throw credentialError(
+      "DATABASE_UNAVAILABLE",
+      "inspect requires a query-capable client"
+    );
+  }
+  await ensureCredentialsSchema(client);
+  const normalizedId = normalizePositiveBigIntId(id, "id");
+
+  const result = await client.query(
+    `
+      SELECT ${INSPECT_SELECT_COLUMNS}
+      FROM codeclip_provider_credentials
+      WHERE id = $1
+        AND vertical = $2
+      LIMIT 1
+    `,
+    [normalizedId, CODECLIP_VERTICAL]
+  );
+  const row = result.rows?.[0] || null;
+  if (!row) return null;
+
+  const status = row.status;
+  const hasAccessToken = Boolean(row.has_access_token);
+  const hasRefreshToken = Boolean(row.has_refresh_token);
+  const accessTokenExpiresAt = normalizeExpiresForSafeRow(row.access_token_expires_at);
+  const expiry = isCodeClipProviderCredentialExpired({
+    accessTokenExpiresAt,
+    now,
+  });
+  const expired = expiry.ok ? expiry.expired : false;
+
+  return {
+    id: row.id,
+    provider: row.provider,
+    environment: row.environment,
+    status,
+    hasAccessToken,
+    hasRefreshToken,
+    accessTokenExpiresAt,
+    expired,
+    reauthorizationRequired: status === "reauthorization_required",
+    usableForProviderApi: status === "active" && hasAccessToken && !expired,
+    usableForRefresh:
+      (status === "active" || status === "reauthorization_required") && hasRefreshToken,
+  };
+}
+
 module.exports = {
   CodeClipProviderCredentialError,
   createCodeClipProviderCredential,
@@ -1114,5 +1368,7 @@ module.exports = {
   findCodeClipProviderCredential,
   listCodeClipProviderCredentials,
   updateCodeClipProviderCredentialTokens,
+  getCodeClipProviderCredentialSecretsForUse,
+  inspectCodeClipProviderCredentialUsability,
   serializeCodeClipProviderCredentialForOperator,
 };

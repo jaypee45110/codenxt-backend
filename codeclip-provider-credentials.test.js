@@ -9,6 +9,8 @@ const {
   findCodeClipProviderCredential,
   listCodeClipProviderCredentials,
   updateCodeClipProviderCredentialTokens,
+  getCodeClipProviderCredentialSecretsForUse,
+  inspectCodeClipProviderCredentialUsability,
   serializeCodeClipProviderCredentialForOperator,
 } = require("./verticals/codeclip/provider-credentials");
 const {
@@ -168,6 +170,60 @@ function createCredentialStoreClient() {
         if (!row) return { rows: [] };
         if (/FOR UPDATE/i.test(sql)) {
           return { rows: [toLockedRow(row)] };
+        }
+        // Purpose-specific projections for secret-read / inspect
+        if (/access_token_envelope/.test(sql) && !/refresh_token_envelope/.test(sql)) {
+          return {
+            rows: [
+              {
+                id: row.id,
+                provider: row.provider,
+                environment: row.environment,
+                status: row.status,
+                token_type: row.token_type,
+                access_token_expires_at: row.access_token_expires_at,
+                has_access_token: row.has_access_token,
+                access_token_envelope: row.access_token_envelope,
+              },
+            ],
+          };
+        }
+        if (/refresh_token_envelope/.test(sql) && !/access_token_envelope/.test(sql)) {
+          return {
+            rows: [
+              {
+                id: row.id,
+                provider: row.provider,
+                environment: row.environment,
+                status: row.status,
+                has_access_token: row.has_access_token,
+                access_token_expires_at: row.access_token_expires_at,
+                has_refresh_token: row.has_refresh_token,
+                refresh_token_envelope: row.refresh_token_envelope,
+              },
+            ],
+          };
+        }
+        if (
+          /has_access_token/.test(sql) &&
+          /has_refresh_token/.test(sql) &&
+          !/provider_account_id/.test(sql) &&
+          !/access_token_envelope/.test(sql) &&
+          !/metadata/.test(sql)
+        ) {
+          return {
+            rows: [
+              {
+                id: row.id,
+                provider: row.provider,
+                environment: row.environment,
+                status: row.status,
+                has_access_token: row.has_access_token,
+                has_refresh_token: row.has_refresh_token,
+                access_token_expires_at: row.access_token_expires_at,
+              },
+            ],
+          };
         }
         return { rows: [toSafeRow(row)] };
       }
@@ -1060,4 +1116,351 @@ test("codeClip credentials token update not found and race status guard", async 
   );
   assert.equal(locked, true);
   pool.store.query = originalQuery;
+});
+
+// ---------------------------------------------------------------------------
+// F1C2B2B: secret-read + inspect
+// ---------------------------------------------------------------------------
+
+function assertNoSecretsInObject(value, forbiddenStrings = []) {
+  const json = JSON.stringify(value);
+  assert.equal(Object.hasOwn(value || {}, "access_token_envelope"), false);
+  assert.equal(Object.hasOwn(value || {}, "refresh_token_envelope"), false);
+  assert.equal(Object.hasOwn(value || {}, "provider_account_id"), false);
+  assert.equal(Object.hasOwn(value || {}, "providerAccountId"), false);
+  for (const s of forbiddenStrings) {
+    assert.equal(json.includes(s), false, `must not contain ${s}`);
+  }
+}
+
+test("codeClip credentials secret-read provider_api returns access only", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-secret-api",
+      environment: "sandbox",
+      accessToken: "access-secret-value",
+      refreshToken: "refresh-secret-value",
+      tokenType: "Bearer",
+      accessTokenExpiresAt: "2026-12-01T00:00:00.000Z",
+    },
+    { queryClient: client, env }
+  );
+
+  const result = await getCodeClipProviderCredentialSecretsForUse(
+    {
+      id: created.credential.id,
+      purpose: "provider_api",
+      now: new Date("2026-08-04T12:00:00.000Z"),
+    },
+    { queryClient: client, env }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.purpose, "provider_api");
+  assert.equal(result.accessToken, "access-secret-value");
+  assert.equal(Object.hasOwn(result, "refreshToken"), false);
+  assert.deepEqual(result.credential, {
+    id: created.credential.id,
+    provider: "meta",
+    environment: "sandbox",
+    tokenType: "Bearer",
+    accessTokenExpiresAt: "2026-12-01T00:00:00.000Z",
+    expired: false,
+  });
+  assert.equal(JSON.stringify(result).includes("refresh-secret-value"), false);
+
+  const secretSql = client.calls.filter(
+    (c) => /access_token_envelope/.test(c.sql) && /SELECT/i.test(c.sql)
+  );
+  assert.ok(secretSql.length >= 1);
+  for (const call of secretSql) {
+    assert.equal(/SELECT\s+\*/i.test(call.sql), false);
+    assert.equal(/refresh_token_envelope/.test(call.sql), false);
+    assert.equal(/provider_account_id/.test(call.sql), false);
+  }
+});
+
+test("codeClip credentials secret-read provider_api status and expiry gates", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-api-gates",
+      environment: "sandbox",
+      accessToken: "a",
+      refreshToken: "r",
+      accessTokenExpiresAt: "2026-08-01T00:00:00.000Z",
+    },
+    { queryClient: client, env }
+  );
+
+  assert.deepEqual(
+    await getCodeClipProviderCredentialSecretsForUse(
+      {
+        id: created.credential.id,
+        purpose: "provider_api",
+        now: new Date("2026-08-04T12:00:00.000Z"),
+      },
+      { queryClient: client, env }
+    ),
+    { ok: false, reason: "TOKEN_EXPIRED" }
+  );
+
+  client.rows[0].status = "reauthorization_required";
+  client.rows[0].access_token_expires_at = "2026-12-01T00:00:00.000Z";
+  assert.deepEqual(
+    await getCodeClipProviderCredentialSecretsForUse(
+      { id: created.credential.id, purpose: "provider_api" },
+      { queryClient: client, env }
+    ),
+    { ok: false, reason: "REAUTHORIZATION_REQUIRED" }
+  );
+
+  client.rows[0].status = "disabled";
+  assert.deepEqual(
+    await getCodeClipProviderCredentialSecretsForUse(
+      { id: created.credential.id, purpose: "provider_api" },
+      { queryClient: client, env }
+    ),
+    { ok: false, reason: "CREDENTIAL_NOT_USABLE" }
+  );
+
+  client.rows[0].status = "revoked";
+  assert.deepEqual(
+    await getCodeClipProviderCredentialSecretsForUse(
+      { id: created.credential.id, purpose: "provider_api" },
+      { queryClient: client, env }
+    ),
+    { ok: false, reason: "CREDENTIAL_NOT_USABLE" }
+  );
+
+  client.rows[0].status = "active";
+  client.rows[0].has_access_token = false;
+  client.rows[0].access_token_envelope = null;
+  assert.deepEqual(
+    await getCodeClipProviderCredentialSecretsForUse(
+      { id: created.credential.id, purpose: "provider_api" },
+      { queryClient: client, env }
+    ),
+    { ok: false, reason: "TOKEN_NOT_PRESENT" }
+  );
+});
+
+test("codeClip credentials secret-read refresh returns refresh only", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-secret-refresh",
+      environment: "sandbox",
+      accessToken: "access-hidden",
+      refreshToken: "refresh-visible",
+      accessTokenExpiresAt: "2026-08-01T00:00:00.000Z",
+    },
+    { queryClient: client, env }
+  );
+
+  const active = await getCodeClipProviderCredentialSecretsForUse(
+    {
+      id: created.credential.id,
+      purpose: "refresh",
+      now: new Date("2026-08-04T12:00:00.000Z"),
+    },
+    { queryClient: client, env }
+  );
+  assert.equal(active.ok, true);
+  assert.equal(active.purpose, "refresh");
+  assert.equal(active.refreshToken, "refresh-visible");
+  assert.equal(Object.hasOwn(active, "accessToken"), false);
+  assert.equal(JSON.stringify(active).includes("access-hidden"), false);
+  assert.equal(active.credential.status, "active");
+  assert.equal(active.credential.hasAccessToken, true);
+  assert.equal(active.credential.expired, true);
+
+  client.rows[0].status = "reauthorization_required";
+  const reauth = await getCodeClipProviderCredentialSecretsForUse(
+    { id: created.credential.id, purpose: "refresh" },
+    { queryClient: client, env }
+  );
+  assert.equal(reauth.ok, true);
+  assert.equal(reauth.refreshToken, "refresh-visible");
+  assert.equal(reauth.credential.status, "reauthorization_required");
+
+  client.rows[0].status = "disabled";
+  assert.deepEqual(
+    await getCodeClipProviderCredentialSecretsForUse(
+      { id: created.credential.id, purpose: "refresh" },
+      { queryClient: client, env }
+    ),
+    { ok: false, reason: "CREDENTIAL_NOT_USABLE" }
+  );
+
+  const refreshSql = client.calls.filter(
+    (c) => /refresh_token_envelope/.test(c.sql) && /SELECT/i.test(c.sql)
+  );
+  assert.ok(refreshSql.length >= 1);
+  for (const call of refreshSql) {
+    assert.equal(/access_token_envelope/.test(call.sql), false);
+    assert.equal(/SELECT\s+\*/i.test(call.sql), false);
+  }
+});
+
+test("codeClip credentials secret-read rejects invalid purposes and not found", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-purpose",
+      environment: "sandbox",
+      accessToken: "a",
+    },
+    { queryClient: client, env }
+  );
+
+  for (const purpose of [undefined, "", "validation", "debug", "VALIDATION"]) {
+    const result = await getCodeClipProviderCredentialSecretsForUse(
+      { id: created.credential.id, purpose },
+      { queryClient: client, env }
+    );
+    assert.deepEqual(result, { ok: false, reason: "INVALID_SECRET_PURPOSE" });
+  }
+
+  assert.deepEqual(
+    await getCodeClipProviderCredentialSecretsForUse(
+      { id: 99999, purpose: "provider_api" },
+      { queryClient: client, env }
+    ),
+    { ok: false, reason: "CREDENTIAL_NOT_FOUND" }
+  );
+});
+
+test("codeClip credentials secret-read decrypt failure is fail-closed", async () => {
+  const envCreate = makeCryptoEnv({ versions: [1], activeVersion: 1 });
+  const envWrong = makeCryptoEnv({ versions: [2], activeVersion: 2 });
+  const client = createCredentialStoreClient();
+  const accessPlain = "access-plain-unique-xyz";
+  const refreshPlain = "refresh-plain-unique-xyz";
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-decrypt-fail",
+      environment: "sandbox",
+      accessToken: accessPlain,
+      refreshToken: refreshPlain,
+      accessTokenExpiresAt: "2026-12-01T00:00:00.000Z",
+    },
+    { queryClient: client, env: envCreate }
+  );
+
+  const api = await getCodeClipProviderCredentialSecretsForUse(
+    { id: created.credential.id, purpose: "provider_api" },
+    { queryClient: client, env: envWrong }
+  );
+  assert.deepEqual(api, { ok: false, reason: "CREDENTIAL_DECRYPTION_FAILED" });
+  assertNoSecretsInObject(api, [accessPlain, refreshPlain]);
+
+  const refresh = await getCodeClipProviderCredentialSecretsForUse(
+    { id: created.credential.id, purpose: "refresh" },
+    { queryClient: client, env: envWrong }
+  );
+  assert.deepEqual(refresh, { ok: false, reason: "CREDENTIAL_DECRYPTION_FAILED" });
+  assertNoSecretsInObject(refresh, [accessPlain, refreshPlain]);
+});
+
+test("codeClip credentials inspect usability without decrypt or encryption env", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-inspect",
+      environment: "sandbox",
+      accessToken: "secret-access",
+      refreshToken: "secret-refresh",
+      accessTokenExpiresAt: "2026-12-01T00:00:00.000Z",
+    },
+    { queryClient: client, env }
+  );
+
+  const beforeCalls = client.calls.length;
+  const inspection = await inspectCodeClipProviderCredentialUsability(
+    {
+      id: created.credential.id,
+      now: new Date("2026-08-04T12:00:00.000Z"),
+    },
+    { queryClient: client }
+  );
+
+  assert.deepEqual(inspection, {
+    id: created.credential.id,
+    provider: "meta",
+    environment: "sandbox",
+    status: "active",
+    hasAccessToken: true,
+    hasRefreshToken: true,
+    accessTokenExpiresAt: "2026-12-01T00:00:00.000Z",
+    expired: false,
+    reauthorizationRequired: false,
+    usableForProviderApi: true,
+    usableForRefresh: true,
+  });
+  assert.equal(Object.hasOwn(inspection, "maskedAccountId"), false);
+  assert.equal(Object.hasOwn(inspection, "metadata"), false);
+  assert.equal(Object.hasOwn(inspection, "scopes"), false);
+  assert.equal(JSON.stringify(inspection).includes("secret-access"), false);
+
+  const inspectCalls = client.calls.slice(beforeCalls);
+  assert.ok(inspectCalls.length >= 1);
+  for (const call of inspectCalls) {
+    assert.equal(/access_token_envelope/.test(call.sql), false);
+    assert.equal(/refresh_token_envelope/.test(call.sql), false);
+    assert.equal(/provider_account_id/.test(call.sql), false);
+    assert.equal(/SELECT\s+\*/i.test(call.sql), false);
+    assert.equal(/metadata/.test(call.sql), false);
+  }
+
+  // expired
+  client.rows[0].access_token_expires_at = "2026-08-01T00:00:00.000Z";
+  const expired = await inspectCodeClipProviderCredentialUsability(
+    {
+      id: created.credential.id,
+      now: new Date("2026-08-04T12:00:00.000Z"),
+    },
+    { queryClient: client }
+  );
+  assert.equal(expired.expired, true);
+  assert.equal(expired.usableForProviderApi, false);
+  assert.equal(expired.usableForRefresh, true);
+
+  client.rows[0].status = "reauthorization_required";
+  client.rows[0].access_token_expires_at = "2026-12-01T00:00:00.000Z";
+  const reauth = await inspectCodeClipProviderCredentialUsability(
+    { id: created.credential.id },
+    { queryClient: client }
+  );
+  assert.equal(reauth.reauthorizationRequired, true);
+  assert.equal(reauth.usableForProviderApi, false);
+  assert.equal(reauth.usableForRefresh, true);
+
+  client.rows[0].status = "disabled";
+  const disabled = await inspectCodeClipProviderCredentialUsability(
+    { id: created.credential.id },
+    { queryClient: client }
+  );
+  assert.equal(disabled.usableForProviderApi, false);
+  assert.equal(disabled.usableForRefresh, false);
+
+  assert.equal(
+    await inspectCodeClipProviderCredentialUsability(
+      { id: 99999 },
+      { queryClient: client }
+    ),
+    null
+  );
 });
