@@ -10,6 +10,7 @@ const CODECLIP_PROVIDER_DELIVERY_INITIAL_SOURCES = Object.freeze([
   "operator_reconciliation_recovery",
   "atom_reconciliation",
   "data_api_polling",
+  "provider_polling",
 ]);
 
 const CODECLIP_PROVIDER_DELIVERY_INITIAL_SOURCE_SET = new Set(

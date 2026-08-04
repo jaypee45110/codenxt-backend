@@ -3015,7 +3015,7 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
       UNIQUE (provider, provider_account_id, event_code, external_message_id),
       CHECK (attempt_count >= 1),
       CONSTRAINT codeclip_provider_deliveries_initial_source_chk
-      CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling'))
+      CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling', 'provider_polling'))
     )
   `);
 
@@ -3031,7 +3031,7 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
         SELECT 1
         FROM pg_constraint
         WHERE conname = 'codeclip_provider_deliveries_initial_source_chk'
-          AND pg_get_constraintdef(oid) NOT LIKE '%data_api_polling%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%provider_polling%'
       ) THEN
         ALTER TABLE codeclip_provider_deliveries
         DROP CONSTRAINT codeclip_provider_deliveries_initial_source_chk;
@@ -3043,7 +3043,7 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
       ) THEN
         ALTER TABLE codeclip_provider_deliveries
         ADD CONSTRAINT codeclip_provider_deliveries_initial_source_chk
-        CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling'));
+        CHECK (initial_delivery_source IN ('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling', 'provider_polling'));
       END IF;
     END $$;
   `);
@@ -3155,6 +3155,7 @@ const CODECLIP_PROVIDER_DELIVERY_INITIAL_SOURCES = new Set([
   'operator_reconciliation_recovery',
   'atom_reconciliation',
   'data_api_polling',
+  'provider_polling',
 ]);
 
 function normalizeCodeClipProviderDeliveryInitialSource(value = 'websub') {

@@ -190,13 +190,19 @@ test('codeClip provider delivery schema defines durable identity and indexes', a
   );
   assert.match(client.calls[0].sql, /CHECK \(attempt_count >= 1\)/);
   assert.match(client.calls[0].sql, /initial_delivery_source TEXT NOT NULL DEFAULT 'websub'/);
-  assert.match(client.calls[0].sql, /CHECK \(initial_delivery_source IN \('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling'\)\)/);
+  assert.match(
+    client.calls[0].sql,
+    /CHECK \(initial_delivery_source IN \('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling', 'provider_polling'\)\)/
+  );
+  assert.match(client.calls[0].sql, /provider_polling/);
   assert.match(client.calls[0].sql, /received_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[0].sql, /last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[0].sql, /created_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[0].sql, /updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[1].sql, /ADD COLUMN IF NOT EXISTS initial_delivery_source/);
   assert.match(client.calls[2].sql, /codeclip_provider_deliveries_initial_source_chk/);
+  assert.match(client.calls[2].sql, /provider_polling/);
+  assert.match(client.calls[2].sql, /NOT LIKE '%provider_polling%'/);
   assert.match(client.calls[3].sql, /codeclip_provider_deliveries_event_code_idx/);
   assert.match(client.calls[4].sql, /codeclip_provider_deliveries_completion_state_idx/);
   assert.match(client.calls[5].sql, /codeclip_provider_deliveries_processing_state_idx/);
@@ -274,6 +280,40 @@ test('codeClip provider delivery accepts Data API polling as an initial source',
 
   assert.equal(created.status, 'created');
   assert.equal(created.row.initialDeliverySource, 'data_api_polling');
+});
+
+test('codeClip provider delivery accepts provider_polling as an initial source', async () => {
+  const client = createStatefulDeliveryClient();
+  const created = await createCodeClipProviderDelivery({
+    provider: 'youtube',
+    providerAccountId: 'UCvwiNkgNuGuizjo33NZhzPg',
+    eventCode: 'CC-PROVIDER-POLLING-SOURCE',
+    externalMessageId: 'poll:youtube:obj-1',
+    initialDeliverySource: 'provider_polling',
+  }, client);
+
+  assert.equal(created.status, 'created');
+  assert.equal(created.row.initialDeliverySource, 'provider_polling');
+});
+
+test('codeClip provider delivery source allowlist retains prior sources and provider_polling', async () => {
+  const {
+    CODECLIP_PROVIDER_DELIVERY_INITIAL_SOURCES,
+    isCodeClipProviderDeliveryInitialSource,
+  } = require('./verticals/codeclip/provider-delivery-sources');
+
+  assert.deepEqual([...CODECLIP_PROVIDER_DELIVERY_INITIAL_SOURCES], [
+    'websub',
+    'operator_reconciliation_recovery',
+    'atom_reconciliation',
+    'data_api_polling',
+    'provider_polling',
+  ]);
+  for (const source of CODECLIP_PROVIDER_DELIVERY_INITIAL_SOURCES) {
+    assert.equal(isCodeClipProviderDeliveryInitialSource(source), true);
+  }
+  assert.equal(isCodeClipProviderDeliveryInitialSource('tiktok_polling'), false);
+  assert.equal(isCodeClipProviderDeliveryInitialSource('manual_bad_source'), false);
 });
 
 test('codeClip provider delivery identity is account scoped', async () => {
