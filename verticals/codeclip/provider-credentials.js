@@ -1,11 +1,12 @@
 /**
- * codeClip provider credential repository (F1C2B1 + F1C2B2A + F1C2B2B).
+ * codeClip provider credential repository (F1C2B1 + F1C2B2A + F1C2B2B + F1C2C2).
  *
  * Public surface:
  * - create + safe get/find/list (B1)
  * - updateCodeClipProviderCredentialTokens (B2A token lifecycle)
  * - getCodeClipProviderCredentialSecretsForUse (B2B secret-read)
  * - inspectCodeClipProviderCredentialUsability (B2B safe inspect)
+ * - setCodeClipProviderCredentialStatus (C2 status lifecycle)
  *
  * Encryption invariant:
  * - Access and refresh tokens for a credential are always stored with the same
@@ -14,15 +15,15 @@
  *   credential token set. Any token update re-encrypts the full resulting set
  *   with the active key so both envelopes stay aligned.
  *
- * Mutation and secret-read APIs must not be wired to production consumers
- * or routes before F1C2C audit integration.
+ * Mutation + audit invariant (F1C2C2):
+ * - Every credential mutation writes an audit event on the same transaction client.
+ * - Actor is required on all mutations. Full actor/reason validation is owned by
+ *   the C1 audit module; this repository only requires actor presence.
+ * - Pool (connect): repository owns BEGIN/COMMIT/ROLLBACK.
+ * - Explicit query client: caller owns the transaction; repository will not
+ *   BEGIN/COMMIT/ROLLBACK.
  *
- * Token-update transaction ownership:
- * - Pass a pool (connect): repository owns BEGIN/COMMIT/ROLLBACK.
- * - Pass an explicit query client: caller owns the transaction; repository
- *   will not BEGIN/COMMIT/ROLLBACK. Caller must already be in an active TX.
- *
- * No audit, status setter, token clearing, refresh claims, or routes in B2.
+ * No token clearing, refresh claims, secret-read audit, routes, or consumers.
  */
 
 const database = require("../../db");
@@ -37,11 +38,16 @@ const {
   normalizeCodeClipProviderCredentialMetadata,
   normalizeCodeClipProviderCredentialPurpose,
   isCodeClipProviderCredentialExpired,
+  validateCodeClipProviderCredentialStatusTransition,
 } = require("./provider-credential-validators");
 const {
   encryptCodeClipProviderCredentialSecret,
   decryptCodeClipProviderCredentialSecret,
 } = require("./provider-credential-crypto");
+const {
+  CodeClipProviderCredentialAuditError,
+  appendCodeClipProviderCredentialAudit,
+} = require("./provider-credential-audit");
 
 const CODECLIP_VERTICAL = "codeclip";
 const DEFAULT_LIST_LIMIT = 25;
@@ -124,6 +130,19 @@ const TOKEN_UPDATE_ALLOWED_STATUSES = Object.freeze([
 ]);
 
 const SECRET_READ_PURPOSES = Object.freeze(["provider_api", "refresh"]);
+
+/** Status-setter subset: reauth→active is token-update only; revoked is terminal. */
+const STATUS_SETTER_ALLOWED_TRANSITIONS = Object.freeze({
+  active: Object.freeze(
+    new Set(["disabled", "reauthorization_required", "revoked"])
+  ),
+  disabled: Object.freeze(new Set(["active", "revoked"])),
+  reauthorization_required: Object.freeze(new Set(["disabled", "revoked"])),
+  revoked: Object.freeze(new Set()),
+});
+
+const DEFAULT_CREATE_AUDIT_REASON = "credential_created";
+const DEFAULT_TOKEN_UPDATE_AUDIT_REASON = "credential_tokens_updated";
 
 class CodeClipProviderCredentialError extends Error {
   constructor(code, message, details = {}) {
@@ -232,6 +251,269 @@ async function withCredentialTransaction(queryClient, work) {
     );
   }
   return work(queryClient);
+}
+
+/**
+ * One normalized ISO timestamp per public mutation.
+ * Used for all explicit operation-time fields in that mutation.
+ */
+function normalizeOperationNow(now = new Date()) {
+  if (now instanceof Date) {
+    const ms = now.getTime();
+    if (!Number.isFinite(ms)) {
+      throw credentialError("INVALID_CREDENTIAL_INPUT", "now is invalid", {
+        fieldName: "now",
+      });
+    }
+    return new Date(ms).toISOString();
+  }
+  if (typeof now === "string" || typeof now === "number") {
+    const ms = Date.parse(now);
+    if (!Number.isFinite(ms)) {
+      throw credentialError("INVALID_CREDENTIAL_INPUT", "now is invalid", {
+        fieldName: "now",
+      });
+    }
+    return new Date(ms).toISOString();
+  }
+  throw credentialError("INVALID_CREDENTIAL_INPUT", "now is invalid", {
+    fieldName: "now",
+  });
+}
+
+/** Structural actor presence only — full actor rules live in the audit module. */
+function requireMutationActor(actor) {
+  if (actor === undefined || actor === null) {
+    throw credentialError("INVALID_CREDENTIAL_INPUT", "actor is required", {
+      fieldName: "actor",
+    });
+  }
+  if (typeof actor !== "object" || Array.isArray(actor)) {
+    throw credentialError("INVALID_CREDENTIAL_INPUT", "actor is invalid", {
+      fieldName: "actor",
+    });
+  }
+  return actor;
+}
+
+function requireMutationReason(reason, { required = true, defaultReason = null } = {}) {
+  if ((reason === undefined || reason === null || reason === "") && defaultReason) {
+    return defaultReason;
+  }
+  if (typeof reason !== "string") {
+    throw credentialError("INVALID_CREDENTIAL_INPUT", "reason is required", {
+      fieldName: "reason",
+    });
+  }
+  const trimmed = reason.trim();
+  if (!trimmed) {
+    throw credentialError("INVALID_CREDENTIAL_INPUT", "reason is required", {
+      fieldName: "reason",
+    });
+  }
+  if (required === false && !trimmed) {
+    throw credentialError("INVALID_CREDENTIAL_INPUT", "reason is required", {
+      fieldName: "reason",
+    });
+  }
+  return trimmed;
+}
+
+/**
+ * Build audit input from a DB safe/locked row.
+ * Never includes envelopes, lookup key, metadata, or other forbidden fields.
+ * provider_account_id is retained only so the audit module can mask it.
+ */
+function dbRowForAudit(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    provider: row.provider,
+    environment: row.environment,
+    status: row.status,
+    provider_account_id:
+      row.provider_account_id !== undefined
+        ? row.provider_account_id
+        : row.providerAccountId,
+    has_access_token:
+      row.has_access_token !== undefined
+        ? row.has_access_token
+        : row.hasAccessToken,
+    has_refresh_token:
+      row.has_refresh_token !== undefined
+        ? row.has_refresh_token
+        : row.hasRefreshToken,
+    access_token_expires_at:
+      row.access_token_expires_at !== undefined
+        ? row.access_token_expires_at
+        : row.accessTokenExpiresAt,
+    encryption_key_version:
+      row.encryption_key_version !== undefined
+        ? row.encryption_key_version
+        : row.encryptionKeyVersion,
+    token_type: row.token_type !== undefined ? row.token_type : row.tokenType,
+    scopes: row.scopes,
+    reauthorization_reason:
+      row.reauthorization_reason !== undefined
+        ? row.reauthorization_reason
+        : row.reauthorizationReason,
+    disabled_at: row.disabled_at !== undefined ? row.disabled_at : row.disabledAt,
+    revoked_at: row.revoked_at !== undefined ? row.revoked_at : row.revokedAt,
+    last_refreshed_at:
+      row.last_refreshed_at !== undefined
+        ? row.last_refreshed_at
+        : row.lastRefreshedAt,
+    updated_at: row.updated_at !== undefined ? row.updated_at : row.updatedAt,
+  };
+}
+
+async function appendMutationAudit(
+  {
+    credentialId,
+    provider,
+    environment,
+    action,
+    actor,
+    reason,
+    beforeState = null,
+    afterState = null,
+  },
+  queryClient
+) {
+  try {
+    return await appendCodeClipProviderCredentialAudit(
+      {
+        credentialId,
+        provider,
+        environment,
+        action,
+        actor,
+        reason,
+        beforeState: beforeState === null ? null : dbRowForAudit(beforeState),
+        afterState: afterState === null ? null : dbRowForAudit(afterState),
+      },
+      { queryClient }
+    );
+  } catch (error) {
+    if (error instanceof CodeClipProviderCredentialError) throw error;
+    if (error instanceof CodeClipProviderCredentialAuditError) {
+      throw credentialError("CREDENTIAL_AUDIT_FAILED", "credential audit failed", {
+        auditCode: String(error.code || "").slice(0, 80),
+      });
+    }
+    throw credentialError("CREDENTIAL_AUDIT_FAILED", "credential audit failed");
+  }
+}
+
+function validateStatusSetterTransition(fromStatus, toStatus) {
+  const base = validateCodeClipProviderCredentialStatusTransition(fromStatus, toStatus);
+  if (!base.ok) {
+    throw credentialError(
+      "INVALID_STATUS_TRANSITION",
+      "status transition is not allowed",
+      {
+        fromStatus: fromStatus ?? null,
+        toStatus: toStatus ?? null,
+        reason: base.reason || null,
+      }
+    );
+  }
+  const allowed = STATUS_SETTER_ALLOWED_TRANSITIONS[base.fromStatus];
+  if (!allowed || !allowed.has(base.toStatus)) {
+    throw credentialError(
+      "INVALID_STATUS_TRANSITION",
+      "status transition is not allowed via status setter",
+      {
+        fromStatus: base.fromStatus,
+        toStatus: base.toStatus,
+      }
+    );
+  }
+  return base;
+}
+
+function mapStatusSetterAuditAction(fromStatus, toStatus) {
+  if (toStatus === "revoked") return "revoked";
+  if (fromStatus === "active" && toStatus === "disabled") return "disabled";
+  if (fromStatus === "disabled" && toStatus === "active") return "reactivated";
+  if (fromStatus === "active" && toStatus === "reauthorization_required") {
+    return "reauthorization_required";
+  }
+  if (fromStatus === "reauthorization_required" && toStatus === "disabled") {
+    return "disabled";
+  }
+  throw credentialError(
+    "INVALID_STATUS_TRANSITION",
+    "status transition has no audit action mapping",
+    { fromStatus, toStatus }
+  );
+}
+
+/**
+ * Build status UPDATE field values for entydig live state.
+ * Returns { status, disabledAt, revokedAt, reauthorizationReason, touchRevoked, touchDisabled, touchReauth }.
+ */
+function buildStatusLiveState(fromStatus, toStatus, reason, operationNow) {
+  if (toStatus === "revoked") {
+    return {
+      status: "revoked",
+      disabledAt: null,
+      revokedAt: operationNow,
+      reauthorizationReason: null,
+      setDisabled: true,
+      setRevoked: true,
+      setReauth: true,
+    };
+  }
+  if (fromStatus === "active" && toStatus === "disabled") {
+    return {
+      status: "disabled",
+      disabledAt: operationNow,
+      revokedAt: undefined,
+      reauthorizationReason: undefined,
+      setDisabled: true,
+      setRevoked: false,
+      setReauth: false,
+    };
+  }
+  if (fromStatus === "disabled" && toStatus === "active") {
+    return {
+      status: "active",
+      disabledAt: null,
+      revokedAt: undefined,
+      reauthorizationReason: undefined,
+      setDisabled: true,
+      setRevoked: false,
+      setReauth: false,
+    };
+  }
+  if (fromStatus === "active" && toStatus === "reauthorization_required") {
+    return {
+      status: "reauthorization_required",
+      disabledAt: undefined,
+      revokedAt: undefined,
+      reauthorizationReason: reason,
+      setDisabled: false,
+      setRevoked: false,
+      setReauth: true,
+    };
+  }
+  if (fromStatus === "reauthorization_required" && toStatus === "disabled") {
+    return {
+      status: "disabled",
+      disabledAt: operationNow,
+      revokedAt: undefined,
+      reauthorizationReason: null,
+      setDisabled: true,
+      setRevoked: false,
+      setReauth: true,
+    };
+  }
+  throw credentialError(
+    "INVALID_STATUS_TRANSITION",
+    "status transition is not allowed via status setter",
+    { fromStatus, toStatus }
+  );
 }
 
 function decryptToken(envelope, env) {
@@ -641,14 +923,26 @@ function normalizeListFilters(filters = {}) {
 
 /**
  * Create a durable provider credential. Encrypts tokens before insert.
+ * Writes a created audit event on the same transaction client (F1C2C2).
  * Returns only a safe row (no envelopes / raw account id).
  */
 async function createCodeClipProviderCredential(
   input = {},
-  { queryClient, env = process.env, now = new Date() } = {}
+  {
+    queryClient,
+    env = process.env,
+    now = new Date(),
+    actor,
+    reason = DEFAULT_CREATE_AUDIT_REASON,
+  } = {}
 ) {
   const client = requireQueryClient(queryClient);
   await ensureCredentialsSchema(client);
+  const operationNow = normalizeOperationNow(now);
+  const mutationActor = requireMutationActor(actor);
+  const mutationReason = requireMutationReason(reason, {
+    defaultReason: DEFAULT_CREATE_AUDIT_REASON,
+  });
 
   const accountRef = normalizeCodeClipProviderCredentialAccountRef({
     provider: input.provider,
@@ -678,83 +972,108 @@ async function createCodeClipProviderCredential(
   );
 
   // Encrypt before SQL. Access and refresh use the same active key version (F1C1).
+  // Failure here starts no transaction and writes no audit.
   const { accessEnvelope, refreshEnvelope, keyVersion } = encryptCredentialTokenPair({
     accessToken,
     refreshToken,
     env,
   });
 
-  try {
-    const result = await client.query(
-      `
-        INSERT INTO codeclip_provider_credentials (
-          vertical,
-          provider,
-          environment,
-          account_lookup_key,
-          provider_account_id,
-          status,
-          access_token_envelope,
-          refresh_token_envelope,
-          access_token_expires_at,
-          token_type,
-          scopes,
-          encryption_key_version,
-          has_access_token,
-          has_refresh_token,
-          reauthorization_reason,
-          metadata,
-          updated_at
-        )
-        VALUES (
-          $1,$2,$3,$4,$5,'active',
-          $6,$7,$8::timestamptz,$9,$10::text[],
-          $11,$12,$13,NULL,$14::jsonb,NOW()
-        )
-        RETURNING ${SAFE_SELECT_COLUMNS}
-      `,
-      [
-        CODECLIP_VERTICAL,
-        accountRef.provider,
-        accountRef.environment,
-        accountRef.accountLookupKey,
-        accountRef.providerAccountId,
-        accessEnvelope,
-        refreshEnvelope,
-        accessTokenExpiresAt,
-        tokenType,
-        scopesResult.scopes,
-        keyVersion,
-        Boolean(accessEnvelope),
-        Boolean(refreshEnvelope),
-        JSON.stringify(metadataResult.metadata),
-      ]
-    );
+  return withCredentialTransaction(client, async (tx) => {
+    let row;
+    try {
+      const result = await tx.query(
+        `
+          INSERT INTO codeclip_provider_credentials (
+            vertical,
+            provider,
+            environment,
+            account_lookup_key,
+            provider_account_id,
+            status,
+            access_token_envelope,
+            refresh_token_envelope,
+            access_token_expires_at,
+            token_type,
+            scopes,
+            encryption_key_version,
+            has_access_token,
+            has_refresh_token,
+            reauthorization_reason,
+            metadata,
+            updated_at
+          )
+          VALUES (
+            $1,$2,$3,$4,$5,'active',
+            $6,$7,$8::timestamptz,$9,$10::text[],
+            $11,$12,$13,NULL,$14::jsonb,$15::timestamptz
+          )
+          RETURNING ${SAFE_SELECT_COLUMNS}
+        `,
+        [
+          CODECLIP_VERTICAL,
+          accountRef.provider,
+          accountRef.environment,
+          accountRef.accountLookupKey,
+          accountRef.providerAccountId,
+          accessEnvelope,
+          refreshEnvelope,
+          accessTokenExpiresAt,
+          tokenType,
+          scopesResult.scopes,
+          keyVersion,
+          Boolean(accessEnvelope),
+          Boolean(refreshEnvelope),
+          JSON.stringify(metadataResult.metadata),
+          operationNow,
+        ]
+      );
+      row = result.rows?.[0] || null;
+    } catch (error) {
+      if (error instanceof CodeClipProviderCredentialError) throw error;
+      if (error?.code === "23505") {
+        throw credentialError(
+          "CREDENTIAL_CONFLICT",
+          "a credential already exists for this provider account and environment",
+          {
+            provider: accountRef.provider,
+            environment: accountRef.environment,
+          }
+        );
+      }
+      throw credentialError("DATABASE_ERROR", "credential create failed");
+    }
 
-    const row = result.rows?.[0] || null;
     if (!row) {
       throw credentialError("DATABASE_ERROR", "credential create returned no row");
     }
 
+    // Ensure audit snapshot sees the same operation time as the insert.
+    const afterRow = {
+      ...row,
+      updated_at: row.updated_at ?? operationNow,
+    };
+
+    await appendMutationAudit(
+      {
+        credentialId: row.id,
+        provider: accountRef.provider,
+        environment: accountRef.environment,
+        action: "created",
+        actor: mutationActor,
+        reason: mutationReason,
+        beforeState: null,
+        afterState: afterRow,
+      },
+      tx
+    );
+
     return {
       status: "created",
       created: true,
-      credential: toSafeCredential(row, { now }),
+      credential: toSafeCredential(afterRow, { now: operationNow }),
     };
-  } catch (error) {
-    if (error instanceof CodeClipProviderCredentialError) throw error;
-    if (error?.code === "23505") {
-      throw credentialError(
-        "CREDENTIAL_CONFLICT",
-        "a credential already exists for this provider account and environment",
-        {
-          provider: accountRef.provider,
-          environment: accountRef.environment,
-        }
-      );
-    }
-    throw credentialError("DATABASE_ERROR", "credential create failed");
-  }
+  });
 }
 
 async function getCodeClipProviderCredentialById(
@@ -906,22 +1225,35 @@ function serializeCodeClipProviderCredentialForOperator(row, { now = new Date() 
  * Token lifecycle update: replace access and/or refresh tokens.
  *
  * Contract:
+ * - Actor is required; audit writes token_updated on the same TX client.
  * - At least one of accessToken or refreshToken must be present (hasOwn).
  * - Omitted token fields preserve existing material (via decrypt + re-encrypt).
- * - null / empty string tokens are rejected (no clearing in B2A).
+ * - null / empty string tokens are rejected (no clearing).
  * - Full resulting token set is re-encrypted with the active key version.
  * - Non-secret fields (expires, tokenType, scopes, metadata) may update only
  *   together with a token change.
+ * - last_refreshed_at and updated_at use the same operationNow.
  *
- * Returns a safe credential row only. No audit write.
+ * Returns a safe credential row only.
  */
 async function updateCodeClipProviderCredentialTokens(
   id,
   patch = {},
-  { queryClient, env = process.env, now = new Date() } = {}
+  {
+    queryClient,
+    env = process.env,
+    now = new Date(),
+    actor,
+    reason = DEFAULT_TOKEN_UPDATE_AUDIT_REASON,
+  } = {}
 ) {
   const client = requireQueryClient(queryClient);
   await ensureCredentialsSchema(client);
+  const operationNow = normalizeOperationNow(now);
+  const mutationActor = requireMutationActor(actor);
+  const mutationReason = requireMutationReason(reason, {
+    defaultReason: DEFAULT_TOKEN_UPDATE_AUDIT_REASON,
+  });
   const normalizedId = normalizePositiveBigIntId(id, "id");
 
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
@@ -1024,13 +1356,6 @@ async function updateCodeClipProviderCredentialTokens(
     nextMetadata = metadataResult.metadata;
   }
 
-  const nowIso =
-    now instanceof Date
-      ? now.toISOString()
-      : Number.isFinite(Date.parse(now))
-        ? new Date(now).toISOString()
-        : new Date().toISOString();
-
   return withCredentialTransaction(client, async (tx) => {
     const locked = await tx.query(
       `
@@ -1054,6 +1379,8 @@ async function updateCodeClipProviderCredentialTokens(
         { status: current.status }
       );
     }
+
+    const beforeState = dbRowForAudit(current);
 
     // Build resulting plaintext token set (full re-encrypt with active key).
     let accessPlaintext = nextAccessFromPatch;
@@ -1123,7 +1450,7 @@ async function updateCodeClipProviderCredentialTokens(
           status = $11,
           reauthorization_reason = $12,
           last_refreshed_at = $13::timestamptz,
-          updated_at = NOW()
+          updated_at = $13::timestamptz
         WHERE id = $1
           AND vertical = $14
           AND status IN ('active', 'reauthorization_required')
@@ -1142,7 +1469,7 @@ async function updateCodeClipProviderCredentialTokens(
         JSON.stringify(metadata),
         nextStatus,
         nextReauthReason,
-        nowIso,
+        operationNow,
         CODECLIP_VERTICAL,
       ]
     );
@@ -1155,9 +1482,148 @@ async function updateCodeClipProviderCredentialTokens(
       );
     }
 
+    const afterRow = {
+      ...row,
+      updated_at: row.updated_at ?? operationNow,
+      last_refreshed_at: row.last_refreshed_at ?? operationNow,
+    };
+
+    await appendMutationAudit(
+      {
+        credentialId: row.id,
+        provider: row.provider,
+        environment: row.environment,
+        action: "token_updated",
+        actor: mutationActor,
+        reason: mutationReason,
+        beforeState,
+        afterState: afterRow,
+      },
+      tx
+    );
+
     return {
       status: "updated",
-      credential: toSafeCredential(row, { now }),
+      credential: toSafeCredential(afterRow, { now: operationNow }),
+    };
+  });
+}
+
+/**
+ * Status lifecycle mutation with atomic audit (F1C2C2).
+ * Does not load or decrypt token envelopes.
+ */
+async function setCodeClipProviderCredentialStatus(
+  id,
+  { status, reason, actor, now = new Date() } = {},
+  { queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  await ensureCredentialsSchema(client);
+  const operationNow = normalizeOperationNow(now);
+  const mutationActor = requireMutationActor(actor);
+  const mutationReason = requireMutationReason(reason, { required: true });
+  const normalizedId = normalizePositiveBigIntId(id, "id");
+
+  const statusResult = normalizeCodeClipProviderCredentialStatus(status);
+  if (!statusResult.ok) {
+    throw credentialError("INVALID_CREDENTIAL_INPUT", "status is invalid", {
+      fieldName: "status",
+      reason: statusResult.reason || null,
+    });
+  }
+  const targetStatus = statusResult.status;
+
+  return withCredentialTransaction(client, async (tx) => {
+    const locked = await tx.query(
+      `
+        SELECT ${SAFE_SELECT_COLUMNS}
+        FROM codeclip_provider_credentials
+        WHERE id = $1
+          AND vertical = $2
+        FOR UPDATE
+      `,
+      [normalizedId, CODECLIP_VERTICAL]
+    );
+    const current = locked.rows?.[0] || null;
+    if (!current) {
+      throw credentialError("CREDENTIAL_NOT_FOUND", "credential was not found");
+    }
+
+    const transition = validateStatusSetterTransition(current.status, targetStatus);
+    const live = buildStatusLiveState(
+      transition.fromStatus,
+      transition.toStatus,
+      mutationReason,
+      operationNow
+    );
+    const auditAction = mapStatusSetterAuditAction(
+      transition.fromStatus,
+      transition.toStatus
+    );
+    const beforeState = dbRowForAudit(current);
+
+    const setClauses = ["status = $3", "updated_at = $4::timestamptz"];
+    const params = [normalizedId, CODECLIP_VERTICAL, live.status, operationNow];
+
+    if (live.setDisabled) {
+      params.push(live.disabledAt);
+      setClauses.push(`disabled_at = $${params.length}::timestamptz`);
+    }
+    if (live.setRevoked) {
+      params.push(live.revokedAt);
+      setClauses.push(`revoked_at = $${params.length}::timestamptz`);
+    }
+    if (live.setReauth) {
+      params.push(live.reauthorizationReason);
+      setClauses.push(`reauthorization_reason = $${params.length}`);
+    }
+
+    params.push(transition.fromStatus);
+    const fromStatusParam = params.length;
+
+    const updated = await tx.query(
+      `
+        UPDATE codeclip_provider_credentials
+        SET ${setClauses.join(", ")}
+        WHERE id = $1
+          AND vertical = $2
+          AND status = $${fromStatusParam}
+        RETURNING ${SAFE_SELECT_COLUMNS}
+      `,
+      params
+    );
+
+    const row = updated.rows?.[0] || null;
+    if (!row) {
+      throw credentialError(
+        "CREDENTIAL_STATUS_RACE",
+        "credential status changed during status update"
+      );
+    }
+
+    const afterRow = {
+      ...row,
+      updated_at: row.updated_at ?? operationNow,
+    };
+
+    await appendMutationAudit(
+      {
+        credentialId: row.id,
+        provider: row.provider,
+        environment: row.environment,
+        action: auditAction,
+        actor: mutationActor,
+        reason: mutationReason,
+        beforeState,
+        afterState: afterRow,
+      },
+      tx
+    );
+
+    return {
+      status: "updated",
+      credential: toSafeCredential(afterRow, { now: operationNow }),
     };
   });
 }
@@ -1368,6 +1834,7 @@ module.exports = {
   findCodeClipProviderCredential,
   listCodeClipProviderCredentials,
   updateCodeClipProviderCredentialTokens,
+  setCodeClipProviderCredentialStatus,
   getCodeClipProviderCredentialSecretsForUse,
   inspectCodeClipProviderCredentialUsability,
   serializeCodeClipProviderCredentialForOperator,

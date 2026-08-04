@@ -9,6 +9,7 @@ const {
   findCodeClipProviderCredential,
   listCodeClipProviderCredentials,
   updateCodeClipProviderCredentialTokens,
+  setCodeClipProviderCredentialStatus,
   getCodeClipProviderCredentialSecretsForUse,
   inspectCodeClipProviderCredentialUsability,
   serializeCodeClipProviderCredentialForOperator,
@@ -19,6 +20,14 @@ const {
 
 const ENV_KEYS = "CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS";
 const ENV_ACTIVE = "CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION";
+
+/** Default mutation actor for C2 tests (audit requires actor). */
+const SYSTEM_ACTOR = Object.freeze({ type: "system" });
+const OPERATOR_ACTOR = Object.freeze({ type: "operator", id: "admin.user-1" });
+
+function mutationOpts(extra = {}) {
+  return { actor: SYSTEM_ACTOR, ...extra };
+}
 
 function keyB64(bytes = crypto.randomBytes(32)) {
   return bytes.toString("base64");
@@ -52,10 +61,15 @@ function assertSafeCredential(credential) {
   assert.equal(Array.isArray(credential.metadata), false);
 }
 
-function createCredentialStoreClient() {
+function createCredentialStoreClient(options = {}) {
   const calls = [];
   const rows = [];
+  const auditRows = [];
   let nextId = 1;
+  let nextAuditId = 1;
+  const failAudit = options.failAudit === true;
+  /** When set, force status UPDATE to see a different locked status (race). */
+  let forceStatusRace = options.forceStatusRace === true;
 
   function identityKey(row) {
     return [row.vertical, row.provider, row.environment, row.account_lookup_key].join("|");
@@ -96,11 +110,67 @@ function createCredentialStoreClient() {
   return {
     calls,
     rows,
+    auditRows,
+    setForceStatusRace(value) {
+      forceStatusRace = Boolean(value);
+    },
     async query(sql, params = []) {
       calls.push({ sql, params });
 
       if (/^\s*BEGIN\s*$/i.test(sql.trim()) || /^\s*COMMIT\s*$/i.test(sql.trim()) || /^\s*ROLLBACK\s*$/i.test(sql.trim())) {
         return { rows: [] };
+      }
+
+      if (/INSERT INTO codeclip_provider_credential_audit/.test(sql)) {
+        if (failAudit) {
+          throw new Error("audit insert failed for test");
+        }
+        const audit = {
+          id: nextAuditId++,
+          credential_id: params[0],
+          vertical: params[1],
+          provider: params[2],
+          environment: params[3],
+          action: params[4],
+          actor_type: params[5],
+          actor_id: params[6],
+          reason_code: params[7],
+          before_state:
+            params[8] === null || params[8] === undefined
+              ? null
+              : typeof params[8] === "string"
+                ? JSON.parse(params[8])
+                : params[8],
+          after_state:
+            params[9] === null || params[9] === undefined
+              ? null
+              : typeof params[9] === "string"
+                ? JSON.parse(params[9])
+                : params[9],
+          metadata:
+            typeof params[10] === "string" ? JSON.parse(params[10]) : params[10] || {},
+          created_at: "2026-08-04T10:00:00.000Z",
+        };
+        auditRows.push(audit);
+        return {
+          rows: [
+            {
+              id: audit.id,
+              credential_id: audit.credential_id,
+              vertical: audit.vertical,
+              provider: audit.provider,
+              environment: audit.environment,
+              action: audit.action,
+              actor_type: audit.actor_type,
+              actor_id: audit.actor_id,
+              reason_code: audit.reason_code,
+              before_state: audit.before_state,
+              after_state: audit.after_state,
+              metadata: audit.metadata,
+              created_at: audit.created_at,
+            },
+          ],
+        };
       }
 
       if (/INSERT INTO codeclip_provider_credentials/.test(sql)) {
@@ -123,8 +193,8 @@ function createCredentialStoreClient() {
           reauthorization_reason: null,
           metadata:
             typeof params[13] === "string" ? JSON.parse(params[13]) : params[13] || {},
-          created_at: "2026-08-04T10:00:00.000Z",
-          updated_at: "2026-08-04T10:00:00.000Z",
+          created_at: params[14] || "2026-08-04T10:00:00.000Z",
+          updated_at: params[14] || "2026-08-04T10:00:00.000Z",
           disabled_at: null,
           revoked_at: null,
           last_refreshed_at: null,
@@ -143,6 +213,62 @@ function createCredentialStoreClient() {
         const id = String(params[0]);
         const row = rows.find((item) => String(item.id) === id);
         if (!row) return { rows: [] };
+
+        // Status setter path: no token envelopes in SET clause.
+        if (!/access_token_envelope\s*=/.test(sql)) {
+          // Expected: status=$3, updated_at=$4, optional disabled/revoked/reauth, WHERE status=$last
+          const expectedFromStatus = params[params.length - 1];
+          if (forceStatusRace || row.status !== expectedFromStatus) {
+            return { rows: [] };
+          }
+          row.status = params[2];
+          row.updated_at = params[3];
+          // Apply optional fields by scanning SET clause order used by repository.
+          if (/disabled_at\s*=/.test(sql)) {
+            // Find param index for disabled_at: after status and updated_at at least
+            const setMatch = sql.match(
+              /SET\s+([\s\S]*?)\s+WHERE/i
+            );
+            if (setMatch) {
+              const setSql = setMatch[1];
+              const assignments = setSql.split(",").map((s) => s.trim());
+              for (const assignment of assignments) {
+                const m = assignment.match(/^(\w+)\s*=\s*\$(\d+)/i);
+                if (!m) continue;
+                const col = m[1].toLowerCase();
+                const idx = Number(m[2]) - 1;
+                if (col === "status") row.status = params[idx];
+                else if (col === "updated_at") row.updated_at = params[idx];
+                else if (col === "disabled_at") row.disabled_at = params[idx];
+                else if (col === "revoked_at") row.revoked_at = params[idx];
+                else if (col === "reauthorization_reason") {
+                  row.reauthorization_reason = params[idx];
+                }
+              }
+            }
+          } else {
+            // Still parse set clauses without disabled_at (e.g. reauth only)
+            const setMatch = sql.match(/SET\s+([\s\S]*?)\s+WHERE/i);
+            if (setMatch) {
+              const assignments = setMatch[1].split(",").map((s) => s.trim());
+              for (const assignment of assignments) {
+                const m = assignment.match(/^(\w+)\s*=\s*\$(\d+)/i);
+                if (!m) continue;
+                const col = m[1].toLowerCase();
+                const idx = Number(m[2]) - 1;
+                if (col === "status") row.status = params[idx];
+                else if (col === "updated_at") row.updated_at = params[idx];
+                else if (col === "disabled_at") row.disabled_at = params[idx];
+                else if (col === "revoked_at") row.revoked_at = params[idx];
+                else if (col === "reauthorization_reason") {
+                  row.reauthorization_reason = params[idx];
+                }
+              }
+            }
+          }
+          return { rows: [toSafeRow(row)] };
+        }
+
         if (!["active", "reauthorization_required"].includes(row.status)) {
           return { rows: [] };
         }
@@ -160,7 +286,7 @@ function createCredentialStoreClient() {
         row.status = params[10];
         row.reauthorization_reason = params[11];
         row.last_refreshed_at = params[12];
-        row.updated_at = "2026-08-04T12:00:00.000Z";
+        row.updated_at = params[12];
         return { rows: [toSafeRow(row)] };
       }
 
@@ -293,8 +419,8 @@ function createCredentialStoreClient() {
  * Mock pool: repository-owned transaction path (connect + BEGIN/COMMIT/ROLLBACK + release).
  * Returned client is the same store client used for queries.
  */
-function createCredentialStorePool() {
-  const store = createCredentialStoreClient();
+function createCredentialStorePool(options = {}) {
+  const store = createCredentialStoreClient(options);
   let released = 0;
   const pool = {
     store,
@@ -306,6 +432,9 @@ function createCredentialStorePool() {
     },
     get rows() {
       return store.rows;
+    },
+    get auditRows() {
+      return store.auditRows;
     },
     async connect() {
       return {
@@ -342,6 +471,23 @@ function assertSafeSqlProjection(sql) {
   assert.match(projection, /provider_account_id/);
 }
 
+function assertNoSecretsInAuditParams(params) {
+  const serialized = JSON.stringify(params);
+  assert.equal(serialized.includes("access_token_envelope"), false);
+  assert.equal(serialized.includes("refresh_token_envelope"), false);
+  assert.equal(serialized.includes("access-secret"), false);
+  assert.equal(serialized.includes("plaintext"), false);
+  assert.equal(/"provider_account_id"\s*:/.test(serialized), false);
+  // raw account ids used in tests
+  assert.equal(serialized.includes("page-1234567890"), false);
+}
+
+function auditInserts(client) {
+  return client.calls.filter((c) =>
+    /INSERT INTO codeclip_provider_credential_audit/.test(c.sql)
+  );
+}
+
 test("codeClip credentials safe SQL projection excludes envelopes and lookup key", async () => {
   const env = makeCryptoEnv();
   const client = createCredentialStoreClient();
@@ -352,7 +498,7 @@ test("codeClip credentials safe SQL projection excludes envelopes and lookup key
       environment: "sandbox",
       accessToken: "proj-token",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   await getCodeClipProviderCredentialById(created.credential.id, {
@@ -372,7 +518,9 @@ test("codeClip credentials safe SQL projection excludes envelopes and lookup key
   );
 
   const selectOrReturning = client.calls.filter(
-    (call) => /SELECT/i.test(call.sql) || /RETURNING/i.test(call.sql)
+    (call) =>
+      /codeclip_provider_credentials/i.test(call.sql) &&
+      (/SELECT/i.test(call.sql) || /RETURNING/i.test(call.sql))
   );
   assert.ok(selectOrReturning.length >= 4);
   for (const call of selectOrReturning) {
@@ -395,7 +543,7 @@ test("codeClip credentials create access-only and returns safe row", async () =>
       metadata: { source: "test" },
       accessTokenExpiresAt: "2026-09-01T00:00:00.000Z",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   assert.equal(result.status, "created");
@@ -440,7 +588,7 @@ test("codeClip credentials create both tokens with same key version", async () =
       accessToken: "access-a",
       refreshToken: "refresh-b",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
   assert.equal(result.credential.hasAccessToken, true);
   assert.equal(result.credential.hasRefreshToken, true);
@@ -462,7 +610,7 @@ test("codeClip credentials create rejects providers without credentials capabili
           environment: "sandbox",
           accessToken: "x",
         },
-        { queryClient: client, env }
+        { queryClient: client, env, actor: SYSTEM_ACTOR }
       ),
     (error) =>
       error instanceof CodeClipProviderCredentialError &&
@@ -477,7 +625,7 @@ test("codeClip credentials create rejects providers without credentials capabili
           environment: "sandbox",
           accessToken: "x",
         },
-        { queryClient: client, env }
+        { queryClient: client, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "UNSUPPORTED_CREDENTIAL_PROVIDER"
   );
@@ -495,7 +643,7 @@ test("codeClip credentials create rejects invalid inputs and missing tokens", as
           providerAccountId: "page-1",
           environment: "sandbox",
         },
-        { queryClient: client, env }
+        { queryClient: client, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_CREDENTIAL_INPUT"
   );
@@ -509,7 +657,7 @@ test("codeClip credentials create rejects invalid inputs and missing tokens", as
           environment: "staging",
           accessToken: "x",
         },
-        { queryClient: client, env }
+        { queryClient: client, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_CREDENTIAL_INPUT"
   );
@@ -524,7 +672,7 @@ test("codeClip credentials create rejects invalid inputs and missing tokens", as
           accessToken: "x",
           metadata: { access_token: "nope" },
         },
-        { queryClient: client, env }
+        { queryClient: client, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_CREDENTIAL_INPUT"
   );
@@ -541,7 +689,7 @@ test("codeClip credentials create fails closed without encryption keys", async (
           environment: "sandbox",
           accessToken: "x",
         },
-        { queryClient: client, env: {} }
+        { queryClient: client, env: {}, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "CREDENTIAL_ENCRYPTION_FAILED"
   );
@@ -556,9 +704,9 @@ test("codeClip credentials create conflict is explicit", async () => {
     environment: "sandbox",
     accessToken: "a",
   };
-  await createCodeClipProviderCredential(input, { queryClient: client, env });
+  await createCodeClipProviderCredential(input, { queryClient: client, env, actor: SYSTEM_ACTOR });
   await assert.rejects(
-    () => createCodeClipProviderCredential(input, { queryClient: client, env }),
+    () => createCodeClipProviderCredential(input, { queryClient: client, env, actor: SYSTEM_ACTOR }),
     (error) => error.code === "CREDENTIAL_CONFLICT"
   );
 });
@@ -573,11 +721,11 @@ test("codeClip credentials sandbox and production are separate uniqueness keys",
   };
   const a = await createCodeClipProviderCredential(
     { ...base, environment: "sandbox" },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
   const b = await createCodeClipProviderCredential(
     { ...base, environment: "production" },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
   assert.notEqual(a.credential.id, b.credential.id);
   assert.equal(client.rows.length, 2);
@@ -594,7 +742,7 @@ test("codeClip credentials get and find return safe rows or null", async () => {
       accessToken: "secret",
       accessTokenExpiresAt: "2026-08-04T09:00:00.000Z",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   const byId = await getCodeClipProviderCredentialById(created.credential.id, {
@@ -649,7 +797,7 @@ test("codeClip credentials list filters cursor and limit without decrypt", async
         environment: "sandbox",
         accessToken: `tok-${i}`,
       },
-      { queryClient: client, env }
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
     );
     // stagger updated_at for deterministic ordering in mock
     client.rows[i].updated_at = `2026-08-04T10:0${i}:00.000Z`;
@@ -664,7 +812,7 @@ test("codeClip credentials list filters cursor and limit without decrypt", async
       environment: "production",
       accessToken: "prod",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   const page1 = await listCodeClipProviderCredentials(
@@ -703,7 +851,7 @@ test("codeClip credentials operator serializer defensive copies and strips raw f
       scopes: ["a"],
       metadata: { k: 1 },
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   const serialized = serializeCodeClipProviderCredentialForOperator(created.credential);
@@ -769,7 +917,7 @@ test("codeClip credentials token update pool path owns BEGIN COMMIT and releases
       accessToken: "access-old",
       refreshToken: "refresh-keep",
     },
-    { queryClient: pool.store, env }
+    { queryClient: pool.store, env, actor: SYSTEM_ACTOR }
   );
 
   const beforeTxCalls = pool.calls.length;
@@ -780,7 +928,7 @@ test("codeClip credentials token update pool path owns BEGIN COMMIT and releases
       accessTokenExpiresAt: "2026-10-01T00:00:00.000Z",
       scopes: ["pages_messaging", "public_profile"],
     },
-    { queryClient: pool, env, now: new Date("2026-08-04T12:00:00.000Z") }
+    { queryClient: pool, env, now: new Date("2026-08-04T12:00:00.000Z"), actor: SYSTEM_ACTOR }
   );
 
   assert.equal(updated.status, "updated");
@@ -811,9 +959,12 @@ test("codeClip credentials token update pool path owns BEGIN COMMIT and releases
   assert.equal(txCalls.some((c) => /UPDATE codeclip_provider_credentials/i.test(c.sql)), true);
   assert.equal(pool.released, 1);
   assert.equal(
-    txCalls.some((c) => /codeclip_provider_credential_audit/i.test(c.sql)),
-    false
+    txCalls.some((c) => /INSERT INTO codeclip_provider_credential_audit/i.test(c.sql)),
+    true
   );
+  const audit = auditInserts(pool).at(-1);
+  assert.equal(audit.params[4], "token_updated");
+  assertNoSecretsInAuditParams(audit.params);
 });
 
 test("codeClip credentials token update pool path rolls back on decrypt failure and releases", async () => {
@@ -836,7 +987,7 @@ test("codeClip credentials token update pool path rolls back on decrypt failure 
       accessToken: "a1",
       refreshToken: "r1",
     },
-    { queryClient: pool.store, env: envCreate }
+    { queryClient: pool.store, env: envCreate, actor: SYSTEM_ACTOR }
   );
 
   const beforeTxCalls = pool.calls.length;
@@ -845,7 +996,7 @@ test("codeClip credentials token update pool path rolls back on decrypt failure 
       updateCodeClipProviderCredentialTokens(
         created.credential.id,
         { accessToken: "a2" },
-        { queryClient: pool, env: envUpdate }
+        { queryClient: pool, env: envUpdate, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "CREDENTIAL_DECRYPTION_FAILED"
   );
@@ -876,14 +1027,14 @@ test("codeClip credentials token update caller-owned client does not BEGIN COMMI
       accessToken: "old",
       refreshToken: "keep",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   const before = client.calls.length;
   const updated = await updateCodeClipProviderCredentialTokens(
     created.credential.id,
     { accessToken: "new" },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
   assert.equal(updated.status, "updated");
   const updateCalls = client.calls.slice(before);
@@ -929,7 +1080,7 @@ test("codeClip credentials token update re-encrypts full set to active key versi
       accessToken: "access-v1",
       refreshToken: "refresh-v1",
     },
-    { queryClient: pool.store, env: envV1 }
+    { queryClient: pool.store, env: envV1, actor: SYSTEM_ACTOR }
   );
   assert.equal(created.credential.encryptionKeyVersion, 1);
   assert.match(pool.rows[0].access_token_envelope, /^v1\.1\./);
@@ -937,7 +1088,7 @@ test("codeClip credentials token update re-encrypts full set to active key versi
   const updated = await updateCodeClipProviderCredentialTokens(
     created.credential.id,
     { accessToken: "access-v2" },
-    { queryClient: pool, env: envV2 }
+    { queryClient: pool, env: envV2, actor: SYSTEM_ACTOR }
   );
   assert.equal(updated.credential.encryptionKeyVersion, 2);
   assert.match(pool.rows[0].access_token_envelope, /^v1\.2\./);
@@ -965,7 +1116,7 @@ test("codeClip credentials token update rejects empty patch and null token clear
       environment: "sandbox",
       accessToken: "a",
     },
-    { queryClient: pool.store, env }
+    { queryClient: pool.store, env, actor: SYSTEM_ACTOR }
   );
 
   await assert.rejects(
@@ -973,7 +1124,7 @@ test("codeClip credentials token update rejects empty patch and null token clear
       updateCodeClipProviderCredentialTokens(
         created.credential.id,
         { metadata: { x: 1 } },
-        { queryClient: pool, env }
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_CREDENTIAL_INPUT"
   );
@@ -982,7 +1133,7 @@ test("codeClip credentials token update rejects empty patch and null token clear
       updateCodeClipProviderCredentialTokens(
         created.credential.id,
         { scopes: ["a"] },
-        { queryClient: pool, env }
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_CREDENTIAL_INPUT"
   );
@@ -991,7 +1142,7 @@ test("codeClip credentials token update rejects empty patch and null token clear
       updateCodeClipProviderCredentialTokens(
         created.credential.id,
         { accessToken: null },
-        { queryClient: pool, env }
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_CREDENTIAL_INPUT"
   );
@@ -1000,7 +1151,7 @@ test("codeClip credentials token update rejects empty patch and null token clear
       updateCodeClipProviderCredentialTokens(
         created.credential.id,
         { accessToken: "" },
-        { queryClient: pool, env }
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_CREDENTIAL_INPUT"
   );
@@ -1016,7 +1167,7 @@ test("codeClip credentials token update rejects disabled and revoked", async () 
       environment: "sandbox",
       accessToken: "a",
     },
-    { queryClient: pool.store, env }
+    { queryClient: pool.store, env, actor: SYSTEM_ACTOR }
   );
 
   pool.rows[0].status = "disabled";
@@ -1025,7 +1176,7 @@ test("codeClip credentials token update rejects disabled and revoked", async () 
       updateCodeClipProviderCredentialTokens(
         created.credential.id,
         { accessToken: "b" },
-        { queryClient: pool, env }
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_STATUS_FOR_TOKEN_UPDATE"
   );
@@ -1036,7 +1187,7 @@ test("codeClip credentials token update rejects disabled and revoked", async () 
       updateCodeClipProviderCredentialTokens(
         created.credential.id,
         { accessToken: "b" },
-        { queryClient: pool, env }
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_STATUS_FOR_TOKEN_UPDATE"
   );
@@ -1053,7 +1204,7 @@ test("codeClip credentials token update recovers reauthorization_required to act
       accessToken: "old",
       refreshToken: "r",
     },
-    { queryClient: pool.store, env }
+    { queryClient: pool.store, env, actor: SYSTEM_ACTOR }
   );
   pool.rows[0].status = "reauthorization_required";
   pool.rows[0].reauthorization_reason = "provider_revoked";
@@ -1061,7 +1212,7 @@ test("codeClip credentials token update recovers reauthorization_required to act
   const updated = await updateCodeClipProviderCredentialTokens(
     created.credential.id,
     { accessToken: "fresh", refreshToken: "r2" },
-    { queryClient: pool, env }
+    { queryClient: pool, env, actor: SYSTEM_ACTOR }
   );
   assert.equal(updated.credential.status, "active");
   assert.equal(updated.credential.reauthorizationRequired, false);
@@ -1079,7 +1230,7 @@ test("codeClip credentials token update not found and race status guard", async 
       updateCodeClipProviderCredentialTokens(
         999,
         { accessToken: "x" },
-        { queryClient: pool, env }
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "CREDENTIAL_NOT_FOUND"
   );
@@ -1091,7 +1242,7 @@ test("codeClip credentials token update not found and race status guard", async 
       environment: "sandbox",
       accessToken: "a",
     },
-    { queryClient: pool.store, env }
+    { queryClient: pool.store, env, actor: SYSTEM_ACTOR }
   );
 
   const originalQuery = pool.store.query.bind(pool.store);
@@ -1110,7 +1261,7 @@ test("codeClip credentials token update not found and race status guard", async 
       updateCodeClipProviderCredentialTokens(
         created.credential.id,
         { accessToken: "b" },
-        { queryClient: pool, env }
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
       ),
     (error) => error.code === "INVALID_STATUS_FOR_TOKEN_UPDATE"
   );
@@ -1146,7 +1297,7 @@ test("codeClip credentials secret-read provider_api returns access only", async 
       tokenType: "Bearer",
       accessTokenExpiresAt: "2026-12-01T00:00:00.000Z",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   const result = await getCodeClipProviderCredentialSecretsForUse(
@@ -1155,7 +1306,7 @@ test("codeClip credentials secret-read provider_api returns access only", async 
       purpose: "provider_api",
       now: new Date("2026-08-04T12:00:00.000Z"),
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   assert.equal(result.ok, true);
@@ -1195,7 +1346,7 @@ test("codeClip credentials secret-read provider_api status and expiry gates", as
       refreshToken: "r",
       accessTokenExpiresAt: "2026-08-01T00:00:00.000Z",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   assert.deepEqual(
@@ -1205,7 +1356,7 @@ test("codeClip credentials secret-read provider_api status and expiry gates", as
         purpose: "provider_api",
         now: new Date("2026-08-04T12:00:00.000Z"),
       },
-      { queryClient: client, env }
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
     ),
     { ok: false, reason: "TOKEN_EXPIRED" }
   );
@@ -1215,7 +1366,7 @@ test("codeClip credentials secret-read provider_api status and expiry gates", as
   assert.deepEqual(
     await getCodeClipProviderCredentialSecretsForUse(
       { id: created.credential.id, purpose: "provider_api" },
-      { queryClient: client, env }
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
     ),
     { ok: false, reason: "REAUTHORIZATION_REQUIRED" }
   );
@@ -1224,7 +1375,7 @@ test("codeClip credentials secret-read provider_api status and expiry gates", as
   assert.deepEqual(
     await getCodeClipProviderCredentialSecretsForUse(
       { id: created.credential.id, purpose: "provider_api" },
-      { queryClient: client, env }
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
     ),
     { ok: false, reason: "CREDENTIAL_NOT_USABLE" }
   );
@@ -1233,7 +1384,7 @@ test("codeClip credentials secret-read provider_api status and expiry gates", as
   assert.deepEqual(
     await getCodeClipProviderCredentialSecretsForUse(
       { id: created.credential.id, purpose: "provider_api" },
-      { queryClient: client, env }
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
     ),
     { ok: false, reason: "CREDENTIAL_NOT_USABLE" }
   );
@@ -1244,7 +1395,7 @@ test("codeClip credentials secret-read provider_api status and expiry gates", as
   assert.deepEqual(
     await getCodeClipProviderCredentialSecretsForUse(
       { id: created.credential.id, purpose: "provider_api" },
-      { queryClient: client, env }
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
     ),
     { ok: false, reason: "TOKEN_NOT_PRESENT" }
   );
@@ -1262,7 +1413,7 @@ test("codeClip credentials secret-read refresh returns refresh only", async () =
       refreshToken: "refresh-visible",
       accessTokenExpiresAt: "2026-08-01T00:00:00.000Z",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   const active = await getCodeClipProviderCredentialSecretsForUse(
@@ -1271,7 +1422,7 @@ test("codeClip credentials secret-read refresh returns refresh only", async () =
       purpose: "refresh",
       now: new Date("2026-08-04T12:00:00.000Z"),
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
   assert.equal(active.ok, true);
   assert.equal(active.purpose, "refresh");
@@ -1285,7 +1436,7 @@ test("codeClip credentials secret-read refresh returns refresh only", async () =
   client.rows[0].status = "reauthorization_required";
   const reauth = await getCodeClipProviderCredentialSecretsForUse(
     { id: created.credential.id, purpose: "refresh" },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
   assert.equal(reauth.ok, true);
   assert.equal(reauth.refreshToken, "refresh-visible");
@@ -1295,7 +1446,7 @@ test("codeClip credentials secret-read refresh returns refresh only", async () =
   assert.deepEqual(
     await getCodeClipProviderCredentialSecretsForUse(
       { id: created.credential.id, purpose: "refresh" },
-      { queryClient: client, env }
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
     ),
     { ok: false, reason: "CREDENTIAL_NOT_USABLE" }
   );
@@ -1320,13 +1471,13 @@ test("codeClip credentials secret-read rejects invalid purposes and not found", 
       environment: "sandbox",
       accessToken: "a",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   for (const purpose of [undefined, "", "validation", "debug", "VALIDATION"]) {
     const result = await getCodeClipProviderCredentialSecretsForUse(
       { id: created.credential.id, purpose },
-      { queryClient: client, env }
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
     );
     assert.deepEqual(result, { ok: false, reason: "INVALID_SECRET_PURPOSE" });
   }
@@ -1334,7 +1485,7 @@ test("codeClip credentials secret-read rejects invalid purposes and not found", 
   assert.deepEqual(
     await getCodeClipProviderCredentialSecretsForUse(
       { id: 99999, purpose: "provider_api" },
-      { queryClient: client, env }
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
     ),
     { ok: false, reason: "CREDENTIAL_NOT_FOUND" }
   );
@@ -1355,7 +1506,7 @@ test("codeClip credentials secret-read decrypt failure is fail-closed", async ()
       refreshToken: refreshPlain,
       accessTokenExpiresAt: "2026-12-01T00:00:00.000Z",
     },
-    { queryClient: client, env: envCreate }
+    { queryClient: client, env: envCreate, actor: SYSTEM_ACTOR }
   );
 
   const api = await getCodeClipProviderCredentialSecretsForUse(
@@ -1385,7 +1536,7 @@ test("codeClip credentials inspect usability without decrypt or encryption env",
       refreshToken: "secret-refresh",
       accessTokenExpiresAt: "2026-12-01T00:00:00.000Z",
     },
-    { queryClient: client, env }
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
   );
 
   const beforeCalls = client.calls.length;
@@ -1463,4 +1614,847 @@ test("codeClip credentials inspect usability without decrypt or encryption env",
     ),
     null
   );
+});
+
+// ---------------------------------------------------------------------------
+// F1C2C2: atomic mutation audit + status lifecycle
+// ---------------------------------------------------------------------------
+
+test("codeClip credentials public exports include status setter and no audit re-exports", () => {
+  const mod = require("./verticals/codeclip/provider-credentials");
+  assert.deepEqual(
+    Object.keys(mod).sort(),
+    [
+      "CodeClipProviderCredentialError",
+      "createCodeClipProviderCredential",
+      "findCodeClipProviderCredential",
+      "getCodeClipProviderCredentialById",
+      "getCodeClipProviderCredentialSecretsForUse",
+      "inspectCodeClipProviderCredentialUsability",
+      "listCodeClipProviderCredentials",
+      "serializeCodeClipProviderCredentialForOperator",
+      "setCodeClipProviderCredentialStatus",
+      "updateCodeClipProviderCredentialTokens",
+    ].sort()
+  );
+  assert.equal(Object.hasOwn(mod, "appendCodeClipProviderCredentialAudit"), false);
+  assert.equal(Object.hasOwn(mod, "listCodeClipProviderCredentialAudit"), false);
+});
+
+test("codeClip credentials create requires actor and writes created audit", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const operationNow = "2026-08-04T15:30:00.000Z";
+
+  await assert.rejects(
+    () =>
+      createCodeClipProviderCredential(
+        {
+          provider: "meta",
+          providerAccountId: "page-no-actor",
+          environment: "sandbox",
+          accessToken: "tok",
+        },
+        { queryClient: client, env }
+      ),
+    (e) => e.code === "INVALID_CREDENTIAL_INPUT"
+  );
+
+  const result = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-create-audit",
+      environment: "sandbox",
+      accessToken: "access-secret-token",
+      scopes: ["pages_messaging"],
+    },
+    {
+      queryClient: client,
+      env,
+      actor: OPERATOR_ACTOR,
+      now: operationNow,
+    }
+  );
+
+  assert.equal(result.status, "created");
+  assert.equal(result.created, true);
+  assertSafeCredential(result.credential);
+  assert.equal(result.credential.updatedAt, operationNow);
+
+  const inserts = auditInserts(client);
+  assert.equal(inserts.length, 1);
+  assert.equal(inserts[0].params[4], "created");
+  assert.equal(inserts[0].params[5], "operator");
+  assert.equal(inserts[0].params[6], "admin.user-1");
+  assert.equal(inserts[0].params[7], "credential_created");
+  assert.equal(inserts[0].params[8], null);
+  assert.ok(inserts[0].params[9]);
+  const after = JSON.parse(inserts[0].params[9]);
+  assert.equal(after.status, "active");
+  assert.equal(Object.hasOwn(after, "provider_account_id"), false);
+  assert.equal(JSON.stringify(after).includes("page-create-audit"), false);
+  assert.equal(JSON.stringify(after).includes("access-secret-token"), false);
+  assertNoSecretsInAuditParams(inserts[0].params);
+});
+
+test("codeClip credentials create custom reason and conflict writes no audit", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const input = {
+    provider: "meta",
+    providerAccountId: "page-create-conflict",
+    environment: "sandbox",
+    accessToken: "a",
+  };
+
+  await createCodeClipProviderCredential(input, {
+    queryClient: client,
+    env,
+    actor: SYSTEM_ACTOR,
+    reason: "operator_onboarded",
+  });
+  assert.equal(client.auditRows[0].reason_code, "operator_onboarded");
+  assert.equal(client.auditRows[0].action, "created");
+  const auditCount = client.auditRows.length;
+
+  await assert.rejects(
+    () =>
+      createCodeClipProviderCredential(input, {
+        queryClient: client,
+        env,
+        actor: SYSTEM_ACTOR,
+      }),
+    (e) => e.code === "CREDENTIAL_CONFLICT"
+  );
+  assert.equal(client.auditRows.length, auditCount);
+});
+
+test("codeClip credentials create encryption failure starts no TX or audit", async () => {
+  const client = createCredentialStoreClient();
+  await assert.rejects(
+    () =>
+      createCodeClipProviderCredential(
+        {
+          provider: "meta",
+          providerAccountId: "page-enc-fail",
+          environment: "sandbox",
+          accessToken: "x",
+        },
+        { queryClient: client, env: {}, actor: SYSTEM_ACTOR }
+      ),
+    (e) => e.code === "CREDENTIAL_ENCRYPTION_FAILED"
+  );
+  assert.equal(client.rows.length, 0);
+  assert.equal(client.auditRows.length, 0);
+  assert.equal(
+    client.calls.some((c) => /^\s*BEGIN/i.test(String(c.sql).trim())),
+    false
+  );
+});
+
+test("codeClip credentials create audit failure rolls back insert on pool path", async () => {
+  const env = makeCryptoEnv();
+  const pool = createCredentialStorePool({ failAudit: true });
+  await assert.rejects(
+    () =>
+      createCodeClipProviderCredential(
+        {
+          provider: "meta",
+          providerAccountId: "page-audit-fail-create",
+          environment: "sandbox",
+          accessToken: "tok",
+        },
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
+      ),
+    (e) =>
+      e instanceof CodeClipProviderCredentialError &&
+      e.code === "CREDENTIAL_AUDIT_FAILED"
+  );
+  assert.equal(pool.released, 1);
+  assert.equal(
+    pool.calls.some((c) => /^\s*ROLLBACK/i.test(String(c.sql).trim())),
+    true
+  );
+  assert.equal(JSON.stringify(pool.calls.at(-1) || {}).includes("access-secret"), false);
+});
+
+test("codeClip credentials create pool ownership includes audit before commit", async () => {
+  const env = makeCryptoEnv();
+  const pool = createCredentialStorePool();
+  await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-create-pool",
+      environment: "sandbox",
+      accessToken: "tok",
+    },
+    { queryClient: pool, env, actor: SYSTEM_ACTOR }
+  );
+  const sqls = pool.calls.map((c) => String(c.sql).trim());
+  const beginIdx = sqls.findIndex((s) => /^\s*BEGIN/i.test(s));
+  const insertIdx = sqls.findIndex((s) =>
+    /INSERT INTO codeclip_provider_credentials/i.test(s)
+  );
+  const auditIdx = sqls.findIndex((s) =>
+    /INSERT INTO codeclip_provider_credential_audit/i.test(s)
+  );
+  const commitIdx = sqls.findIndex((s) => /^\s*COMMIT/i.test(s));
+  assert.ok(beginIdx >= 0 && insertIdx > beginIdx);
+  assert.ok(auditIdx > insertIdx);
+  assert.ok(commitIdx > auditIdx);
+  assert.equal(pool.released, 1);
+});
+
+test("codeClip credentials token update requires actor and writes token_updated audit", async () => {
+  const env = makeCryptoEnv({ versions: [1, 2], activeVersion: 1 });
+  const client = createCredentialStoreClient();
+  const operationNow = "2026-08-04T16:00:00.000Z";
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-token-audit",
+      environment: "sandbox",
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      accessTokenExpiresAt: "2026-09-01T00:00:00.000Z",
+    },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+
+  await assert.rejects(
+    () =>
+      updateCodeClipProviderCredentialTokens(
+        created.credential.id,
+        { accessToken: "new-access" },
+        { queryClient: client, env }
+      ),
+    (e) => e.code === "INVALID_CREDENTIAL_INPUT"
+  );
+
+  const envV2 = {
+    [ENV_KEYS]: env[ENV_KEYS],
+    [ENV_ACTIVE]: "2",
+  };
+  // Recreate key material for v2 - use same makeCryptoEnv pattern
+  const key1 = keyB64();
+  const key2 = keyB64();
+  const envCreate = {
+    [ENV_KEYS]: `1:${key1};2:${key2}`,
+    [ENV_ACTIVE]: "1",
+  };
+  const envUpdate = {
+    [ENV_KEYS]: `1:${key1};2:${key2}`,
+    [ENV_ACTIVE]: "2",
+  };
+  const client2 = createCredentialStoreClient();
+  const created2 = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-token-audit-2",
+      environment: "sandbox",
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+    },
+    { queryClient: client2, env: envCreate, actor: SYSTEM_ACTOR }
+  );
+
+  const updated = await updateCodeClipProviderCredentialTokens(
+    created2.credential.id,
+    {
+      accessToken: "new-access-token-value",
+      accessTokenExpiresAt: "2026-11-01T00:00:00.000Z",
+    },
+    {
+      queryClient: client2,
+      env: envUpdate,
+      actor: OPERATOR_ACTOR,
+      reason: "operator_rotated_tokens",
+      now: operationNow,
+    }
+  );
+
+  assert.equal(updated.status, "updated");
+  assert.equal(updated.credential.encryptionKeyVersion, 2);
+  assert.equal(updated.credential.accessTokenExpiresAt, "2026-11-01T00:00:00.000Z");
+  assert.equal(updated.credential.updatedAt, operationNow);
+  assert.equal(updated.credential.lastRefreshedAt, operationNow);
+
+  const tokenAudits = client2.auditRows.filter((a) => a.action === "token_updated");
+  assert.equal(tokenAudits.length, 1);
+  assert.equal(tokenAudits[0].reason_code, "operator_rotated_tokens");
+  assert.equal(tokenAudits[0].actor_type, "operator");
+  assert.ok(tokenAudits[0].before_state);
+  assert.ok(tokenAudits[0].after_state);
+  assert.equal(tokenAudits[0].before_state.encryptionKeyVersion, 1);
+  assert.equal(tokenAudits[0].after_state.encryptionKeyVersion, 2);
+  assert.equal(
+    JSON.stringify(tokenAudits[0]).includes("new-access-token-value"),
+    false
+  );
+  assert.equal(
+    JSON.stringify(tokenAudits[0]).includes("old-access"),
+    false
+  );
+  const auditCall = auditInserts(client2).at(-1);
+  assertNoSecretsInAuditParams(auditCall.params);
+});
+
+test("codeClip credentials token update reauth recovery appears in audit before/after", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-reauth-audit",
+      environment: "sandbox",
+      accessToken: "a",
+      refreshToken: "r",
+    },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+  client.rows[0].status = "reauthorization_required";
+  client.rows[0].reauthorization_reason = "provider_revoked";
+
+  await updateCodeClipProviderCredentialTokens(
+    created.credential.id,
+    { accessToken: "fresh" },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+  const audit = client.auditRows.find((a) => a.action === "token_updated");
+  assert.equal(audit.before_state.status, "reauthorization_required");
+  assert.equal(audit.before_state.reauthorizationReason, "provider_revoked");
+  assert.equal(audit.after_state.status, "active");
+  assert.equal(audit.after_state.reauthorizationReason, null);
+});
+
+test("codeClip credentials token update audit failure rolls back on pool path", async () => {
+  const env = makeCryptoEnv();
+  const pool = createCredentialStorePool();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-token-audit-fail",
+      environment: "sandbox",
+      accessToken: "a1",
+      refreshToken: "r1",
+    },
+    { queryClient: pool.store, env, actor: SYSTEM_ACTOR }
+  );
+  const envelopeBefore = pool.rows[0].access_token_envelope;
+
+  // Fail only subsequent audit inserts (after create already audited)
+  const originalQuery = pool.store.query.bind(pool.store);
+  pool.store.query = async (sql, params) => {
+    if (/INSERT INTO codeclip_provider_credential_audit/.test(sql)) {
+      // allow create audit already done; fail token update audit
+      if (pool.store.auditRows.length >= 1) {
+        throw new Error("forced audit failure");
+      }
+    }
+    return originalQuery(sql, params);
+  };
+
+  await assert.rejects(
+    () =>
+      updateCodeClipProviderCredentialTokens(
+        created.credential.id,
+        { accessToken: "a2" },
+        { queryClient: pool, env, actor: SYSTEM_ACTOR }
+      ),
+    (e) => e.code === "CREDENTIAL_AUDIT_FAILED"
+  );
+  assert.equal(
+    pool.calls.some((c) => /^\s*ROLLBACK/i.test(String(c.sql).trim())),
+    true
+  );
+  assert.equal(pool.released >= 1, true);
+});
+
+test("codeClip credentials token update caller-client has no nested TX and writes audit", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-token-caller",
+      environment: "sandbox",
+      accessToken: "a",
+    },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+  const before = client.calls.length;
+  await updateCodeClipProviderCredentialTokens(
+    created.credential.id,
+    { accessToken: "b" },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+  const txCalls = client.calls.slice(before);
+  assert.equal(txCalls.some((c) => /^\s*BEGIN/i.test(String(c.sql).trim())), false);
+  assert.equal(txCalls.some((c) => /^\s*COMMIT/i.test(String(c.sql).trim())), false);
+  assert.equal(txCalls.some((c) => /^\s*ROLLBACK/i.test(String(c.sql).trim())), false);
+  assert.equal(
+    txCalls.some((c) => /INSERT INTO codeclip_provider_credential_audit/i.test(c.sql)),
+    true
+  );
+});
+
+test("codeClip credentials status setter allows all permitted transitions with timestamps", async () => {
+  const env = makeCryptoEnv();
+  const operationNow = "2026-08-04T18:00:00.000Z";
+
+  async function seed(accountId) {
+    const client = createCredentialStoreClient();
+    const created = await createCodeClipProviderCredential(
+      {
+        provider: "meta",
+        providerAccountId: accountId,
+        environment: "sandbox",
+        accessToken: "tok",
+      },
+      { queryClient: client, env, actor: SYSTEM_ACTOR }
+    );
+    return { client, id: created.credential.id };
+  }
+
+  // active -> disabled
+  {
+    const { client, id } = await seed("page-st-disabled");
+    const result = await setCodeClipProviderCredentialStatus(
+      id,
+      {
+        status: "disabled",
+        reason: "operator_disabled",
+        actor: OPERATOR_ACTOR,
+        now: operationNow,
+      },
+      { queryClient: client }
+    );
+    assert.equal(result.status, "updated");
+    assert.equal(result.credential.status, "disabled");
+    assert.equal(result.credential.disabledAt, operationNow);
+    assert.equal(result.credential.updatedAt, operationNow);
+    const audit = client.auditRows.at(-1);
+    assert.equal(audit.action, "disabled");
+    assert.equal(audit.before_state.status, "active");
+    assert.equal(audit.after_state.status, "disabled");
+  }
+
+  // disabled -> active (reactivated)
+  {
+    const { client, id } = await seed("page-st-reactivate");
+    await setCodeClipProviderCredentialStatus(
+      id,
+      { status: "disabled", reason: "operator_disabled", actor: SYSTEM_ACTOR, now: operationNow },
+      { queryClient: client }
+    );
+    const result = await setCodeClipProviderCredentialStatus(
+      id,
+      {
+        status: "active",
+        reason: "operator_reactivated",
+        actor: SYSTEM_ACTOR,
+        now: "2026-08-04T19:00:00.000Z",
+      },
+      { queryClient: client }
+    );
+    assert.equal(result.credential.status, "active");
+    assert.equal(result.credential.disabledAt, null);
+    assert.equal(result.credential.updatedAt, "2026-08-04T19:00:00.000Z");
+    assert.equal(client.auditRows.at(-1).action, "reactivated");
+  }
+
+  // active -> reauthorization_required
+  {
+    const { client, id } = await seed("page-st-reauth");
+    const result = await setCodeClipProviderCredentialStatus(
+      id,
+      {
+        status: "reauthorization_required",
+        reason: "token_invalid_detected",
+        actor: SYSTEM_ACTOR,
+        now: operationNow,
+      },
+      { queryClient: client }
+    );
+    assert.equal(result.credential.status, "reauthorization_required");
+    assert.equal(result.credential.reauthorizationReason, "token_invalid_detected");
+    assert.equal(client.auditRows.at(-1).action, "reauthorization_required");
+  }
+
+  // reauthorization_required -> disabled
+  {
+    const { client, id } = await seed("page-st-reauth-dis");
+    await setCodeClipProviderCredentialStatus(
+      id,
+      {
+        status: "reauthorization_required",
+        reason: "token_invalid_detected",
+        actor: SYSTEM_ACTOR,
+        now: operationNow,
+      },
+      { queryClient: client }
+    );
+    const result = await setCodeClipProviderCredentialStatus(
+      id,
+      {
+        status: "disabled",
+        reason: "operator_disabled",
+        actor: SYSTEM_ACTOR,
+        now: "2026-08-04T20:00:00.000Z",
+      },
+      { queryClient: client }
+    );
+    assert.equal(result.credential.status, "disabled");
+    assert.equal(result.credential.reauthorizationReason, null);
+    assert.equal(result.credential.disabledAt, "2026-08-04T20:00:00.000Z");
+    assert.equal(client.auditRows.at(-1).action, "disabled");
+  }
+
+  // * -> revoked from active, reauth, disabled
+  for (const [label, setup] of [
+    ["from-active", async (client, id) => {}],
+    [
+      "from-reauth",
+      async (client, id) => {
+        await setCodeClipProviderCredentialStatus(
+          id,
+          {
+            status: "reauthorization_required",
+            reason: "token_invalid_detected",
+            actor: SYSTEM_ACTOR,
+            now: operationNow,
+          },
+          { queryClient: client }
+        );
+      },
+    ],
+    [
+      "from-disabled",
+      async (client, id) => {
+        await setCodeClipProviderCredentialStatus(
+          id,
+          {
+            status: "disabled",
+            reason: "operator_disabled",
+            actor: SYSTEM_ACTOR,
+            now: operationNow,
+          },
+          { queryClient: client }
+        );
+      },
+    ],
+  ]) {
+    const { client, id } = await seed(`page-st-revoked-${label}`);
+    await setup(client, id);
+    const result = await setCodeClipProviderCredentialStatus(
+      id,
+      {
+        status: "revoked",
+        reason: "operator_revoked",
+        actor: OPERATOR_ACTOR,
+        now: "2026-08-04T21:00:00.000Z",
+      },
+      { queryClient: client }
+    );
+    assert.equal(result.credential.status, "revoked", label);
+    assert.equal(result.credential.revokedAt, "2026-08-04T21:00:00.000Z", label);
+    assert.equal(result.credential.disabledAt, null, label);
+    assert.equal(result.credential.reauthorizationReason, null, label);
+    assert.equal(client.auditRows.at(-1).action, "revoked", label);
+  }
+});
+
+test("codeClip credentials status setter rejects forbidden transitions", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-st-forbidden",
+      environment: "sandbox",
+      accessToken: "tok",
+    },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+  const id = created.credential.id;
+
+  // same-state
+  await assert.rejects(
+    () =>
+      setCodeClipProviderCredentialStatus(
+        id,
+        { status: "active", reason: "noop", actor: SYSTEM_ACTOR },
+        { queryClient: client }
+      ),
+    (e) => e.code === "INVALID_STATUS_TRANSITION"
+  );
+
+  // reauth -> active via status setter
+  await setCodeClipProviderCredentialStatus(
+    id,
+    {
+      status: "reauthorization_required",
+      reason: "token_invalid_detected",
+      actor: SYSTEM_ACTOR,
+    },
+    { queryClient: client }
+  );
+  await assert.rejects(
+    () =>
+      setCodeClipProviderCredentialStatus(
+        id,
+        { status: "active", reason: "should_fail", actor: SYSTEM_ACTOR },
+        { queryClient: client }
+      ),
+    (e) => e.code === "INVALID_STATUS_TRANSITION"
+  );
+
+  // disabled -> reauthorization_required
+  await setCodeClipProviderCredentialStatus(
+    id,
+    { status: "disabled", reason: "operator_disabled", actor: SYSTEM_ACTOR },
+    { queryClient: client }
+  );
+  await assert.rejects(
+    () =>
+      setCodeClipProviderCredentialStatus(
+        id,
+        {
+          status: "reauthorization_required",
+          reason: "should_fail",
+          actor: SYSTEM_ACTOR,
+        },
+        { queryClient: client }
+      ),
+    (e) => e.code === "INVALID_STATUS_TRANSITION"
+  );
+
+  // revoked is terminal
+  await setCodeClipProviderCredentialStatus(
+    id,
+    { status: "revoked", reason: "operator_revoked", actor: SYSTEM_ACTOR },
+    { queryClient: client }
+  );
+  for (const status of ["active", "disabled", "reauthorization_required"]) {
+    await assert.rejects(
+      () =>
+        setCodeClipProviderCredentialStatus(
+          id,
+          { status, reason: "should_fail", actor: SYSTEM_ACTOR },
+          { queryClient: client }
+        ),
+      (e) => e.code === "INVALID_STATUS_TRANSITION",
+      status
+    );
+  }
+});
+
+test("codeClip credentials status setter requires actor and reason", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-st-required",
+      environment: "sandbox",
+      accessToken: "tok",
+    },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+
+  await assert.rejects(
+    () =>
+      setCodeClipProviderCredentialStatus(
+        created.credential.id,
+        { status: "disabled", reason: "operator_disabled" },
+        { queryClient: client }
+      ),
+    (e) => e.code === "INVALID_CREDENTIAL_INPUT"
+  );
+  await assert.rejects(
+    () =>
+      setCodeClipProviderCredentialStatus(
+        created.credential.id,
+        { status: "disabled", actor: SYSTEM_ACTOR },
+        { queryClient: client }
+      ),
+    (e) => e.code === "INVALID_CREDENTIAL_INPUT"
+  );
+});
+
+test("codeClip credentials status setter not found and status race", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+
+  await assert.rejects(
+    () =>
+      setCodeClipProviderCredentialStatus(
+        99999,
+        { status: "disabled", reason: "operator_disabled", actor: SYSTEM_ACTOR },
+        { queryClient: client }
+      ),
+    (e) => e.code === "CREDENTIAL_NOT_FOUND"
+  );
+
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-st-race",
+      environment: "sandbox",
+      accessToken: "tok",
+    },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+
+  const originalQuery = client.query.bind(client);
+  client.query = async (sql, params) => {
+    const result = await originalQuery(sql, params);
+    if (/FOR UPDATE/i.test(sql) && /codeclip_provider_credentials/i.test(sql)) {
+      client.rows[0].status = "revoked";
+    }
+    return result;
+  };
+
+  await assert.rejects(
+    () =>
+      setCodeClipProviderCredentialStatus(
+        created.credential.id,
+        { status: "disabled", reason: "operator_disabled", actor: SYSTEM_ACTOR },
+        { queryClient: client }
+      ),
+    (e) =>
+      e.code === "INVALID_STATUS_TRANSITION" || e.code === "CREDENTIAL_STATUS_RACE"
+  );
+  client.query = originalQuery;
+});
+
+test("codeClip credentials status setter audit failure rolls back on pool path", async () => {
+  const env = makeCryptoEnv();
+  const pool = createCredentialStorePool();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-st-audit-fail",
+      environment: "sandbox",
+      accessToken: "tok",
+    },
+    { queryClient: pool.store, env, actor: SYSTEM_ACTOR }
+  );
+
+  const originalQuery = pool.store.query.bind(pool.store);
+  pool.store.query = async (sql, params) => {
+    if (
+      /INSERT INTO codeclip_provider_credential_audit/.test(sql) &&
+      pool.store.auditRows.length >= 1
+    ) {
+      throw new Error("forced status audit failure");
+    }
+    return originalQuery(sql, params);
+  };
+
+  await assert.rejects(
+    () =>
+      setCodeClipProviderCredentialStatus(
+        created.credential.id,
+        { status: "disabled", reason: "operator_disabled", actor: SYSTEM_ACTOR },
+        { queryClient: pool }
+      ),
+    (e) => e.code === "CREDENTIAL_AUDIT_FAILED"
+  );
+  assert.equal(
+    pool.calls.some((c) => /^\s*ROLLBACK/i.test(String(c.sql).trim())),
+    true
+  );
+  assert.equal(pool.released >= 1, true);
+});
+
+test("codeClip credentials status setter pool and caller transaction ownership", async () => {
+  const env = makeCryptoEnv();
+  const pool = createCredentialStorePool();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-st-tx",
+      environment: "sandbox",
+      accessToken: "tok",
+    },
+    { queryClient: pool.store, env, actor: SYSTEM_ACTOR }
+  );
+
+  const before = pool.calls.length;
+  await setCodeClipProviderCredentialStatus(
+    created.credential.id,
+    { status: "disabled", reason: "operator_disabled", actor: SYSTEM_ACTOR },
+    { queryClient: pool }
+  );
+  const txCalls = pool.calls.slice(before);
+  assert.equal(txCalls.some((c) => /^\s*BEGIN/i.test(String(c.sql).trim())), true);
+  assert.equal(txCalls.some((c) => /^\s*COMMIT/i.test(String(c.sql).trim())), true);
+  assert.equal(
+    txCalls.some((c) => /INSERT INTO codeclip_provider_credential_audit/i.test(c.sql)),
+    true
+  );
+  assert.equal(pool.released >= 1, true);
+
+  // caller-owned client: no nested TX
+  const client = createCredentialStoreClient();
+  const created2 = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-st-caller",
+      environment: "sandbox",
+      accessToken: "tok",
+    },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+  const before2 = client.calls.length;
+  await setCodeClipProviderCredentialStatus(
+    created2.credential.id,
+    { status: "disabled", reason: "operator_disabled", actor: SYSTEM_ACTOR },
+    { queryClient: client }
+  );
+  const callerCalls = client.calls.slice(before2);
+  assert.equal(callerCalls.some((c) => /^\s*BEGIN/i.test(String(c.sql).trim())), false);
+  assert.equal(callerCalls.some((c) => /^\s*COMMIT/i.test(String(c.sql).trim())), false);
+  assert.equal(callerCalls.some((c) => /^\s*ROLLBACK/i.test(String(c.sql).trim())), false);
+});
+
+test("codeClip credentials status and mutation audits never SELECT star or leak secrets", async () => {
+  const env = makeCryptoEnv();
+  const client = createCredentialStoreClient();
+  const created = await createCodeClipProviderCredential(
+    {
+      provider: "meta",
+      providerAccountId: "page-no-star",
+      environment: "sandbox",
+      accessToken: "super-secret-access",
+      refreshToken: "super-secret-refresh",
+    },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+  await updateCodeClipProviderCredentialTokens(
+    created.credential.id,
+    { accessToken: "super-secret-access-2" },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+  await setCodeClipProviderCredentialStatus(
+    created.credential.id,
+    { status: "disabled", reason: "operator_disabled", actor: SYSTEM_ACTOR },
+    { queryClient: client }
+  );
+
+  for (const call of client.calls) {
+    assert.equal(/SELECT\s+\*/i.test(call.sql), false);
+  }
+  for (const call of auditInserts(client)) {
+    assertNoSecretsInAuditParams(call.params);
+    assert.equal(JSON.stringify(call.params).includes("super-secret"), false);
+  }
+  // secret-read does not write audit
+  const auditCount = client.auditRows.length;
+  await getCodeClipProviderCredentialSecretsForUse(
+    { id: created.credential.id, purpose: "provider_api" },
+    { queryClient: client, env }
+  );
+  assert.equal(client.auditRows.length, auditCount);
 });
