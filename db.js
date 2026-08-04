@@ -2638,6 +2638,123 @@ async function ensureCodeClipProviderAccountBindingAuditTable(queryClient = pool
   `);
 }
 
+/**
+ * codeClip provider credentials durable store (F1C2A1 schema only).
+ * No encryption key required. No refresh claim columns. No repository wiring.
+ */
+async function ensureCodeClipProviderCredentialsTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_provider_credentials (
+      id BIGSERIAL PRIMARY KEY,
+      vertical TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      account_lookup_key TEXT NOT NULL,
+      provider_account_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      access_token_envelope TEXT,
+      refresh_token_envelope TEXT,
+      access_token_expires_at TIMESTAMPTZ,
+      token_type TEXT,
+      scopes TEXT[] NOT NULL DEFAULT '{}'::text[],
+      encryption_key_version INTEGER NOT NULL,
+      has_access_token BOOLEAN NOT NULL DEFAULT FALSE,
+      has_refresh_token BOOLEAN NOT NULL DEFAULT FALSE,
+      reauthorization_reason TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      disabled_at TIMESTAMPTZ,
+      revoked_at TIMESTAMPTZ,
+      last_refreshed_at TIMESTAMPTZ,
+      CHECK (vertical = 'codeclip'),
+      CHECK (environment IN ('sandbox', 'production')),
+      CHECK (status IN ('active', 'reauthorization_required', 'revoked', 'disabled')),
+      CHECK (char_length(provider) BETWEEN 1 AND 64),
+      CHECK (char_length(account_lookup_key) BETWEEN 1 AND 512),
+      CHECK (char_length(provider_account_id) BETWEEN 1 AND 256),
+      CHECK (encryption_key_version >= 1),
+      CHECK (
+        (has_access_token = FALSE AND access_token_envelope IS NULL)
+        OR (has_access_token = TRUE AND access_token_envelope IS NOT NULL)
+      ),
+      CHECK (
+        (has_refresh_token = FALSE AND refresh_token_envelope IS NULL)
+        OR (has_refresh_token = TRUE AND refresh_token_envelope IS NOT NULL)
+      ),
+      CHECK (jsonb_typeof(metadata) = 'object'),
+      UNIQUE (vertical, provider, environment, account_lookup_key)
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_credentials_provider_env_status_idx
+    ON codeclip_provider_credentials (provider, environment, status)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_credentials_expires_at_idx
+    ON codeclip_provider_credentials (access_token_expires_at)
+    WHERE status = 'active'
+      AND access_token_expires_at IS NOT NULL
+  `);
+}
+
+/**
+ * Credential audit log. Ensures credential table exists first (idempotent).
+ */
+async function ensureCodeClipProviderCredentialAuditTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await ensureCodeClipProviderCredentialsTable(queryClient);
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_provider_credential_audit (
+      id BIGSERIAL PRIMARY KEY,
+      credential_id BIGINT NOT NULL
+        REFERENCES codeclip_provider_credentials (id)
+        ON DELETE RESTRICT,
+      vertical TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      action TEXT NOT NULL,
+      actor_type TEXT NOT NULL,
+      actor_id TEXT,
+      reason_code TEXT,
+      before_state JSONB,
+      after_state JSONB,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (vertical = 'codeclip'),
+      CHECK (environment IN ('sandbox', 'production')),
+      CHECK (action IN (
+        'created',
+        'token_updated',
+        'reauthorization_required',
+        'revoked',
+        'disabled',
+        'reactivated'
+      )),
+      CHECK (actor_type IN ('operator', 'operator_key', 'system')),
+      CHECK (jsonb_typeof(metadata) = 'object'),
+      CHECK (before_state IS NULL OR jsonb_typeof(before_state) = 'object'),
+      CHECK (after_state IS NULL OR jsonb_typeof(after_state) = 'object')
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_credential_audit_credential_created_idx
+    ON codeclip_provider_credential_audit (credential_id, created_at DESC, id DESC)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_provider_credential_audit_provider_env_created_idx
+    ON codeclip_provider_credential_audit (provider, environment, created_at DESC)
+  `);
+}
+
 async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
   if (!queryClient) return;
 
@@ -4576,6 +4693,8 @@ module.exports = {
   getCodePodKeywordInteractionSummary,
   ensureCodeClipProviderAccountBindingsTable,
   ensureCodeClipProviderAccountBindingAuditTable,
+  ensureCodeClipProviderCredentialsTable,
+  ensureCodeClipProviderCredentialAuditTable,
   ensureCodeClipMetaMessengerOutboundSchema,
   createOrGetCodeClipMetaMessengerOutbound,
   getCodeClipMetaMessengerOutboundById,
