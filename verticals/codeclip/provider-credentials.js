@@ -1,14 +1,27 @@
 /**
- * codeClip provider credential repository (F1C2B1).
+ * codeClip provider credential repository (F1C2B1 + F1C2B2A).
  *
- * Safe create/get/find/list only. No token update, secret-read, audit, or refresh claims.
+ * Public surface:
+ * - create + safe get/find/list (B1)
+ * - updateCodeClipProviderCredentialTokens (B2A token lifecycle)
  *
  * Encryption invariant:
- * - Access and refresh tokens for a credential are always encrypted with the same
- *   active key version from the F1C1 keyring at write time.
- * - encryption_key_version stores that shared version for the credential set.
+ * - Access and refresh tokens for a credential are always stored with the same
+ *   active encryption key version from the F1C1 keyring at write time.
+ * - encryption_key_version represents the key version used for the last stored
+ *   credential token set. Any token update re-encrypts the full resulting set
+ *   with the active key so both envelopes stay aligned.
  *
- * TODO(F1C2B2): secret-read (provider_api, refresh, validation) and token update.
+ * Mutation APIs (token update) must not be wired to production consumers or
+ * routes before F1C2C audit integration.
+ *
+ * Token-update transaction ownership:
+ * - Pass a pool (connect): repository owns BEGIN/COMMIT/ROLLBACK.
+ * - Pass an explicit query client: caller owns the transaction; repository
+ *   will not BEGIN/COMMIT/ROLLBACK. Caller must already be in an active TX.
+ *
+ * TODO(F1C2B2B): secret-read (provider_api, refresh) and usability inspect.
+ * No audit, status setter, token clearing, refresh claims, or routes in B2A.
  */
 
 const database = require("../../db");
@@ -25,6 +38,7 @@ const {
 } = require("./provider-credential-validators");
 const {
   encryptCodeClipProviderCredentialSecret,
+  decryptCodeClipProviderCredentialSecret,
 } = require("./provider-credential-crypto");
 
 const CODECLIP_VERTICAL = "codeclip";
@@ -60,6 +74,18 @@ const SAFE_SELECT_COLUMNS = `
   last_refreshed_at
 `.replace(/\s+/g, " ").trim();
 
+/** FOR UPDATE load: safe columns + both envelopes (never returned to callers). */
+const TOKEN_UPDATE_SELECT_COLUMNS = `
+  ${SAFE_SELECT_COLUMNS},
+  access_token_envelope,
+  refresh_token_envelope
+`.replace(/\s+/g, " ").trim();
+
+const TOKEN_UPDATE_ALLOWED_STATUSES = Object.freeze([
+  "active",
+  "reauthorization_required",
+]);
+
 class CodeClipProviderCredentialError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -73,8 +99,21 @@ function credentialError(code, message, details = {}) {
   return new CodeClipProviderCredentialError(code, message, details);
 }
 
+/**
+ * Accept either:
+ * - a query client ({ query })
+ * - a pool ({ connect }) for repository-owned transactions on mutations
+ */
 function requireQueryClient(queryClient) {
-  if (!queryClient || typeof queryClient.query !== "function") {
+  if (!queryClient) {
+    throw credentialError(
+      "DATABASE_UNAVAILABLE",
+      "codeClip provider credential repository requires an explicit query client"
+    );
+  }
+  const hasQuery = typeof queryClient.query === "function";
+  const hasConnect = typeof queryClient.connect === "function";
+  if (!hasQuery && !hasConnect) {
     throw credentialError(
       "DATABASE_UNAVAILABLE",
       "codeClip provider credential repository requires an explicit query client"
@@ -87,6 +126,89 @@ async function ensureCredentialsSchema(queryClient) {
   if (queryClient === database.pool && typeof database.ensureCodeClipProviderCredentialsTable === "function") {
     await database.ensureCodeClipProviderCredentialsTable(queryClient);
   }
+}
+
+/**
+ * Transaction contract for multi-statement credential mutations (FOR UPDATE + UPDATE):
+ *
+ * - Pool (has connect): repository owns the transaction.
+ *   connect → BEGIN → work(client) → COMMIT|ROLLBACK → release.
+ *   Matches db.withCodeClipCorePersistenceTransaction ownership model.
+ *
+ * - Explicit client (query only, no connect): caller owns the transaction.
+ *   Repository does NOT BEGIN/COMMIT/ROLLBACK.
+ *   Caller must already be inside an active transaction so FOR UPDATE
+ *   holds until UPDATE (autocommit clients are not safe for this path).
+ *
+ * Nested BEGIN on a caller-supplied client is intentionally not performed —
+ * that would commit/rollback a caller-owned transaction incorrectly.
+ */
+async function withCredentialTransaction(queryClient, work) {
+  if (!queryClient) {
+    throw credentialError(
+      "DATABASE_UNAVAILABLE",
+      "codeClip provider credential repository requires an explicit query client"
+    );
+  }
+
+  // Pool path: repository-owned transaction (same model as withCodeClipCorePersistenceTransaction).
+  if (typeof queryClient.connect === "function") {
+    let client = null;
+    try {
+      client = await queryClient.connect();
+    } catch {
+      throw credentialError("DATABASE_UNAVAILABLE", "failed to open database client");
+    }
+    if (!client || typeof client.query !== "function") {
+      throw credentialError("DATABASE_UNAVAILABLE", "database pool returned an invalid client");
+    }
+    try {
+      await client.query("BEGIN");
+      const result = await work(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // preserve original error
+      }
+      throw error;
+    } finally {
+      try {
+        if (typeof client.release === "function") {
+          client.release();
+        }
+      } catch {
+        // ignore release failures after commit/rollback
+      }
+    }
+  }
+
+  // Caller-owned client: must already participate in an active transaction.
+  if (typeof queryClient.query !== "function") {
+    throw credentialError(
+      "DATABASE_UNAVAILABLE",
+      "codeClip provider credential repository requires an explicit query client"
+    );
+  }
+  return work(queryClient);
+}
+
+function decryptToken(envelope, env) {
+  const result = decryptCodeClipProviderCredentialSecret({ envelope, env });
+  if (!result.ok) {
+    throw credentialError(
+      "CREDENTIAL_DECRYPTION_FAILED",
+      "credential decryption failed",
+      { cryptoReason: result.reason }
+    );
+  }
+  return result.plaintext;
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key);
 }
 
 function maskCodeClipProviderAccountId(providerAccountId) {
@@ -725,11 +847,272 @@ function serializeCodeClipProviderCredentialForOperator(row, { now = new Date() 
   };
 }
 
+/**
+ * Token lifecycle update: replace access and/or refresh tokens.
+ *
+ * Contract:
+ * - At least one of accessToken or refreshToken must be present (hasOwn).
+ * - Omitted token fields preserve existing material (via decrypt + re-encrypt).
+ * - null / empty string tokens are rejected (no clearing in B2A).
+ * - Full resulting token set is re-encrypted with the active key version.
+ * - Non-secret fields (expires, tokenType, scopes, metadata) may update only
+ *   together with a token change.
+ *
+ * Returns a safe credential row only. No audit write.
+ */
+async function updateCodeClipProviderCredentialTokens(
+  id,
+  patch = {},
+  { queryClient, env = process.env, now = new Date() } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  await ensureCredentialsSchema(client);
+  const normalizedId = normalizePositiveBigIntId(id, "id");
+
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    throw credentialError("INVALID_CREDENTIAL_INPUT", "token update patch must be an object", {
+      fieldName: "patch",
+    });
+  }
+
+  const accessPresent = hasOwn(patch, "accessToken");
+  const refreshPresent = hasOwn(patch, "refreshToken");
+  if (!accessPresent && !refreshPresent) {
+    throw credentialError(
+      "INVALID_CREDENTIAL_INPUT",
+      "at least one of accessToken or refreshToken is required",
+      { fieldName: "accessToken" }
+    );
+  }
+
+  // Reject explicit null/empty token clearing (B2A).
+  let nextAccessFromPatch = null;
+  let nextRefreshFromPatch = null;
+  if (accessPresent) {
+    if (patch.accessToken === null || patch.accessToken === "") {
+      throw credentialError("INVALID_CREDENTIAL_INPUT", "accessToken cannot be cleared", {
+        fieldName: "accessToken",
+      });
+    }
+    nextAccessFromPatch = normalizeOptionalTokenString(patch.accessToken, "accessToken");
+    if (!nextAccessFromPatch) {
+      throw credentialError("INVALID_CREDENTIAL_INPUT", "accessToken is invalid", {
+        fieldName: "accessToken",
+      });
+    }
+  }
+  if (refreshPresent) {
+    if (patch.refreshToken === null || patch.refreshToken === "") {
+      throw credentialError("INVALID_CREDENTIAL_INPUT", "refreshToken cannot be cleared", {
+        fieldName: "refreshToken",
+      });
+    }
+    nextRefreshFromPatch = normalizeOptionalTokenString(patch.refreshToken, "refreshToken");
+    if (!nextRefreshFromPatch) {
+      throw credentialError("INVALID_CREDENTIAL_INPUT", "refreshToken is invalid", {
+        fieldName: "refreshToken",
+      });
+    }
+  }
+
+  let nextExpiresAt;
+  let expiresProvided = false;
+  if (hasOwn(patch, "accessTokenExpiresAt") || hasOwn(patch, "access_token_expires_at")) {
+    expiresProvided = true;
+    const raw = hasOwn(patch, "accessTokenExpiresAt")
+      ? patch.accessTokenExpiresAt
+      : patch.access_token_expires_at;
+    nextExpiresAt = normalizeOptionalExpiresAt(raw);
+  }
+
+  let nextTokenType;
+  let tokenTypeProvided = false;
+  if (hasOwn(patch, "tokenType") || hasOwn(patch, "token_type")) {
+    tokenTypeProvided = true;
+    const raw = hasOwn(patch, "tokenType") ? patch.tokenType : patch.token_type;
+    if (raw === null) {
+      nextTokenType = null;
+    } else if (raw === "") {
+      throw credentialError("INVALID_CREDENTIAL_INPUT", "tokenType is invalid", {
+        fieldName: "tokenType",
+      });
+    } else {
+      nextTokenType = normalizeOptionalTokenType(raw);
+    }
+  }
+
+  let nextScopes;
+  let scopesProvided = false;
+  if (hasOwn(patch, "scopes")) {
+    scopesProvided = true;
+    if (patch.scopes === null) {
+      throw credentialError("INVALID_CREDENTIAL_INPUT", "scopes cannot be null", {
+        fieldName: "scopes",
+      });
+    }
+    const scopesResult = normalizeCodeClipProviderCredentialScopes(patch.scopes);
+    mapValidatorFailure(scopesResult);
+    nextScopes = scopesResult.scopes;
+  }
+
+  let nextMetadata;
+  let metadataProvided = false;
+  if (hasOwn(patch, "metadata")) {
+    metadataProvided = true;
+    if (patch.metadata === null) {
+      throw credentialError("INVALID_CREDENTIAL_INPUT", "metadata cannot be null", {
+        fieldName: "metadata",
+      });
+    }
+    const metadataResult = normalizeCodeClipProviderCredentialMetadata(patch.metadata);
+    mapValidatorFailure(metadataResult);
+    nextMetadata = metadataResult.metadata;
+  }
+
+  const nowIso =
+    now instanceof Date
+      ? now.toISOString()
+      : Number.isFinite(Date.parse(now))
+        ? new Date(now).toISOString()
+        : new Date().toISOString();
+
+  return withCredentialTransaction(client, async (tx) => {
+    const locked = await tx.query(
+      `
+        SELECT ${TOKEN_UPDATE_SELECT_COLUMNS}
+        FROM codeclip_provider_credentials
+        WHERE id = $1
+          AND vertical = $2
+        FOR UPDATE
+      `,
+      [normalizedId, CODECLIP_VERTICAL]
+    );
+    const current = locked.rows?.[0] || null;
+    if (!current) {
+      throw credentialError("CREDENTIAL_NOT_FOUND", "credential was not found");
+    }
+
+    if (!TOKEN_UPDATE_ALLOWED_STATUSES.includes(current.status)) {
+      throw credentialError(
+        "INVALID_STATUS_FOR_TOKEN_UPDATE",
+        "credential status does not allow token update",
+        { status: current.status }
+      );
+    }
+
+    // Build resulting plaintext token set (full re-encrypt with active key).
+    let accessPlaintext = nextAccessFromPatch;
+    let refreshPlaintext = nextRefreshFromPatch;
+
+    if (!accessPresent) {
+      if (current.has_access_token && current.access_token_envelope) {
+        accessPlaintext = decryptToken(current.access_token_envelope, env);
+      } else {
+        accessPlaintext = null;
+      }
+    }
+    if (!refreshPresent) {
+      if (current.has_refresh_token && current.refresh_token_envelope) {
+        refreshPlaintext = decryptToken(current.refresh_token_envelope, env);
+      } else {
+        refreshPlaintext = null;
+      }
+    }
+
+    if (!accessPlaintext && !refreshPlaintext) {
+      throw credentialError(
+        "INVALID_CREDENTIAL_INPUT",
+        "credential must retain at least one token after update"
+      );
+    }
+
+    const { accessEnvelope, refreshEnvelope, keyVersion } = encryptCredentialTokenPair({
+      accessToken: accessPlaintext || undefined,
+      refreshToken: refreshPlaintext || undefined,
+      env,
+    });
+
+    // Drop plaintexts from further use (locals end at function return).
+    accessPlaintext = null;
+    refreshPlaintext = null;
+
+    const expiresAt = expiresProvided
+      ? nextExpiresAt
+      : current.access_token_expires_at ?? null;
+    const tokenType = tokenTypeProvided ? nextTokenType : current.token_type ?? null;
+    const scopes = scopesProvided ? nextScopes : current.scopes || [];
+    const metadata = metadataProvided
+      ? nextMetadata
+      : current.metadata && typeof current.metadata === "object"
+        ? current.metadata
+        : {};
+
+    const nextStatus =
+      current.status === "reauthorization_required" ? "active" : current.status;
+    const nextReauthReason =
+      current.status === "reauthorization_required" ? null : current.reauthorization_reason;
+
+    const updated = await tx.query(
+      `
+        UPDATE codeclip_provider_credentials
+        SET
+          access_token_envelope = $2,
+          refresh_token_envelope = $3,
+          has_access_token = $4,
+          has_refresh_token = $5,
+          encryption_key_version = $6,
+          access_token_expires_at = $7::timestamptz,
+          token_type = $8,
+          scopes = $9::text[],
+          metadata = $10::jsonb,
+          status = $11,
+          reauthorization_reason = $12,
+          last_refreshed_at = $13::timestamptz,
+          updated_at = NOW()
+        WHERE id = $1
+          AND vertical = $14
+          AND status IN ('active', 'reauthorization_required')
+        RETURNING ${SAFE_SELECT_COLUMNS}
+      `,
+      [
+        normalizedId,
+        accessEnvelope,
+        refreshEnvelope,
+        Boolean(accessEnvelope),
+        Boolean(refreshEnvelope),
+        keyVersion,
+        expiresAt,
+        tokenType,
+        scopes,
+        JSON.stringify(metadata),
+        nextStatus,
+        nextReauthReason,
+        nowIso,
+        CODECLIP_VERTICAL,
+      ]
+    );
+
+    const row = updated.rows?.[0] || null;
+    if (!row) {
+      throw credentialError(
+        "INVALID_STATUS_FOR_TOKEN_UPDATE",
+        "credential status changed during token update"
+      );
+    }
+
+    return {
+      status: "updated",
+      credential: toSafeCredential(row, { now }),
+    };
+  });
+}
+
 module.exports = {
   CodeClipProviderCredentialError,
   createCodeClipProviderCredential,
   getCodeClipProviderCredentialById,
   findCodeClipProviderCredential,
   listCodeClipProviderCredentials,
+  updateCodeClipProviderCredentialTokens,
   serializeCodeClipProviderCredentialForOperator,
 };
