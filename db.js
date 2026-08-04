@@ -2834,7 +2834,10 @@ async function ensureCodeClipProviderCredentialAuditTable(queryClient = pool) {
         'revoked',
         'disabled',
         'reactivated',
-        'refresh_claimed'
+        'refresh_claimed',
+        'refresh_succeeded',
+        'refresh_failed',
+        'refresh_released'
       )),
       CHECK (actor_type IN ('operator', 'operator_key', 'system')),
       CHECK (jsonb_typeof(metadata) = 'object'),
@@ -2843,7 +2846,7 @@ async function ensureCodeClipProviderCredentialAuditTable(queryClient = pool) {
     )
   `);
 
-  // Existing installs: upgrade action CHECK to include refresh_claimed (F1C3A).
+  // Existing installs: upgrade action CHECK for refresh lifecycle actions (F1C3A/B2).
   await queryClient.query(`
     DO $$
     DECLARE
@@ -2859,7 +2862,18 @@ async function ensureCodeClipProviderCredentialAuditTable(queryClient = pool) {
       ORDER BY c.conname
       LIMIT 1;
 
-      IF definition IS NULL THEN
+      IF definition IS NULL
+         OR definition NOT ILIKE '%refresh_claimed%'
+         OR definition NOT ILIKE '%refresh_succeeded%'
+         OR definition NOT ILIKE '%refresh_failed%'
+         OR definition NOT ILIKE '%refresh_released%'
+      THEN
+        IF definition IS NOT NULL THEN
+          EXECUTE format(
+            'ALTER TABLE codeclip_provider_credential_audit DROP CONSTRAINT IF EXISTS %I',
+            constraint_name
+          );
+        END IF;
         ALTER TABLE codeclip_provider_credential_audit
         ADD CONSTRAINT codeclip_provider_credential_audit_action_check
         CHECK (action IN (
@@ -2869,23 +2883,10 @@ async function ensureCodeClipProviderCredentialAuditTable(queryClient = pool) {
           'revoked',
           'disabled',
           'reactivated',
-          'refresh_claimed'
-        ));
-      ELSIF definition NOT ILIKE '%refresh_claimed%' THEN
-        EXECUTE format(
-          'ALTER TABLE codeclip_provider_credential_audit DROP CONSTRAINT IF EXISTS %I',
-          constraint_name
-        );
-        ALTER TABLE codeclip_provider_credential_audit
-        ADD CONSTRAINT codeclip_provider_credential_audit_action_check
-        CHECK (action IN (
-          'created',
-          'token_updated',
-          'reauthorization_required',
-          'revoked',
-          'disabled',
-          'reactivated',
-          'refresh_claimed'
+          'refresh_claimed',
+          'refresh_succeeded',
+          'refresh_failed',
+          'refresh_released'
         ));
       END IF;
     END $$;

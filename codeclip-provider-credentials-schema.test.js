@@ -189,7 +189,7 @@ test("codeClip provider credential audit schema defines FK restrict and action e
   assert.match(auditSql, /CHECK \(environment IN \('sandbox', 'production'\)\)/);
   assert.match(
     auditSql,
-    /CHECK \(action IN \(\s*'created',\s*'token_updated',\s*'reauthorization_required',\s*'revoked',\s*'disabled',\s*'reactivated',\s*'refresh_claimed'\s*\)\)/
+    /CHECK \(action IN \(\s*'created',\s*'token_updated',\s*'reauthorization_required',\s*'revoked',\s*'disabled',\s*'reactivated',\s*'refresh_claimed',\s*'refresh_succeeded',\s*'refresh_failed',\s*'refresh_released'\s*\)\)/
   );
   assert.match(
     auditSql,
@@ -205,11 +205,11 @@ test("codeClip provider credential audit schema defines FK restrict and action e
     /after_state IS NULL OR jsonb_typeof\(after_state\) = 'object'/
   );
 
-  // F1C3A: only refresh_claimed among refresh_* actions
+  // F1C3A/B2 refresh lifecycle actions
   assert.match(auditSql, /refresh_claimed/);
-  assert.equal(/refresh_succeeded/.test(auditSql), false);
-  assert.equal(/refresh_failed/.test(auditSql), false);
-  assert.equal(/refresh_released/.test(auditSql), false);
+  assert.match(auditSql, /refresh_succeeded/);
+  assert.match(auditSql, /refresh_failed/);
+  assert.match(auditSql, /refresh_released/);
   assert.equal(/refresh_reclaimed/.test(auditSql), false);
   assert.equal(/key_rotated/.test(auditSql), false);
 

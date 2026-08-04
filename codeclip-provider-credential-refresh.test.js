@@ -2,10 +2,41 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const database = require("./db");
+const crypto = require("node:crypto");
 const {
   CodeClipProviderCredentialRefreshError,
   claimCodeClipProviderCredentialRefresh,
+  completeCodeClipProviderCredentialRefresh,
+  releaseCodeClipProviderCredentialRefresh,
 } = require("./verticals/codeclip/provider-credential-refresh");
+const {
+  encryptCodeClipProviderCredentialSecret,
+  decryptCodeClipProviderCredentialSecret,
+} = require("./verticals/codeclip/provider-credential-crypto");
+
+const ENV_KEYS = "CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS";
+const ENV_ACTIVE = "CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION";
+
+function keyB64(bytes = crypto.randomBytes(32)) {
+  return bytes.toString("base64");
+}
+
+function makeCryptoEnv({ activeVersion = 1, versions = [1] } = {}) {
+  const keys = Object.fromEntries(versions.map((v) => [v, keyB64()]));
+  return {
+    [ENV_KEYS]: Object.entries(keys)
+      .map(([v, k]) => `${v}:${k}`)
+      .join(";"),
+    [ENV_ACTIVE]: String(activeVersion),
+    keys,
+  };
+}
+
+function encryptPlain(plaintext, env) {
+  const result = encryptCodeClipProviderCredentialSecret({ plaintext, env });
+  assert.equal(result.ok, true);
+  return result.envelope;
+}
 
 const OPERATION_NOW = "2026-08-04T12:00:00.000Z";
 const LEASE_MS = 60_000;
@@ -38,12 +69,48 @@ function createRefreshStoreClient(options = {}) {
       revoked_at: row.revoked_at || null,
       last_refreshed_at: row.last_refreshed_at || null,
       updated_at: row.updated_at || "2026-08-04T10:00:00.000Z",
+      created_at: row.created_at || "2026-08-04T09:00:00.000Z",
+      metadata: row.metadata || {},
       refresh_claim_owner: row.refresh_claim_owner ?? null,
       refresh_claimed_at: row.refresh_claimed_at ?? null,
       refresh_claim_expires_at: row.refresh_claim_expires_at ?? null,
       access_token_envelope: row.access_token_envelope || "v1.1.should-not-leak",
       refresh_token_envelope: row.refresh_token_envelope || "v1.1.should-not-leak-refresh",
     });
+  }
+
+  function toSafeRow(row) {
+    return {
+      id: row.id,
+      vertical: row.vertical,
+      provider: row.provider,
+      environment: row.environment,
+      provider_account_id: row.provider_account_id,
+      status: row.status,
+      token_type: row.token_type,
+      scopes: row.scopes,
+      has_access_token: row.has_access_token,
+      has_refresh_token: row.has_refresh_token,
+      access_token_expires_at: row.access_token_expires_at,
+      encryption_key_version: row.encryption_key_version,
+      reauthorization_reason: row.reauthorization_reason,
+      metadata: row.metadata,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      disabled_at: row.disabled_at,
+      revoked_at: row.revoked_at,
+      last_refreshed_at: row.last_refreshed_at,
+    };
+  }
+
+  function claimOwnerMatches(row, owner, operationNow) {
+    if (!row.refresh_claim_owner) return false;
+    if (String(row.refresh_claim_owner).toLowerCase() !== String(owner).toLowerCase()) {
+      return false;
+    }
+    const opMs = Date.parse(operationNow);
+    const expMs = Date.parse(row.refresh_claim_expires_at);
+    return Number.isFinite(expMs) && expMs > opMs;
   }
 
   return {
@@ -80,73 +147,153 @@ function createRefreshStoreClient(options = {}) {
         const id = String(params[0]);
         const row = rows.find((r) => String(r.id) === id);
         if (!row) return { rows: [] };
-        // Never return envelopes on claim path projection
-        return {
-          rows: [
-            {
-              id: row.id,
-              vertical: row.vertical,
-              provider: row.provider,
-              environment: row.environment,
-              status: row.status,
-              provider_account_id: row.provider_account_id,
-              has_access_token: row.has_access_token,
-              has_refresh_token: row.has_refresh_token,
-              access_token_expires_at: row.access_token_expires_at,
-              encryption_key_version: row.encryption_key_version,
-              token_type: row.token_type,
-              scopes: row.scopes,
-              reauthorization_reason: row.reauthorization_reason,
-              disabled_at: row.disabled_at,
-              revoked_at: row.revoked_at,
-              last_refreshed_at: row.last_refreshed_at,
-              updated_at: row.updated_at,
-              refresh_claim_owner: row.refresh_claim_owner,
-              refresh_claimed_at: row.refresh_claimed_at,
-              refresh_claim_expires_at: row.refresh_claim_expires_at,
-            },
-          ],
+        const base = {
+          id: row.id,
+          vertical: row.vertical,
+          provider: row.provider,
+          environment: row.environment,
+          status: row.status,
+          provider_account_id: row.provider_account_id,
+          has_access_token: row.has_access_token,
+          has_refresh_token: row.has_refresh_token,
+          access_token_expires_at: row.access_token_expires_at,
+          encryption_key_version: row.encryption_key_version,
+          token_type: row.token_type,
+          scopes: row.scopes,
+          reauthorization_reason: row.reauthorization_reason,
+          disabled_at: row.disabled_at,
+          revoked_at: row.revoked_at,
+          last_refreshed_at: row.last_refreshed_at,
+          updated_at: row.updated_at,
+          created_at: row.created_at,
+          metadata: row.metadata,
+          refresh_claim_owner: row.refresh_claim_owner,
+          refresh_claimed_at: row.refresh_claimed_at,
+          refresh_claim_expires_at: row.refresh_claim_expires_at,
         };
+        // Complete path needs envelopes; claim path ignores them.
+        if (/access_token_envelope/.test(sql)) {
+          return {
+            rows: [
+              {
+                ...base,
+                access_token_envelope: row.access_token_envelope,
+                refresh_token_envelope: row.refresh_token_envelope,
+              },
+            ],
+          };
+        }
+        return { rows: [base] };
       }
 
-      if (
-        /UPDATE codeclip_provider_credentials/.test(sql) &&
-        /refresh_claim_owner\s*=/.test(sql)
-      ) {
+      if (/UPDATE codeclip_provider_credentials/.test(sql)) {
         if (forceUpdateRace) return { rows: [] };
         const id = String(params[0]);
-        const owner = params[1];
-        const operationNow = params[2];
-        const leaseMs = Number(params[3]);
         const row = rows.find((r) => String(r.id) === id);
         if (!row) return { rows: [] };
-        if (!["active", "reauthorization_required"].includes(row.status)) {
-          return { rows: [] };
-        }
-        if (!row.has_refresh_token) return { rows: [] };
-        const opMs = Date.parse(operationNow);
-        if (
-          row.refresh_claim_expires_at !== null &&
-          row.refresh_claim_expires_at !== undefined
-        ) {
-          const expMs = Date.parse(row.refresh_claim_expires_at);
-          if (Number.isFinite(expMs) && expMs > opMs) {
+
+        // Complete path: token envelopes + claim clear
+        if (/access_token_envelope\s*=/.test(sql)) {
+          const operationNow = params[12];
+          const owner = params[14];
+          if (!claimOwnerMatches(row, owner, operationNow)) return { rows: [] };
+          if (!["active", "reauthorization_required"].includes(row.status)) {
             return { rows: [] };
           }
+          row.access_token_envelope = params[1];
+          row.refresh_token_envelope = params[2];
+          row.has_access_token = params[3];
+          row.has_refresh_token = params[4];
+          row.encryption_key_version = params[5];
+          row.access_token_expires_at = params[6];
+          row.token_type = params[7];
+          row.scopes = params[8] || [];
+          row.metadata =
+            typeof params[9] === "string" ? JSON.parse(params[9]) : params[9] || {};
+          row.status = params[10];
+          row.reauthorization_reason = params[11];
+          row.last_refreshed_at = operationNow;
+          row.updated_at = operationNow;
+          row.refresh_claim_owner = null;
+          row.refresh_claimed_at = null;
+          row.refresh_claim_expires_at = null;
+          return { rows: [toSafeRow(row)] };
         }
-        const expiresAt = new Date(opMs + leaseMs).toISOString();
-        row.refresh_claim_owner = owner;
-        row.refresh_claimed_at = new Date(operationNow).toISOString();
-        row.refresh_claim_expires_at = expiresAt;
-        return {
-          rows: [
-            {
-              id: row.id,
-              refresh_claimed_at: row.refresh_claimed_at,
-              refresh_claim_expires_at: row.refresh_claim_expires_at,
-            },
-          ],
-        };
+
+        // Reauth failure path: status = reauthorization_required + clear claim
+        if (
+          /status\s*=\s*'reauthorization_required'/.test(sql) ||
+          /status = 'reauthorization_required'/.test(sql)
+        ) {
+          const reauthReason = params[2];
+          const operationNow = params[3];
+          const owner = params[4];
+          if (!claimOwnerMatches(row, owner, operationNow)) return { rows: [] };
+          if (!["active", "reauthorization_required"].includes(row.status)) {
+            return { rows: [] };
+          }
+          row.status = "reauthorization_required";
+          row.reauthorization_reason = reauthReason;
+          row.updated_at = operationNow;
+          row.refresh_claim_owner = null;
+          row.refresh_claimed_at = null;
+          row.refresh_claim_expires_at = null;
+          return { rows: [toSafeRow(row)] };
+        }
+
+        // Clear claim only (release / inactive cleanup)
+        if (
+          /refresh_claim_owner\s*=\s*NULL/i.test(sql) &&
+          !/access_token_envelope/.test(sql) &&
+          !/reauthorization_required/.test(sql)
+        ) {
+          const owner = params[2];
+          const operationNow = params[3];
+          if (!claimOwnerMatches(row, owner, operationNow)) return { rows: [] };
+          row.refresh_claim_owner = null;
+          row.refresh_claimed_at = null;
+          row.refresh_claim_expires_at = null;
+          return { rows: [toSafeRow(row)] };
+        }
+
+        // Claim path: set owner + times + lease
+        if (
+          /refresh_claim_owner\s*=\s*\$2/.test(sql) &&
+          /refresh_claimed_at\s*=\s*\$3/.test(sql)
+        ) {
+          const owner = params[1];
+          const operationNow = params[2];
+          const leaseMs = Number(params[3]);
+          if (!["active", "reauthorization_required"].includes(row.status)) {
+            return { rows: [] };
+          }
+          if (!row.has_refresh_token) return { rows: [] };
+          const opMs = Date.parse(operationNow);
+          if (
+            row.refresh_claim_expires_at !== null &&
+            row.refresh_claim_expires_at !== undefined
+          ) {
+            const expMs = Date.parse(row.refresh_claim_expires_at);
+            if (Number.isFinite(expMs) && expMs > opMs) {
+              return { rows: [] };
+            }
+          }
+          const expiresAt = new Date(opMs + leaseMs).toISOString();
+          row.refresh_claim_owner = owner;
+          row.refresh_claimed_at = new Date(operationNow).toISOString();
+          row.refresh_claim_expires_at = expiresAt;
+          return {
+            rows: [
+              {
+                id: row.id,
+                refresh_claimed_at: row.refresh_claimed_at,
+                refresh_claim_expires_at: row.refresh_claim_expires_at,
+              },
+            ],
+          };
+        }
+
+        return { rows: [] };
       }
 
       if (/INSERT INTO codeclip_provider_credential_audit/.test(sql)) {
@@ -256,11 +403,13 @@ function assertNoSecretsInValue(value) {
 // Public surface
 // ---------------------------------------------------------------------------
 
-test("codeClip credential refresh exports only public claim surface", () => {
+test("codeClip credential refresh exports claim complete and release surface", () => {
   const mod = require("./verticals/codeclip/provider-credential-refresh");
   assert.deepEqual(Object.keys(mod).sort(), [
     "CodeClipProviderCredentialRefreshError",
     "claimCodeClipProviderCredentialRefresh",
+    "completeCodeClipProviderCredentialRefresh",
+    "releaseCodeClipProviderCredentialRefresh",
   ].sort());
 });
 
@@ -904,7 +1053,9 @@ test("codeClip credential refresh schema ensure does not require encryption env"
     const joined = client.calls.join("\n");
     assert.match(joined, /refresh_claim_owner/);
     assert.match(joined, /refresh_claimed/);
-    assert.equal(/refresh_succeeded/.test(joined), false);
+    assert.match(joined, /refresh_succeeded/);
+    assert.match(joined, /refresh_failed/);
+    assert.match(joined, /refresh_released/);
   } finally {
     if (previousKeys === undefined) {
       delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS;
@@ -918,6 +1069,441 @@ test("codeClip credential refresh schema ensure does not require encryption env"
         previousActive;
     }
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// Complete + release (F1C3B2)
+// ---------------------------------------------------------------------------
+
+const SYSTEM_ACTOR = Object.freeze({ type: "system", id: "credential_refresh" });
+
+function seedClaimed(client, overrides = {}) {
+  const env = overrides.env || makeCryptoEnv();
+  const accessEnv = overrides.access_token_envelope || encryptPlain("old-access", env);
+  const refreshEnv = overrides.refresh_token_envelope || encryptPlain("old-refresh", env);
+  client.seed({
+    id: overrides.id || 100,
+    status: overrides.status || "active",
+    has_access_token: true,
+    has_refresh_token: true,
+    access_token_envelope: accessEnv,
+    refresh_token_envelope: refreshEnv,
+    encryption_key_version: 1,
+    refresh_claim_owner: overrides.owner || "worker.a",
+    refresh_claimed_at: overrides.claimed_at || "2026-08-04T11:59:00.000Z",
+    refresh_claim_expires_at: overrides.expires_at || "2026-08-04T12:05:00.000Z",
+    reauthorization_reason: overrides.reauthorization_reason || null,
+    ...overrides.row,
+  });
+  return env;
+}
+
+test("codeClip credential refresh complete success clears claim and writes refresh_succeeded", async () => {
+  const client = createRefreshStoreClient();
+  const env = seedClaimed(client, { id: 200 });
+  const result = await completeCodeClipProviderCredentialRefresh(
+    {
+      credentialId: 200,
+      owner: "worker.a",
+      accessToken: "new-access-token",
+      accessTokenExpiresAt: "2026-12-01T00:00:00.000Z",
+      actor: SYSTEM_ACTOR,
+      now: OPERATION_NOW,
+    },
+    { queryClient: client, env }
+  );
+  assert.equal(result.status, "completed");
+  assert.ok(result.credential);
+  assert.equal(result.credential.status, "active");
+  assert.equal(result.credential.lastRefreshedAt, OPERATION_NOW);
+  assert.equal(result.credential.updatedAt, OPERATION_NOW);
+  assert.equal(Object.hasOwn(result, "owner"), false);
+  assert.equal(Object.hasOwn(result.credential, "provider_account_id"), false);
+  assert.equal(client.rows[0].refresh_claim_owner, null);
+  assert.equal(client.rows[0].refresh_claim_expires_at, null);
+  const access = decryptCodeClipProviderCredentialSecret({
+    envelope: client.rows[0].access_token_envelope,
+    env,
+  });
+  const refresh = decryptCodeClipProviderCredentialSecret({
+    envelope: client.rows[0].refresh_token_envelope,
+    env,
+  });
+  assert.equal(access.plaintext, "new-access-token");
+  assert.equal(refresh.plaintext, "old-refresh");
+  assert.equal(client.auditRows.at(-1).action, "refresh_succeeded");
+  assert.equal(client.auditRows.at(-1).reason_code, "refresh_succeeded");
+  assert.deepEqual(client.auditRows.at(-1).metadata, {});
+  assertNoSecretsInValue(result);
+  assertNoSecretsInValue(client.auditRows.at(-1));
+});
+
+test("codeClip credential refresh complete recovers reauthorization_required", async () => {
+  const client = createRefreshStoreClient();
+  const env = seedClaimed(client, {
+    id: 201,
+    status: "reauthorization_required",
+    reauthorization_reason: "token_invalid",
+  });
+  const result = await completeCodeClipProviderCredentialRefresh(
+    {
+      credentialId: 201,
+      owner: "worker.a",
+      accessToken: "fresh-access",
+      refreshToken: "fresh-refresh",
+      actor: SYSTEM_ACTOR,
+      now: OPERATION_NOW,
+    },
+    { queryClient: client, env }
+  );
+  assert.equal(result.credential.status, "active");
+  assert.equal(result.credential.reauthorizationReason, null);
+  assert.equal(client.rows[0].status, "active");
+  assert.equal(client.rows[0].reauthorization_reason, null);
+  const refresh = decryptCodeClipProviderCredentialSecret({
+    envelope: client.rows[0].refresh_token_envelope,
+    env,
+  });
+  assert.equal(refresh.plaintext, "fresh-refresh");
+});
+
+test("codeClip credential refresh complete rejects missing/mismatch/stale claim", async () => {
+  const client = createRefreshStoreClient();
+  const env = makeCryptoEnv();
+  client.seed({
+    id: 202,
+    has_refresh_token: true,
+    access_token_envelope: encryptPlain("a", env),
+    refresh_token_envelope: encryptPlain("r", env),
+  });
+  await assert.rejects(
+    () =>
+      completeCodeClipProviderCredentialRefresh(
+        {
+          credentialId: 202,
+          owner: "worker.a",
+          accessToken: "x",
+          actor: SYSTEM_ACTOR,
+          now: OPERATION_NOW,
+        },
+        { queryClient: client, env }
+      ),
+    (e) => e.code === "REFRESH_CLAIM_MISSING"
+  );
+
+  const env2 = seedClaimed(client, { id: 203, owner: "worker.a" });
+  await assert.rejects(
+    () =>
+      completeCodeClipProviderCredentialRefresh(
+        {
+          credentialId: 203,
+          owner: "worker.b",
+          accessToken: "x",
+          actor: SYSTEM_ACTOR,
+          now: OPERATION_NOW,
+        },
+        { queryClient: client, env: env2 }
+      ),
+    (e) => e.code === "REFRESH_CLAIM_OWNER_MISMATCH"
+  );
+});
+
+test("codeClip credential refresh complete rejects stale claim at boundary", async () => {
+  const client = createRefreshStoreClient();
+  const env = seedClaimed(client, {
+    id: 205,
+    expires_at: OPERATION_NOW,
+  });
+  await assert.rejects(
+    () =>
+      completeCodeClipProviderCredentialRefresh(
+        {
+          credentialId: 205,
+          owner: "worker.a",
+          accessToken: "x",
+          actor: SYSTEM_ACTOR,
+          now: OPERATION_NOW,
+        },
+        { queryClient: client, env }
+      ),
+    (e) => e.code === "REFRESH_CLAIM_STALE"
+  );
+  assert.equal(client.rows[0].refresh_claim_owner, "worker.a");
+});
+
+test("codeClip credential refresh complete inactive path commits cleanup then throws", async () => {
+  const pool = createRefreshStorePool();
+  const env = seedClaimed(pool.store, {
+    id: 206,
+    status: "disabled",
+  });
+  let caught = null;
+  await assert.rejects(
+    () =>
+      completeCodeClipProviderCredentialRefresh(
+        {
+          credentialId: 206,
+          owner: "worker.a",
+          accessToken: "should-not-write",
+          actor: SYSTEM_ACTOR,
+          now: OPERATION_NOW,
+        },
+        { queryClient: pool, env }
+      ),
+    (e) => {
+      caught = e;
+      return true;
+    }
+  );
+  assert.ok(caught instanceof CodeClipProviderCredentialRefreshError);
+  assert.equal(caught.code, "REFRESH_NOT_COMPLETABLE");
+  assert.equal(caught.name, "CodeClipProviderCredentialRefreshError");
+  // Internal markers must never appear on public errors
+  const serialized = JSON.stringify({
+    name: caught.name,
+    code: caught.code,
+    message: caught.message,
+    details: caught.details,
+  });
+  assert.equal(serialized.includes("postCommitErrorCode"), false);
+  assert.equal(serialized.includes("__throwAfterCommit"), false);
+  assert.equal(serialized.includes("should-not-write"), false);
+  assert.equal(Object.keys(caught.details || {}).length, 0);
+
+  assert.equal(pool.store.rows[0].refresh_claim_owner, null);
+  assert.equal(pool.store.rows[0].status, "disabled");
+  assert.equal(pool.store.rows[0].access_token_envelope.includes("should-not"), false);
+  assert.equal(pool.auditRows.at(-1).action, "refresh_released");
+  assert.equal(pool.auditRows.at(-1).reason_code, "credential_not_refreshable");
+  // Pool-owned: cleanup + audit committed before public throw
+  const sqls = pool.calls.map((c) => String(c.sql).trim());
+  const clearIdx = sqls.findIndex(
+    (s) => /UPDATE/i.test(s) && /refresh_claim_owner\s*=\s*NULL/i.test(s)
+  );
+  const auditIdx = sqls.findIndex((s) =>
+    /INSERT INTO codeclip_provider_credential_audit/i.test(s)
+  );
+  const commitIdx = sqls.findIndex((s) => /^\s*COMMIT/i.test(s));
+  assert.ok(clearIdx >= 0 && auditIdx > clearIdx && commitIdx > auditIdx);
+  assert.equal(sqls.some((s) => /^\s*ROLLBACK/i.test(s)), false);
+  assert.equal(pool.released, 1);
+});
+
+test("codeClip credential refresh complete inactive path on caller client has no nested TX", async () => {
+  const client = createRefreshStoreClient();
+  const env = seedClaimed(client, { id: 208, status: "revoked" });
+  const before = client.calls.length;
+  await assert.rejects(
+    () =>
+      completeCodeClipProviderCredentialRefresh(
+        {
+          credentialId: 208,
+          owner: "worker.a",
+          accessToken: "x",
+          actor: SYSTEM_ACTOR,
+          now: OPERATION_NOW,
+        },
+        { queryClient: client, env }
+      ),
+    (e) => e.code === "REFRESH_NOT_COMPLETABLE"
+  );
+  const calls = client.calls.slice(before);
+  // Caller owns TX: repository never BEGIN/COMMIT/ROLLBACK
+  assert.equal(calls.some((c) => /^\s*BEGIN/i.test(String(c.sql).trim())), false);
+  assert.equal(calls.some((c) => /^\s*COMMIT/i.test(String(c.sql).trim())), false);
+  assert.equal(calls.some((c) => /^\s*ROLLBACK/i.test(String(c.sql).trim())), false);
+  // Cleanup + audit still ran on the same client (caller's active TX)
+  assert.equal(
+    calls.some(
+      (c) =>
+        /UPDATE/i.test(c.sql) && /refresh_claim_owner\s*=\s*NULL/i.test(c.sql)
+    ),
+    true
+  );
+  assert.equal(
+    calls.some((c) => /INSERT INTO codeclip_provider_credential_audit/i.test(c.sql)),
+    true
+  );
+  assert.equal(client.rows[0].refresh_claim_owner, null);
+  assert.equal(client.rows[0].status, "revoked");
+  assert.equal(client.auditRows.at(-1).action, "refresh_released");
+});
+
+test("codeClip credential refresh complete inactive audit failure rolls back without post-commit path", async () => {
+  const pool = createRefreshStorePool({ failAudit: true });
+  const env = seedClaimed(pool.store, { id: 209, status: "disabled" });
+  await assert.rejects(
+    () =>
+      completeCodeClipProviderCredentialRefresh(
+        {
+          credentialId: 209,
+          owner: "worker.a",
+          accessToken: "x",
+          actor: SYSTEM_ACTOR,
+          now: OPERATION_NOW,
+        },
+        { queryClient: pool, env }
+      ),
+    (e) =>
+      e instanceof CodeClipProviderCredentialRefreshError &&
+      e.code === "CREDENTIAL_AUDIT_FAILED"
+  );
+  assert.equal(
+    pool.calls.some((c) => /^\s*ROLLBACK/i.test(String(c.sql).trim())),
+    true
+  );
+  assert.equal(
+    pool.calls.some((c) => /^\s*COMMIT/i.test(String(c.sql).trim())),
+    false
+  );
+  assert.equal(pool.auditRows.length, 0);
+  assert.equal(pool.released, 1);
+});
+
+test("codeClip credential refresh complete audit failure rolls back tokens and claim", async () => {
+  const pool = createRefreshStorePool({ failAudit: true });
+  const env = seedClaimed(pool.store, { id: 207 });
+  const envelopeBefore = pool.store.rows[0].access_token_envelope;
+  await assert.rejects(
+    () =>
+      completeCodeClipProviderCredentialRefresh(
+        {
+          credentialId: 207,
+          owner: "worker.a",
+          accessToken: "new-access",
+          actor: SYSTEM_ACTOR,
+          now: OPERATION_NOW,
+        },
+        { queryClient: pool, env }
+      ),
+    (e) => e.code === "CREDENTIAL_AUDIT_FAILED"
+  );
+  assert.equal(
+    pool.calls.some((c) => /^\s*ROLLBACK/i.test(String(c.sql).trim())),
+    true
+  );
+  // Mock store does not undo on ROLLBACK; real PG path is covered by env-gated test.
+  // Here we still assert typed error and no audit row.
+  assert.equal(pool.auditRows.length, 0);
+  assert.equal(pool.released, 1);
+  void envelopeBefore;
+});
+
+test("codeClip credential refresh release outcomes", async () => {
+  const client = createRefreshStoreClient();
+  seedClaimed(client, { id: 210 });
+  const released = await releaseCodeClipProviderCredentialRefresh(
+    {
+      credentialId: 210,
+      owner: "worker.a",
+      outcome: "released",
+      reason: "refresh_cancelled",
+      actor: SYSTEM_ACTOR,
+      now: OPERATION_NOW,
+    },
+    { queryClient: client }
+  );
+  assert.equal(released.status, "released");
+  assert.equal(released.outcome, "released");
+  assert.equal(client.rows[0].refresh_claim_owner, null);
+  assert.equal(client.auditRows.at(-1).action, "refresh_released");
+
+  seedClaimed(client, { id: 211 });
+  const retryable = await releaseCodeClipProviderCredentialRefresh(
+    {
+      credentialId: 211,
+      owner: "worker.a",
+      outcome: "failed_retryable",
+      reason: "provider_temporary_error",
+      actor: SYSTEM_ACTOR,
+      now: OPERATION_NOW,
+    },
+    { queryClient: client }
+  );
+  assert.equal(retryable.status, "failed");
+  assert.equal(retryable.outcome, "failed_retryable");
+  assert.equal(client.rows.find((r) => r.id === 211).status, "active");
+  assert.equal(client.auditRows.at(-1).action, "refresh_failed");
+
+  seedClaimed(client, { id: 212 });
+  const reauth = await releaseCodeClipProviderCredentialRefresh(
+    {
+      credentialId: 212,
+      owner: "worker.a",
+      outcome: "failed_reauthorization",
+      reason: "refresh_token_rejected",
+      actor: SYSTEM_ACTOR,
+      now: OPERATION_NOW,
+    },
+    { queryClient: client }
+  );
+  assert.equal(reauth.status, "failed");
+  assert.equal(reauth.credential.status, "reauthorization_required");
+  assert.equal(reauth.credential.reauthorizationReason, "refresh_token_rejected");
+  assert.equal(client.rows.find((r) => r.id === 212).refresh_claim_owner, null);
+  assert.equal(client.auditRows.at(-1).action, "refresh_failed");
+});
+
+test("codeClip credential refresh release fails for wrong owner and stale", async () => {
+  const client = createRefreshStoreClient();
+  seedClaimed(client, { id: 220, owner: "worker.a" });
+  await assert.rejects(
+    () =>
+      releaseCodeClipProviderCredentialRefresh(
+        {
+          credentialId: 220,
+          owner: "worker.b",
+          outcome: "released",
+          reason: "refresh_cancelled",
+          actor: SYSTEM_ACTOR,
+          now: OPERATION_NOW,
+        },
+        { queryClient: client }
+      ),
+    (e) => e.code === "REFRESH_CLAIM_OWNER_MISMATCH"
+  );
+
+  seedClaimed(client, {
+    id: 221,
+    expires_at: OPERATION_NOW,
+  });
+  await assert.rejects(
+    () =>
+      releaseCodeClipProviderCredentialRefresh(
+        {
+          credentialId: 221,
+          owner: "worker.a",
+          outcome: "released",
+          reason: "refresh_cancelled",
+          actor: SYSTEM_ACTOR,
+          now: OPERATION_NOW,
+        },
+        { queryClient: client }
+      ),
+    (e) => e.code === "REFRESH_CLAIM_STALE"
+  );
+});
+
+test("codeClip credential refresh release on disabled clears claim without status overwrite", async () => {
+  const client = createRefreshStoreClient();
+  seedClaimed(client, { id: 222, status: "revoked" });
+  const result = await releaseCodeClipProviderCredentialRefresh(
+    {
+      credentialId: 222,
+      owner: "worker.a",
+      outcome: "failed_reauthorization",
+      reason: "refresh_token_rejected",
+      actor: SYSTEM_ACTOR,
+      now: OPERATION_NOW,
+    },
+    { queryClient: client }
+  );
+  assert.equal(result.credential.status, "revoked");
+  assert.equal(client.rows[0].status, "revoked");
+  assert.equal(client.rows[0].refresh_claim_owner, null);
+  assert.equal(client.auditRows.at(-1).action, "refresh_failed");
+  assert.equal(client.auditRows.at(-1).reason_code, "credential_not_refreshable");
 });
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +1756,195 @@ test("codeClip credential refresh claim is single-winner in PostgreSQL", async (
     } catch {
       // ignore cleanup failure
     }
+    await pool.end();
+  }
+});
+
+
+test("codeClip credential refresh complete reclaim race in PostgreSQL", async (t) => {
+  const connectionString =
+    process.env.CODECLIP_PROVIDER_CREDENTIAL_REFRESH_CONCURRENCY_TEST_DATABASE_URL;
+  if (!connectionString) {
+    t.skip(
+      "CODECLIP_PROVIDER_CREDENTIAL_REFRESH_CONCURRENCY_TEST_DATABASE_URL is not configured"
+    );
+    return;
+  }
+  let parsed;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    t.skip("concurrency test database URL is invalid");
+    return;
+  }
+  if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) {
+    t.skip(
+      "concurrency test requires an explicitly isolated local PostgreSQL database"
+    );
+    return;
+  }
+
+  const { Pool } = require("pg");
+  const pool = new Pool({ connectionString });
+  const schema = `codeclip_refresh_complete_test_${process.pid}_${Date.now()}`;
+  const env = makeCryptoEnv();
+  const accessEnvelope = encryptPlain("access-v1", env);
+  const refreshEnvelope = encryptPlain("refresh-v1", env);
+  const clientA = await pool.connect();
+  const clientB = await pool.connect();
+
+  try {
+    await pool.query(`CREATE SCHEMA ${schema}`);
+    await pool.query(`
+      CREATE TABLE ${schema}.codeclip_provider_credentials (
+        id BIGSERIAL PRIMARY KEY,
+        vertical TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        account_lookup_key TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        access_token_envelope TEXT,
+        refresh_token_envelope TEXT,
+        access_token_expires_at TIMESTAMPTZ,
+        token_type TEXT,
+        scopes TEXT[] NOT NULL DEFAULT '{}'::text[],
+        encryption_key_version INTEGER NOT NULL,
+        has_access_token BOOLEAN NOT NULL DEFAULT FALSE,
+        has_refresh_token BOOLEAN NOT NULL DEFAULT FALSE,
+        reauthorization_reason TEXT,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        disabled_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        last_refreshed_at TIMESTAMPTZ,
+        refresh_claim_owner TEXT,
+        refresh_claimed_at TIMESTAMPTZ,
+        refresh_claim_expires_at TIMESTAMPTZ
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE ${schema}.codeclip_provider_credential_audit (
+        id BIGSERIAL PRIMARY KEY,
+        credential_id BIGINT NOT NULL
+          REFERENCES ${schema}.codeclip_provider_credentials (id)
+          ON DELETE RESTRICT,
+        vertical TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor_type TEXT NOT NULL,
+        actor_id TEXT,
+        reason_code TEXT,
+        before_state JSONB,
+        after_state JSONB,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (action IN (
+          'created','token_updated','reauthorization_required','revoked','disabled','reactivated',
+          'refresh_claimed','refresh_succeeded','refresh_failed','refresh_released'
+        )),
+        CHECK (actor_type IN ('operator', 'operator_key', 'system'))
+      )
+    `);
+    const inserted = await pool.query(
+      `
+        INSERT INTO ${schema}.codeclip_provider_credentials (
+          vertical, provider, environment, account_lookup_key, provider_account_id,
+          status, encryption_key_version, has_access_token, has_refresh_token,
+          access_token_envelope, refresh_token_envelope
+        ) VALUES (
+          'codeclip','meta','sandbox','page-complete-1','page-complete-1',
+          'active',1,TRUE,TRUE,$1,$2
+        ) RETURNING id
+      `,
+      [accessEnvelope, refreshEnvelope]
+    );
+    const credentialId = inserted.rows[0].id;
+    await clientA.query(`SET search_path TO ${schema}`);
+    await clientB.query(`SET search_path TO ${schema}`);
+
+    function asOwnedPool(client) {
+      return {
+        async connect() {
+          return {
+            query: client.query.bind(client),
+            release() {},
+          };
+        },
+      };
+    }
+    const poolA = asOwnedPool(clientA);
+    const poolB = asOwnedPool(clientB);
+
+    const t0 = "2026-08-04T16:00:00.000Z";
+    const claimA = await claimCodeClipProviderCredentialRefresh(
+      { credentialId, owner: "worker.pg.a", leaseMs: LEASE_MS, now: t0 },
+      { queryClient: poolA }
+    );
+    assert.equal(claimA.ok, true);
+
+    // Expire A's claim and let B reclaim
+    const t1 = "2026-08-04T16:02:00.000Z";
+    const claimB = await claimCodeClipProviderCredentialRefresh(
+      { credentialId, owner: "worker.pg.b", leaseMs: LEASE_MS, now: t1 },
+      { queryClient: poolB }
+    );
+    assert.equal(claimB.ok, true);
+    assert.equal(claimB.reclaimed, true);
+
+    await assert.rejects(
+      () =>
+        completeCodeClipProviderCredentialRefresh(
+          {
+            credentialId,
+            owner: "worker.pg.a",
+            accessToken: "should-fail",
+            actor: SYSTEM_ACTOR,
+            now: t1,
+          },
+          { queryClient: poolA, env }
+        ),
+      (e) =>
+        e.code === "REFRESH_CLAIM_OWNER_MISMATCH" || e.code === "REFRESH_CLAIM_STALE"
+    );
+
+    const completed = await completeCodeClipProviderCredentialRefresh(
+      {
+        credentialId,
+        owner: "worker.pg.b",
+        accessToken: "access-v2",
+        actor: SYSTEM_ACTOR,
+        now: t1,
+      },
+      { queryClient: poolB, env }
+    );
+    assert.equal(completed.status, "completed");
+
+    const row = await pool.query(
+      `SELECT refresh_claim_owner, access_token_envelope, last_refreshed_at
+       FROM ${schema}.codeclip_provider_credentials WHERE id = $1`,
+      [credentialId]
+    );
+    assert.equal(row.rows[0].refresh_claim_owner, null);
+    const decrypted = decryptCodeClipProviderCredentialSecret({
+      envelope: row.rows[0].access_token_envelope,
+      env,
+    });
+    assert.equal(decrypted.plaintext, "access-v2");
+
+    const audits = await pool.query(
+      `SELECT action FROM ${schema}.codeclip_provider_credential_audit
+       WHERE credential_id = $1 ORDER BY id`,
+      [credentialId]
+    );
+    const successCount = audits.rows.filter((r) => r.action === "refresh_succeeded").length;
+    assert.equal(successCount, 1);
+  } finally {
+    try { clientA.release(); } catch {}
+    try { clientB.release(); } catch {}
+    try { await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); } catch {}
     await pool.end();
   }
 });
