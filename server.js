@@ -88,6 +88,8 @@ async function initializeCodeClipStartup({
   await databaseClient.ensureCodeClipOutboxEventsTable();
   await databaseClient.ensureCodeClipProviderAccountBindingsTable();
   await databaseClient.ensureCodeClipProviderAccountBindingAuditTable();
+  await databaseClient.ensureCodeClipProviderCredentialsTable();
+  await databaseClient.ensureCodeClipProviderCredentialAuditTable();
   await databaseClient.ensureCodeClipProviderDeliveriesTable();
   if (typeof databaseClient.ensureCodeClipMetaMessengerOutboundSchema === "function") {
     await databaseClient.ensureCodeClipMetaMessengerOutboundSchema();

@@ -17,6 +17,8 @@ const CODECLIP_STARTUP_ENSURES = [
   ["ensureCodeClipOutboxEventsTable", "ensure-codeclip-outbox"],
   ["ensureCodeClipProviderAccountBindingsTable", "ensure-codeclip-provider-bindings"],
   ["ensureCodeClipProviderAccountBindingAuditTable", "ensure-codeclip-provider-binding-audit"],
+  ["ensureCodeClipProviderCredentialsTable", "ensure-codeclip-provider-credentials"],
+  ["ensureCodeClipProviderCredentialAuditTable", "ensure-codeclip-provider-credential-audit"],
   ["ensureCodeClipProviderDeliveriesTable", "ensure-codeclip-provider-deliveries"],
   ["ensureCodeClipYouTubeWebSubSubscriptionsTable", "ensure-codeclip-youtube-websub-subscriptions"],
   ["ensureCodeClipYouTubeWebSubDiagnosticProbeTables", "ensure-codeclip-youtube-websub-diagnostic-probes"],
@@ -134,4 +136,48 @@ test("codeClip startup initializes provider delivery schema without waiting for 
   assert.equal(calls.includes("ensure-codeclip-interactions"), true);
   assert.equal(calls.includes("ensure-codeclip-clipxtra-redemptions"), true);
   assert.equal(calls.includes("ensure-codeclip-outbox"), true);
+});
+
+test("codeClip startup wires credential schema ensures after bindings and before deliveries", async () => {
+  const calls = [];
+  const previousKeys = process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS;
+  const previousActive = process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION;
+  delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS;
+  delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION;
+
+  try {
+    await initializeCodeClipStartup({
+      databaseClient: createCodeClipStartupDatabaseClient(calls),
+    });
+
+    const credentialsIndex = calls.indexOf("ensure-codeclip-provider-credentials");
+    const credentialAuditIndex = calls.indexOf("ensure-codeclip-provider-credential-audit");
+    const bindingAuditIndex = calls.indexOf("ensure-codeclip-provider-binding-audit");
+    const deliveriesIndex = calls.indexOf("ensure-codeclip-provider-deliveries");
+
+    assert.ok(credentialsIndex >= 0, "credentials ensure must run");
+    assert.ok(credentialAuditIndex >= 0, "credential audit ensure must run");
+    assert.equal(credentialsIndex < credentialAuditIndex, true);
+    assert.equal(bindingAuditIndex < credentialsIndex, true);
+    assert.equal(credentialAuditIndex < deliveriesIndex, true);
+    assert.equal(
+      calls.filter((label) => label === "ensure-codeclip-provider-credentials").length,
+      1
+    );
+    assert.equal(
+      calls.filter((label) => label === "ensure-codeclip-provider-credential-audit").length,
+      1
+    );
+  } finally {
+    if (previousKeys === undefined) {
+      delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS;
+    } else {
+      process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_KEYS = previousKeys;
+    }
+    if (previousActive === undefined) {
+      delete process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION;
+    } else {
+      process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION = previousActive;
+    }
+  }
 });
