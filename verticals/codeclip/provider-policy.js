@@ -1,4 +1,5 @@
 const {
+  getCodeClipProviderDefinition,
   isCodeClipProviderRegistered,
   normalizeCodeClipProviderName,
 } = require("./provider-registry");
@@ -17,6 +18,10 @@ function buildCapabilities({
   liveProvider = false,
   providerAccountIdRequired = false,
   durableDeliveryRequired = false,
+  // Registry metadata (authoritative; attached when resolving policy)
+  webhook = false,
+  polling = false,
+  credentials = false,
 }) {
   return {
     route: true,
@@ -33,9 +38,17 @@ function buildCapabilities({
     liveProvider,
     providerAccountIdRequired,
     durableDeliveryRequired,
+    // Provider-class foundation metadata from registry (no runtime use in F1A)
+    webhook,
+    polling,
+    credentials,
   };
 }
 
+/**
+ * Operational policy fields only. providerClass and registry capabilities are
+ * attached from the registry at resolve time — not hardcoded here.
+ */
 const PROVIDER_POLICIES = {
   meta: {
     provider: "meta",
@@ -115,11 +128,19 @@ const PROVIDER_POLICIES = {
   },
 };
 
-function clonePolicy(policy) {
+function clonePolicy(policy, definition) {
+  if (!definition || typeof definition.providerClass !== "string") {
+    throw new Error("codeClip provider policy requires registry definition with providerClass");
+  }
+  const registryCapabilities = definition.capabilities || {};
   return {
     ...policy,
+    providerClass: definition.providerClass,
     capabilities: {
       ...policy.capabilities,
+      webhook: registryCapabilities.webhook === true,
+      polling: registryCapabilities.polling === true,
+      credentials: registryCapabilities.credentials === true,
     },
     idempotency: {
       ...policy.idempotency,
@@ -163,9 +184,19 @@ function resolveCodeClipProviderPolicy(provider) {
     return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
   }
 
+  const operational = PROVIDER_POLICIES[normalizedProvider];
+  if (!operational) {
+    return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
+  }
+
+  const definition = getCodeClipProviderDefinition(normalizedProvider);
+  if (!definition) {
+    return { ok: false, reason: "UNSUPPORTED_PROVIDER" };
+  }
+
   return {
     ok: true,
-    policy: clonePolicy(PROVIDER_POLICIES[normalizedProvider]),
+    policy: clonePolicy(operational, definition),
   };
 }
 

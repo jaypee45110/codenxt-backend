@@ -30,6 +30,9 @@ function assertDefaultCapabilities(policy, {
   liveProvider = false,
   providerAccountIdRequired = false,
   durableDeliveryRequired = false,
+  webhook = false,
+  polling = false,
+  credentials = false,
 }) {
   assert.deepEqual(policy.capabilities, {
     route: true,
@@ -46,6 +49,9 @@ function assertDefaultCapabilities(policy, {
     liveProvider,
     providerAccountIdRequired,
     durableDeliveryRequired,
+    webhook,
+    polling,
+    credentials,
   });
 }
 
@@ -72,12 +78,18 @@ test("codeClip provider policy returns test provider policy", () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.policy.provider, "test");
+  assert.equal(result.policy.providerClass, "push");
   assert.equal(result.policy.routeEnabled, true);
   assert.equal(result.policy.adapter, "test");
   assert.equal(result.policy.envelopeType, "test");
   assert.equal(result.policy.verificationMode, "test");
   assert.equal(result.policy.secretEnvName, "");
-  assertDefaultCapabilities(result.policy, { runtimeVerification: true });
+  assertDefaultCapabilities(result.policy, {
+    runtimeVerification: true,
+    webhook: true,
+    polling: false,
+    credentials: false,
+  });
   assertRuntimeVerificationInvariant(result.policy);
   assertDefaultIdempotency(result.policy);
 });
@@ -87,6 +99,7 @@ test("codeClip provider policy returns sms provider policy", () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.policy.provider, "sms");
+  assert.equal(result.policy.providerClass, "push");
   assert.equal(result.policy.routeEnabled, true);
   assert.equal(result.policy.adapter, "sms");
   assert.equal(result.policy.envelopeType, "sms");
@@ -96,6 +109,9 @@ test("codeClip provider policy returns sms provider policy", () => {
     runtimeVerification: true,
     hmacVerification: true,
     rawBodyRequired: true,
+    webhook: true,
+    polling: false,
+    credentials: false,
   });
   assertRuntimeVerificationInvariant(result.policy);
   assertDefaultIdempotency(result.policy);
@@ -106,6 +122,7 @@ test("codeClip provider policy returns meta provider policy", () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.policy.provider, "meta");
+  assert.equal(result.policy.providerClass, "push");
   assert.equal(result.policy.routeEnabled, true);
   assert.equal(result.policy.adapter, "meta");
   assert.equal(result.policy.envelopeType, "meta");
@@ -116,6 +133,9 @@ test("codeClip provider policy returns meta provider policy", () => {
     hmacVerification: true,
     rawBodyRequired: true,
     liveProvider: true,
+    webhook: true,
+    polling: false,
+    credentials: true,
   });
   assertRuntimeVerificationInvariant(result.policy);
   assertLiveIdempotency(result.policy);
@@ -126,6 +146,7 @@ test("codeClip provider policy returns youtube WebSub policy", () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.policy.provider, "youtube");
+  assert.equal(result.policy.providerClass, "push_poll");
   assert.equal(result.policy.routeEnabled, true);
   assert.equal(result.policy.adapter, "youtube");
   assert.equal(result.policy.envelopeType, "youtube-websub");
@@ -139,6 +160,9 @@ test("codeClip provider policy returns youtube WebSub policy", () => {
     liveProvider: true,
     providerAccountIdRequired: true,
     durableDeliveryRequired: true,
+    webhook: true,
+    polling: true,
+    credentials: true,
   });
   assertRuntimeVerificationInvariant(result.policy);
   assertLiveIdempotency(result.policy);
@@ -166,11 +190,33 @@ test("codeClip provider policy rejects missing and unsupported providers", () =>
 test("codeClip provider policy returns a defensive copy", () => {
   const first = resolveCodeClipProviderPolicy("test");
   first.policy.capabilities.runtimeVerification = false;
+  first.policy.capabilities.webhook = false;
+  first.policy.providerClass = "poll_only";
   first.policy.idempotency.claimTtlSeconds = 1;
 
   const second = resolveCodeClipProviderPolicy("test");
-  assertDefaultCapabilities(second.policy, { runtimeVerification: true });
+  assert.equal(second.policy.providerClass, "push");
+  assertDefaultCapabilities(second.policy, {
+    runtimeVerification: true,
+    webhook: true,
+    polling: false,
+    credentials: false,
+  });
   assertDefaultIdempotency(second.policy);
+});
+
+test("codeClip provider policy exposes providerClass and registry capabilities from registry", () => {
+  const meta = resolveCodeClipProviderPolicy("meta");
+  assert.equal(meta.policy.providerClass, "push");
+  assert.equal(meta.policy.capabilities.webhook, true);
+  assert.equal(meta.policy.capabilities.polling, false);
+  assert.equal(meta.policy.capabilities.credentials, true);
+
+  const youtube = resolveCodeClipProviderPolicy("youtube");
+  assert.equal(youtube.policy.providerClass, "push_poll");
+  assert.equal(youtube.policy.capabilities.webhook, true);
+  assert.equal(youtube.policy.capabilities.polling, true);
+  assert.equal(youtube.policy.capabilities.credentials, true);
 });
 
 test("codeClip provider policy builds verifier request for test provider", () => {

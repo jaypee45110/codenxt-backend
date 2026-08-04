@@ -21,11 +21,22 @@ const RECEIVED_AT = "2026-07-07T00:00:00.000Z";
 
 const PROVIDER_FIXTURES = {
   meta: {
+    // B12+ normalizer requires explicit Meta object / messaging shape (not a simplified body).
     body: {
-      messageId: "meta-message-1",
-      text: "CLIP",
-      recipient: { id: "meta-account-1" },
-      sender: { id: "meta-sender-1" },
+      object: "page",
+      entry: [
+        {
+          id: "meta-account-1",
+          messaging: [
+            {
+              sender: { id: "meta-sender-1" },
+              recipient: { id: "meta-account-1" },
+              timestamp: 1719907200000,
+              message: { mid: "meta-message-1", text: "CLIP" },
+            },
+          ],
+        },
+      ],
     },
     adapterInput: {
       eventCode: "CC-META",
