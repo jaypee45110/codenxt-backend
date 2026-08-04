@@ -41,9 +41,13 @@ const {
   validateCodeClipProviderCredentialStatusTransition,
 } = require("./provider-credential-validators");
 const {
-  encryptCodeClipProviderCredentialSecret,
   decryptCodeClipProviderCredentialSecret,
 } = require("./provider-credential-crypto");
+const {
+  CodeClipProviderCredentialTokenMutationError,
+  prepareCodeClipProviderCredentialTokenMutation,
+  encryptCodeClipProviderCredentialTokenPair,
+} = require("./provider-credential-token-mutation");
 const {
   CodeClipProviderCredentialAuditError,
   appendCodeClipProviderCredentialAudit,
@@ -516,16 +520,11 @@ function buildStatusLiveState(fromStatus, toStatus, reason, operationNow) {
   );
 }
 
-function decryptToken(envelope, env) {
-  const result = decryptCodeClipProviderCredentialSecret({ envelope, env });
-  if (!result.ok) {
-    throw credentialError(
-      "CREDENTIAL_DECRYPTION_FAILED",
-      "credential decryption failed",
-      { cryptoReason: result.reason }
-    );
+function mapTokenMutationError(error) {
+  if (error instanceof CodeClipProviderCredentialTokenMutationError) {
+    throw credentialError(error.code, error.message, error.details || {});
   }
-  return result.plaintext;
+  throw error;
 }
 
 /** Secret-read decrypt: result-object, never throws for crypto failure. */
@@ -759,60 +758,6 @@ function toSafeCredential(row, { now = new Date() } = {}) {
   };
 }
 
-function encryptToken(plaintext, env) {
-  const result = encryptCodeClipProviderCredentialSecret({ plaintext, env });
-  if (!result.ok) {
-    throw credentialError(
-      "CREDENTIAL_ENCRYPTION_FAILED",
-      "credential encryption failed",
-      { cryptoReason: result.reason }
-    );
-  }
-  return {
-    envelope: result.envelope,
-    keyVersion: result.keyVersion,
-  };
-}
-
-/**
- * Encrypt access and refresh with the same active key version (F1C1 active key).
- * Both calls use the keyring active version; versions must match.
- */
-function encryptCredentialTokenPair({ accessToken, refreshToken, env }) {
-  let accessEnvelope = null;
-  let refreshEnvelope = null;
-  let keyVersion = null;
-
-  if (accessToken) {
-    const encrypted = encryptToken(accessToken, env);
-    accessEnvelope = encrypted.envelope;
-    keyVersion = encrypted.keyVersion;
-  }
-  if (refreshToken) {
-    const encrypted = encryptToken(refreshToken, env);
-    refreshEnvelope = encrypted.envelope;
-    if (keyVersion === null) {
-      keyVersion = encrypted.keyVersion;
-    } else if (encrypted.keyVersion !== keyVersion) {
-      // Invariant: both tokens must use the same active key version.
-      throw credentialError(
-        "CREDENTIAL_ENCRYPTION_FAILED",
-        "credential tokens must share the same encryption key version",
-        { cryptoReason: "KEY_VERSION_MISMATCH" }
-      );
-    }
-  }
-
-  if (keyVersion === null || !Number.isSafeInteger(keyVersion) || keyVersion < 1) {
-    throw credentialError(
-      "CREDENTIAL_ENCRYPTION_FAILED",
-      "credential encryption key version is invalid"
-    );
-  }
-
-  return { accessEnvelope, refreshEnvelope, keyVersion };
-}
-
 function encodeCredentialCursor(credential) {
   if (!credential) return null;
   return Buffer.from(
@@ -973,11 +918,19 @@ async function createCodeClipProviderCredential(
 
   // Encrypt before SQL. Access and refresh use the same active key version (F1C1).
   // Failure here starts no transaction and writes no audit.
-  const { accessEnvelope, refreshEnvelope, keyVersion } = encryptCredentialTokenPair({
-    accessToken,
-    refreshToken,
-    env,
-  });
+  let accessEnvelope;
+  let refreshEnvelope;
+  let keyVersion;
+  try {
+    ({ accessEnvelope, refreshEnvelope, keyVersion } =
+      encryptCodeClipProviderCredentialTokenPair({
+        accessToken,
+        refreshToken,
+        env,
+      }));
+  } catch (error) {
+    mapTokenMutationError(error);
+  }
 
   return withCredentialTransaction(client, async (tx) => {
     let row;
@@ -1262,6 +1215,7 @@ async function updateCodeClipProviderCredentialTokens(
     });
   }
 
+  // Fail-closed presence check before TX (same public contract as pre-extract).
   const accessPresent = hasOwn(patch, "accessToken");
   const refreshPresent = hasOwn(patch, "refreshToken");
   if (!accessPresent && !refreshPresent) {
@@ -1270,90 +1224,6 @@ async function updateCodeClipProviderCredentialTokens(
       "at least one of accessToken or refreshToken is required",
       { fieldName: "accessToken" }
     );
-  }
-
-  // Reject explicit null/empty token clearing (B2A).
-  let nextAccessFromPatch = null;
-  let nextRefreshFromPatch = null;
-  if (accessPresent) {
-    if (patch.accessToken === null || patch.accessToken === "") {
-      throw credentialError("INVALID_CREDENTIAL_INPUT", "accessToken cannot be cleared", {
-        fieldName: "accessToken",
-      });
-    }
-    nextAccessFromPatch = normalizeOptionalTokenString(patch.accessToken, "accessToken");
-    if (!nextAccessFromPatch) {
-      throw credentialError("INVALID_CREDENTIAL_INPUT", "accessToken is invalid", {
-        fieldName: "accessToken",
-      });
-    }
-  }
-  if (refreshPresent) {
-    if (patch.refreshToken === null || patch.refreshToken === "") {
-      throw credentialError("INVALID_CREDENTIAL_INPUT", "refreshToken cannot be cleared", {
-        fieldName: "refreshToken",
-      });
-    }
-    nextRefreshFromPatch = normalizeOptionalTokenString(patch.refreshToken, "refreshToken");
-    if (!nextRefreshFromPatch) {
-      throw credentialError("INVALID_CREDENTIAL_INPUT", "refreshToken is invalid", {
-        fieldName: "refreshToken",
-      });
-    }
-  }
-
-  let nextExpiresAt;
-  let expiresProvided = false;
-  if (hasOwn(patch, "accessTokenExpiresAt") || hasOwn(patch, "access_token_expires_at")) {
-    expiresProvided = true;
-    const raw = hasOwn(patch, "accessTokenExpiresAt")
-      ? patch.accessTokenExpiresAt
-      : patch.access_token_expires_at;
-    nextExpiresAt = normalizeOptionalExpiresAt(raw);
-  }
-
-  let nextTokenType;
-  let tokenTypeProvided = false;
-  if (hasOwn(patch, "tokenType") || hasOwn(patch, "token_type")) {
-    tokenTypeProvided = true;
-    const raw = hasOwn(patch, "tokenType") ? patch.tokenType : patch.token_type;
-    if (raw === null) {
-      nextTokenType = null;
-    } else if (raw === "") {
-      throw credentialError("INVALID_CREDENTIAL_INPUT", "tokenType is invalid", {
-        fieldName: "tokenType",
-      });
-    } else {
-      nextTokenType = normalizeOptionalTokenType(raw);
-    }
-  }
-
-  let nextScopes;
-  let scopesProvided = false;
-  if (hasOwn(patch, "scopes")) {
-    scopesProvided = true;
-    if (patch.scopes === null) {
-      throw credentialError("INVALID_CREDENTIAL_INPUT", "scopes cannot be null", {
-        fieldName: "scopes",
-      });
-    }
-    const scopesResult = normalizeCodeClipProviderCredentialScopes(patch.scopes);
-    mapValidatorFailure(scopesResult);
-    nextScopes = scopesResult.scopes;
-  }
-
-  let nextMetadata;
-  let metadataProvided = false;
-  if (hasOwn(patch, "metadata")) {
-    metadataProvided = true;
-    if (patch.metadata === null) {
-      throw credentialError("INVALID_CREDENTIAL_INPUT", "metadata cannot be null", {
-        fieldName: "metadata",
-      });
-    }
-    const metadataResult = normalizeCodeClipProviderCredentialMetadata(patch.metadata);
-    mapValidatorFailure(metadataResult);
-    nextMetadata = metadataResult.metadata;
   }
 
   return withCredentialTransaction(client, async (tx) => {
@@ -1382,57 +1252,17 @@ async function updateCodeClipProviderCredentialTokens(
 
     const beforeState = dbRowForAudit(current);
 
-    // Build resulting plaintext token set (full re-encrypt with active key).
-    let accessPlaintext = nextAccessFromPatch;
-    let refreshPlaintext = nextRefreshFromPatch;
-
-    if (!accessPresent) {
-      if (current.has_access_token && current.access_token_envelope) {
-        accessPlaintext = decryptToken(current.access_token_envelope, env);
-      } else {
-        accessPlaintext = null;
-      }
+    let prepared;
+    try {
+      prepared = prepareCodeClipProviderCredentialTokenMutation({
+        lockedCredential: current,
+        patch,
+        env,
+        requireAccessToken: false,
+      });
+    } catch (error) {
+      mapTokenMutationError(error);
     }
-    if (!refreshPresent) {
-      if (current.has_refresh_token && current.refresh_token_envelope) {
-        refreshPlaintext = decryptToken(current.refresh_token_envelope, env);
-      } else {
-        refreshPlaintext = null;
-      }
-    }
-
-    if (!accessPlaintext && !refreshPlaintext) {
-      throw credentialError(
-        "INVALID_CREDENTIAL_INPUT",
-        "credential must retain at least one token after update"
-      );
-    }
-
-    const { accessEnvelope, refreshEnvelope, keyVersion } = encryptCredentialTokenPair({
-      accessToken: accessPlaintext || undefined,
-      refreshToken: refreshPlaintext || undefined,
-      env,
-    });
-
-    // Drop plaintexts from further use (locals end at function return).
-    accessPlaintext = null;
-    refreshPlaintext = null;
-
-    const expiresAt = expiresProvided
-      ? nextExpiresAt
-      : current.access_token_expires_at ?? null;
-    const tokenType = tokenTypeProvided ? nextTokenType : current.token_type ?? null;
-    const scopes = scopesProvided ? nextScopes : current.scopes || [];
-    const metadata = metadataProvided
-      ? nextMetadata
-      : current.metadata && typeof current.metadata === "object"
-        ? current.metadata
-        : {};
-
-    const nextStatus =
-      current.status === "reauthorization_required" ? "active" : current.status;
-    const nextReauthReason =
-      current.status === "reauthorization_required" ? null : current.reauthorization_reason;
 
     const updated = await tx.query(
       `
@@ -1458,17 +1288,17 @@ async function updateCodeClipProviderCredentialTokens(
       `,
       [
         normalizedId,
-        accessEnvelope,
-        refreshEnvelope,
-        Boolean(accessEnvelope),
-        Boolean(refreshEnvelope),
-        keyVersion,
-        expiresAt,
-        tokenType,
-        scopes,
-        JSON.stringify(metadata),
-        nextStatus,
-        nextReauthReason,
+        prepared.accessTokenEnvelope,
+        prepared.refreshTokenEnvelope,
+        prepared.hasAccessToken,
+        prepared.hasRefreshToken,
+        prepared.encryptionKeyVersion,
+        prepared.accessTokenExpiresAt,
+        prepared.tokenType,
+        prepared.scopes,
+        JSON.stringify(prepared.metadata),
+        prepared.nextStatus,
+        prepared.nextReauthorizationReason,
         operationNow,
         CODECLIP_VERTICAL,
       ]
