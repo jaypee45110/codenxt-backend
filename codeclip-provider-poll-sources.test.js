@@ -1070,6 +1070,9 @@ test("claim uses FOR UPDATE under transaction", async () => {
     },
   ];
   const pool = {
+    async query() {
+      throw new Error("pool query should not be used by transaction owner path");
+    },
     async connect() {
       return {
         async query(sql, params = []) {
@@ -1114,6 +1117,209 @@ test("claim uses FOR UPDATE under transaction", async () => {
   assert.equal(poolCalls.some((c) => /^\s*BEGIN\s*$/i.test(c.sql.trim())), true);
   assert.equal(poolCalls.some((c) => /FOR UPDATE/i.test(c.sql)), true);
   assert.equal(poolCalls.some((c) => /^\s*COMMIT\s*$/i.test(c.sql.trim())), true);
+});
+
+test("poll source pool-owned transaction commits, rolls back, and releases", async () => {
+  const successClient = createPollStoreClient();
+  let successConnects = 0;
+  let successReleases = 0;
+  const successPool = {
+    async query() {
+      throw new Error("pool query should not be used by transaction owner path");
+    },
+    async connect() {
+      successConnects += 1;
+      return {
+        query: successClient.query.bind(successClient),
+        release() {
+          successReleases += 1;
+        },
+      };
+    },
+  };
+
+  const created = await createCodeClipProviderPollSource(
+    {
+      provider: "youtube",
+      environment: "sandbox",
+      providerAccountId: "UC_pool_owned_success",
+      pollIntervalMs: POLL_INTERVAL_MS,
+    },
+    { queryClient: successPool, now: OPERATION_NOW }
+  );
+  assert.equal(created.status, "created");
+  assert.equal(successConnects, 1);
+  assert.equal(successReleases, 1);
+  assert.equal(
+    successClient.calls.some((c) => /^\s*BEGIN\s*$/i.test(c.sql.trim())),
+    true
+  );
+  assert.equal(
+    successClient.calls.some((c) => /^\s*COMMIT\s*$/i.test(c.sql.trim())),
+    true
+  );
+  assert.equal(
+    successClient.calls.some((c) => /^\s*ROLLBACK\s*$/i.test(c.sql.trim())),
+    false
+  );
+
+  const failureClient = createPollStoreClient({ uniqueOnInsert: true });
+  let failureConnects = 0;
+  let failureReleases = 0;
+  const failurePool = {
+    async query() {
+      throw new Error("pool query should not be used by transaction owner path");
+    },
+    async connect() {
+      failureConnects += 1;
+      return {
+        query: failureClient.query.bind(failureClient),
+        release() {
+          failureReleases += 1;
+        },
+      };
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      createCodeClipProviderPollSource(
+        {
+          provider: "youtube",
+          environment: "sandbox",
+          providerAccountId: "UC_pool_owned_failure",
+          pollIntervalMs: POLL_INTERVAL_MS,
+        },
+        { queryClient: failurePool, now: OPERATION_NOW }
+      ),
+    (error) => {
+      assertPollError(error, "POLL_SOURCE_ALREADY_EXISTS");
+      return true;
+    }
+  );
+  assert.equal(failureConnects, 1);
+  assert.equal(failureReleases, 1);
+  assert.equal(
+    failureClient.calls.some((c) => /^\s*BEGIN\s*$/i.test(c.sql.trim())),
+    true
+  );
+  assert.equal(
+    failureClient.calls.some((c) => /^\s*COMMIT\s*$/i.test(c.sql.trim())),
+    false
+  );
+  assert.equal(
+    failureClient.calls.some((c) => /^\s*ROLLBACK\s*$/i.test(c.sql.trim())),
+    true
+  );
+});
+
+test("caller-owned PoolClient-like poll source client is not nested or released", async () => {
+  const client = createPollStoreClient();
+  let connectCalls = 0;
+  let releaseCalls = 0;
+  client.connect = async () => {
+    connectCalls += 1;
+    throw new Error("nested connect must not be called");
+  };
+  client.release = () => {
+    releaseCalls += 1;
+  };
+
+  const created = await createCodeClipProviderPollSource(
+    {
+      provider: "youtube",
+      environment: "sandbox",
+      providerAccountId: "UC_pool_client_like",
+      pollIntervalMs: POLL_INTERVAL_MS,
+    },
+    { queryClient: client, now: OPERATION_NOW }
+  );
+
+  assert.equal(created.status, "created");
+  assert.equal(connectCalls, 0);
+  assert.equal(releaseCalls, 0);
+  assert.equal(
+    client.calls.some((c) => /^\s*BEGIN\s*$/i.test(c.sql.trim())),
+    false
+  );
+  assert.equal(
+    client.calls.some((c) => /^\s*COMMIT\s*$/i.test(c.sql.trim())),
+    false
+  );
+  assert.equal(
+    client.calls.some((c) => /^\s*ROLLBACK\s*$/i.test(c.sql.trim())),
+    false
+  );
+
+  const failingClient = createPollStoreClient({ uniqueOnInsert: true });
+  let failingConnectCalls = 0;
+  let failingReleaseCalls = 0;
+  failingClient.connect = async () => {
+    failingConnectCalls += 1;
+    throw new Error("nested connect must not be called");
+  };
+  failingClient.release = () => {
+    failingReleaseCalls += 1;
+  };
+
+  await assert.rejects(
+    () =>
+      createCodeClipProviderPollSource(
+        {
+          provider: "youtube",
+          environment: "sandbox",
+          providerAccountId: "UC_pool_client_like_failure",
+          pollIntervalMs: POLL_INTERVAL_MS,
+        },
+        { queryClient: failingClient, now: OPERATION_NOW }
+      ),
+    (error) => {
+      assertPollError(error, "POLL_SOURCE_ALREADY_EXISTS");
+      return true;
+    }
+  );
+  assert.equal(failingConnectCalls, 0);
+  assert.equal(failingReleaseCalls, 0);
+  assert.equal(
+    failingClient.calls.some((c) => /^\s*ROLLBACK\s*$/i.test(c.sql.trim())),
+    false
+  );
+});
+
+test("query-only poll source client remains caller-owned and invalid shapes fail closed", async () => {
+  const client = createPollStoreClient();
+  const created = await createCodeClipProviderPollSource(
+    {
+      provider: "youtube",
+      environment: "sandbox",
+      providerAccountId: "UC_query_only_client",
+      pollIntervalMs: POLL_INTERVAL_MS,
+    },
+    { queryClient: client, now: OPERATION_NOW }
+  );
+  assert.equal(created.status, "created");
+  assert.equal(
+    client.calls.some((c) => /^\s*BEGIN\s*$/i.test(c.sql.trim())),
+    false
+  );
+
+  await assert.rejects(
+    () =>
+      createCodeClipProviderPollSource(
+        {
+          provider: "youtube",
+          environment: "sandbox",
+          providerAccountId: "UC_invalid_shape",
+          pollIntervalMs: POLL_INTERVAL_MS,
+        },
+        { queryClient: { connect: async () => ({ query: async () => ({ rows: [] }) }) } }
+      ),
+    (error) => {
+      assertPollError(error, "DATABASE_UNAVAILABLE");
+      assert.deepEqual(error.details, {});
+      return true;
+    }
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1682,12 +1888,18 @@ test("codeClip poll source claim is single-winner in PostgreSQL", async (t) => {
         next_poll_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         last_polled_at TIMESTAMPTZ,
         checkpoint JSONB NOT NULL DEFAULT '{}'::jsonb,
-        poll_claim_owner TEXT,
-        poll_claimed_at TIMESTAMPTZ,
-        poll_claim_expires_at TIMESTAMPTZ,
-        poll_claim_version BIGINT NOT NULL DEFAULT 0,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	        poll_claim_owner TEXT,
+	        poll_claimed_at TIMESTAMPTZ,
+	        poll_claim_expires_at TIMESTAMPTZ,
+	        poll_claim_version BIGINT NOT NULL DEFAULT 0,
+	        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+	        last_error_code TEXT,
+	        last_success_at TIMESTAMPTZ,
+	        last_detection_at TIMESTAMPTZ,
+	        last_attempt_duration_ms INTEGER,
+	        last_detections_count INTEGER,
+	        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         disabled_at TIMESTAMPTZ,
         CHECK (vertical = 'codeclip'),
         CHECK (environment IN ('sandbox', 'production')),
@@ -1752,6 +1964,7 @@ test("codeClip poll source claim is single-winner in PostgreSQL", async (t) => {
 
     function asOwnedPool(client) {
       return {
+        query: client.query.bind(client),
         async connect() {
           return {
             query: client.query.bind(client),
@@ -1877,12 +2090,18 @@ test("codeClip poll source complete/release fence after reclaim in PostgreSQL", 
         next_poll_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         last_polled_at TIMESTAMPTZ,
         checkpoint JSONB NOT NULL DEFAULT '{}'::jsonb,
-        poll_claim_owner TEXT,
-        poll_claimed_at TIMESTAMPTZ,
-        poll_claim_expires_at TIMESTAMPTZ,
-        poll_claim_version BIGINT NOT NULL DEFAULT 0,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	        poll_claim_owner TEXT,
+	        poll_claimed_at TIMESTAMPTZ,
+	        poll_claim_expires_at TIMESTAMPTZ,
+	        poll_claim_version BIGINT NOT NULL DEFAULT 0,
+	        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+	        last_error_code TEXT,
+	        last_success_at TIMESTAMPTZ,
+	        last_detection_at TIMESTAMPTZ,
+	        last_attempt_duration_ms INTEGER,
+	        last_detections_count INTEGER,
+	        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         disabled_at TIMESTAMPTZ,
         CHECK (vertical = 'codeclip'),
         CHECK (poll_interval_ms >= 30000 AND poll_interval_ms <= 86400000),
@@ -1928,6 +2147,7 @@ test("codeClip poll source complete/release fence after reclaim in PostgreSQL", 
 
     function asOwnedPool(client) {
       return {
+        query: client.query.bind(client),
         async connect() {
           return {
             query: client.query.bind(client),
@@ -1953,12 +2173,13 @@ test("codeClip poll source complete/release fence after reclaim in PostgreSQL", 
     assert.equal(firstClaim.claimVersion, 1);
 
     // Expire lease so worker.b can reclaim with a higher version.
-    await pool.query(
-      `
-        UPDATE ${schema}.codeclip_provider_poll_sources
-        SET poll_claim_expires_at = '2026-08-04T15:59:00.000Z'
-        WHERE id = $1
-      `,
+	    await pool.query(
+	      `
+	        UPDATE ${schema}.codeclip_provider_poll_sources
+	        SET poll_claimed_at = '2026-08-04T15:58:00.000Z',
+	            poll_claim_expires_at = '2026-08-04T15:59:00.000Z'
+	        WHERE id = $1
+	      `,
       [pollSourceId]
     );
 

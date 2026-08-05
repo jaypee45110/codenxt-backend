@@ -3138,6 +3138,7 @@ async function ensureCodeClipProviderCredentialAuditTable(queryClient = pool) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       CHECK (vertical = 'codeclip'),
       CHECK (environment IN ('sandbox', 'production')),
+      CONSTRAINT codeclip_provider_credential_audit_action_check
       CHECK (action IN (
         'created',
         'token_updated',
@@ -3161,30 +3162,42 @@ async function ensureCodeClipProviderCredentialAuditTable(queryClient = pool) {
   await queryClient.query(`
     DO $$
     DECLARE
-      constraint_name TEXT;
-      definition TEXT;
+      action_constraint RECORD;
+      named_definition TEXT;
     BEGIN
-      SELECT c.conname, pg_get_constraintdef(c.oid)
-        INTO constraint_name, definition
-      FROM pg_constraint c
-      WHERE c.conrelid = 'codeclip_provider_credential_audit'::regclass
-        AND c.contype = 'c'
-        AND pg_get_constraintdef(c.oid) ILIKE '%action%IN%'
-      ORDER BY c.conname
-      LIMIT 1;
-
-      IF definition IS NULL
-         OR definition NOT ILIKE '%refresh_claimed%'
-         OR definition NOT ILIKE '%refresh_succeeded%'
-         OR definition NOT ILIKE '%refresh_failed%'
-         OR definition NOT ILIKE '%refresh_released%'
-      THEN
-        IF definition IS NOT NULL THEN
+      FOR action_constraint IN
+        SELECT c.conname, pg_get_constraintdef(c.oid) AS definition
+        FROM pg_constraint c
+        WHERE c.conrelid = 'codeclip_provider_credential_audit'::regclass
+          AND c.contype = 'c'
+          AND pg_get_constraintdef(c.oid) ILIKE '%action%'
+        ORDER BY c.conname
+      LOOP
+        IF action_constraint.conname = 'codeclip_provider_credential_audit_action_check' THEN
+          named_definition := action_constraint.definition;
+        ELSE
           EXECUTE format(
             'ALTER TABLE codeclip_provider_credential_audit DROP CONSTRAINT IF EXISTS %I',
-            constraint_name
+            action_constraint.conname
           );
         END IF;
+      END LOOP;
+
+      IF named_definition IS NULL
+         OR named_definition NOT ILIKE '%created%'
+         OR named_definition NOT ILIKE '%token_updated%'
+         OR named_definition NOT ILIKE '%reauthorization_required%'
+         OR named_definition NOT ILIKE '%revoked%'
+         OR named_definition NOT ILIKE '%disabled%'
+         OR named_definition NOT ILIKE '%reactivated%'
+         OR named_definition NOT ILIKE '%refresh_claimed%'
+         OR named_definition NOT ILIKE '%refresh_succeeded%'
+         OR named_definition NOT ILIKE '%refresh_failed%'
+         OR named_definition NOT ILIKE '%refresh_released%'
+      THEN
+        ALTER TABLE codeclip_provider_credential_audit
+        DROP CONSTRAINT IF EXISTS codeclip_provider_credential_audit_action_check;
+
         ALTER TABLE codeclip_provider_credential_audit
         ADD CONSTRAINT codeclip_provider_credential_audit_action_check
         CHECK (action IN (

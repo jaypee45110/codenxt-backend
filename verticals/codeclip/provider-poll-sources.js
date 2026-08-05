@@ -117,6 +117,28 @@ function requireQueryClient(queryClient) {
   return queryClient;
 }
 
+function hasQueryMethod(value) {
+  return Boolean(value && typeof value.query === "function");
+}
+
+function isCallerOwnedQueryClient(value) {
+  if (!hasQueryMethod(value)) return false;
+  // pg PoolClient exposes query(), release(), and a connect() method inherited
+  // from Client. release() is the stable lifecycle signal that the caller owns
+  // an already acquired connection.
+  if (typeof value.release === "function") return true;
+  return typeof value.connect !== "function";
+}
+
+function isPoolLikeQueryClient(value) {
+  return Boolean(
+    value &&
+      typeof value.connect === "function" &&
+      hasQueryMethod(value) &&
+      typeof value.release !== "function"
+  );
+}
+
 /**
  * Alternativ B transaction ownership (same contract as credential mutations).
  * Pool owns BEGIN/COMMIT/ROLLBACK; explicit query client is caller-owned.
@@ -129,7 +151,11 @@ async function withPollSourceTransaction(queryClient, work) {
     );
   }
 
-  if (typeof queryClient.connect === "function") {
+  if (isCallerOwnedQueryClient(queryClient)) {
+    return work(queryClient);
+  }
+
+  if (isPoolLikeQueryClient(queryClient)) {
     let client = null;
     try {
       client = await queryClient.connect();
@@ -168,13 +194,10 @@ async function withPollSourceTransaction(queryClient, work) {
     }
   }
 
-  if (typeof queryClient.query !== "function") {
-    throw pollSourceError(
-      "DATABASE_UNAVAILABLE",
-      "codeClip provider poll source repository requires an explicit query client"
-    );
-  }
-  return work(queryClient);
+  throw pollSourceError(
+    "DATABASE_UNAVAILABLE",
+    "codeClip provider poll source repository requires an explicit query client"
+  );
 }
 
 function hasActivePollClaim(row, operationNowMs) {

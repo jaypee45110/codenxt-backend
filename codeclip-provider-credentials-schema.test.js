@@ -1,7 +1,71 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 
 const database = require("./db");
+
+const PG_TEST_ENV = "CODECLIP_PROVIDER_POLL_SOURCES_CONCURRENCY_TEST_DATABASE_URL";
+const LOCAL_PG_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+function localPgConnectionString(t) {
+  const connectionString = process.env[PG_TEST_ENV];
+  if (!connectionString) {
+    t.skip(`${PG_TEST_ENV} is not configured`);
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    t.skip(`${PG_TEST_ENV} is invalid`);
+    return null;
+  }
+  if (!LOCAL_PG_HOSTS.has(parsed.hostname) && parsed.hostname !== "[::1]") {
+    t.skip(`${PG_TEST_ENV} must point to localhost PostgreSQL`);
+    return null;
+  }
+  return connectionString;
+}
+
+function schemaName() {
+  return `codeclip_credential_schema_${process.pid}_${Date.now()}_${crypto
+    .randomBytes(3)
+    .toString("hex")}`;
+}
+
+function quoteIdent(value) {
+  if (!/^[a-z][a-z0-9_]{0,62}$/.test(value)) {
+    throw new Error("invalid schema identifier");
+  }
+  return `"${value}"`;
+}
+
+function makeScopedPool(basePool, schema) {
+  async function prepare(client) {
+    await client.query(`SET search_path TO ${quoteIdent(schema)}`);
+    return client;
+  }
+  return {
+    async connect() {
+      const client = await basePool.connect();
+      try {
+        await prepare(client);
+      } catch (error) {
+        client.release();
+        throw error;
+      }
+      return client;
+    },
+    async query(sql, params = []) {
+      const client = await this.connect();
+      try {
+        return await client.query(sql, params);
+      } finally {
+        client.release();
+      }
+    },
+  };
+}
 
 function createRecordingClient() {
   const calls = [];
@@ -189,6 +253,10 @@ test("codeClip provider credential audit schema defines FK restrict and action e
   assert.match(auditSql, /CHECK \(environment IN \('sandbox', 'production'\)\)/);
   assert.match(
     auditSql,
+    /CONSTRAINT codeclip_provider_credential_audit_action_check\s+CHECK \(action IN \(\s*'created',\s*'token_updated',\s*'reauthorization_required',\s*'revoked',\s*'disabled',\s*'reactivated',\s*'refresh_claimed',\s*'refresh_succeeded',\s*'refresh_failed',\s*'refresh_released'\s*\)\)/
+  );
+  assert.match(
+    auditSql,
     /CHECK \(action IN \(\s*'created',\s*'token_updated',\s*'reauthorization_required',\s*'revoked',\s*'disabled',\s*'reactivated',\s*'refresh_claimed',\s*'refresh_succeeded',\s*'refresh_failed',\s*'refresh_released'\s*\)\)/
   );
   assert.match(
@@ -223,6 +291,127 @@ test("codeClip provider credential audit schema defines FK restrict and action e
 
   assert.match(sqlJoined, /codeclip_provider_credential_audit_credential_created_idx/);
   assert.match(sqlJoined, /codeclip_provider_credential_audit_provider_env_created_idx/);
+});
+
+test("codeClip provider credential audit action check is idempotent on local PostgreSQL", async (t) => {
+  const connectionString = localPgConnectionString(t);
+  if (!connectionString) return;
+
+  const { Pool } = require("pg");
+  const pool = new Pool({ connectionString });
+  const schema = schemaName();
+  const scopedPool = makeScopedPool(pool, schema);
+  const actions = [
+    "created",
+    "token_updated",
+    "reauthorization_required",
+    "revoked",
+    "disabled",
+    "reactivated",
+    "refresh_claimed",
+    "refresh_succeeded",
+    "refresh_failed",
+    "refresh_released",
+  ];
+
+  try {
+    await pool.query(`CREATE SCHEMA ${quoteIdent(schema)}`);
+
+    await database.ensureCodeClipProviderCredentialAuditTable(scopedPool);
+    await database.ensureCodeClipProviderCredentialAuditTable(scopedPool);
+
+    const constraints = await scopedPool.query(`
+      SELECT c.conname, pg_get_constraintdef(c.oid) AS definition
+      FROM pg_constraint c
+      WHERE c.conrelid = 'codeclip_provider_credential_audit'::regclass
+        AND c.contype = 'c'
+        AND pg_get_constraintdef(c.oid) ILIKE '%action%'
+      ORDER BY c.conname
+    `);
+
+    assert.equal(constraints.rows.length, 1);
+    assert.equal(
+      constraints.rows[0].conname,
+      "codeclip_provider_credential_audit_action_check"
+    );
+    for (const action of actions) {
+      assert.match(constraints.rows[0].definition, new RegExp(action));
+    }
+
+    const credential = await scopedPool.query(
+      `
+        INSERT INTO codeclip_provider_credentials (
+          vertical,
+          provider,
+          environment,
+          account_lookup_key,
+          provider_account_id,
+          status,
+          encryption_key_version,
+          has_access_token,
+          has_refresh_token,
+          metadata
+        )
+        VALUES (
+          'codeclip',
+          'tiktok',
+          'sandbox',
+          'credential-schema-account',
+          'credential-schema-account',
+          'active',
+          1,
+          FALSE,
+          FALSE,
+          '{}'::jsonb
+        )
+        RETURNING id
+      `
+    );
+    const credentialId = credential.rows[0].id;
+
+    for (const action of actions) {
+      await scopedPool.query(
+        `
+          INSERT INTO codeclip_provider_credential_audit (
+            credential_id,
+            vertical,
+            provider,
+            environment,
+            action,
+            actor_type,
+            metadata
+          )
+          VALUES ($1, 'codeclip', 'tiktok', 'sandbox', $2, 'system', '{}'::jsonb)
+        `,
+        [credentialId, action]
+      );
+    }
+
+    await assert.rejects(
+      scopedPool.query(
+        `
+          INSERT INTO codeclip_provider_credential_audit (
+            credential_id,
+            vertical,
+            provider,
+            environment,
+            action,
+            actor_type,
+            metadata
+          )
+          VALUES ($1, 'codeclip', 'tiktok', 'sandbox', 'unknown_action', 'system', '{}'::jsonb)
+        `,
+        [credentialId]
+      ),
+      (error) => error && error.code === "23514"
+    );
+  } finally {
+    try {
+      await pool.query(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`);
+    } finally {
+      await pool.end();
+    }
+  }
 });
 
 test("codeClip provider credentials ensure is no-op without query client and ignores encryption env", async () => {
