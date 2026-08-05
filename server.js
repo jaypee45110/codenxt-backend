@@ -7337,6 +7337,142 @@ app.get(
   }
 );
 
+function mapCodeClipTikTokOAuthHttpStatus(code) {
+  if (
+    [
+      "INVALID_CALLBACK",
+      "AUTHORIZATION_CANCELLED",
+      "OAUTH_STATE_NOT_FOUND",
+      "OAUTH_STATE_EXPIRED",
+      "OAUTH_STATE_CONTENTION",
+      "OAUTH_STATE_STALE",
+      "TOKEN_EXCHANGE_FAILED",
+      "INVALID_TOKEN_RESPONSE",
+      "TIKTOK_CONFIG_NOT_AVAILABLE",
+    ].includes(code)
+  ) {
+    return 400;
+  }
+  if (code === "BINDING_CONFLICT" || code === "CREDENTIAL_CONFLICT") return 409;
+  if (
+    code === "CREDENTIAL_DISABLED" ||
+    code === "CREDENTIAL_REVOKED" ||
+    code === "PERSISTENCE_FAILED"
+  ) {
+    return 409;
+  }
+  if (code === "DATABASE_UNAVAILABLE" || code === "DATABASE_ERROR") return 503;
+  return 503;
+}
+
+function sendCodeClipTikTokOAuthError(res, error) {
+  const {
+    CodeClipTikTokOAuthConnectionError,
+  } = require("./verticals/codeclip/tiktok/oauth-connection");
+  // Domain functions throw typed connection errors only; never leak internals.
+  const code =
+    error instanceof CodeClipTikTokOAuthConnectionError && error.code
+      ? error.code
+      : "PERSISTENCE_FAILED";
+  return res
+    .status(mapCodeClipTikTokOAuthHttpStatus(code))
+    .set("Cache-Control", "no-store")
+    .json({
+      ok: false,
+      error: { code },
+    });
+}
+
+// TikTok OAuth start (operator). No TikTok HTTP; durable state + authorize URL only.
+app.post(
+  "/api/codeclip/providers/tiktok/oauth/start",
+  requireCodeClipAdmin,
+  async (req, res) => {
+    const {
+      startCodeClipTikTokOAuthConnection,
+    } = require("./verticals/codeclip/tiktok/oauth-connection");
+
+    try {
+      const result = await startCodeClipTikTokOAuthConnection(
+        {
+          eventCode: req.body?.eventCode,
+          environment: req.body?.environment,
+          returnUrl: req.body?.returnUrl,
+          requestedScopes: req.body?.requestedScopes,
+          // Admin-key auth has no operator identity; domain defaults to system actor.
+          disableAutoAuth: req.body?.disableAutoAuth,
+        },
+        {
+          queryClient: database.pool,
+          env: process.env,
+          getEventByCode: getCampaignByCode,
+        }
+      );
+      return res.set("Cache-Control", "no-store").json({
+        ok: true,
+        authorizationUrl: result.authorizationUrl,
+        expiresAt: result.expiresAt,
+      });
+    } catch (error) {
+      console.warn("codeClip TikTok OAuth start failed", {
+        vertical: "codeclip",
+        provider: "tiktok",
+        route: "/api/codeclip/providers/tiktok/oauth/start",
+        operationalEvent: "tiktok_oauth_start_failed",
+        error: error?.name || "Error",
+      });
+      return sendCodeClipTikTokOAuthError(res, error);
+    }
+  }
+);
+
+// TikTok OAuth callback (public). Security is durable OAuth state + claim fence.
+app.get("/api/codeclip/providers/tiktok/oauth/callback", async (req, res) => {
+  const {
+    completeCodeClipTikTokOAuthConnection,
+  } = require("./verticals/codeclip/tiktok/oauth-connection");
+
+  try {
+    const result = await completeCodeClipTikTokOAuthConnection(
+      {
+        code: req.query?.code,
+        state: req.query?.state,
+        error: req.query?.error,
+        error_description: req.query?.error_description,
+        scopes: req.query?.scopes,
+        requestId: req.headers?.["x-request-id"],
+      },
+      {
+        queryClient: database.pool,
+        env: process.env,
+        getEventByCode: getCampaignByCode,
+      }
+    );
+
+    if (result?.redirectUrl) {
+      return res
+        .status(302)
+        .set("Cache-Control", "no-store")
+        .set("Location", result.redirectUrl)
+        .end();
+    }
+
+    return res
+      .status(400)
+      .set("Cache-Control", "no-store")
+      .json({ ok: false, error: { code: "AUTHORIZATION_FAILED" } });
+  } catch (error) {
+    console.warn("codeClip TikTok OAuth callback failed", {
+      vertical: "codeclip",
+      provider: "tiktok",
+      route: "/api/codeclip/providers/tiktok/oauth/callback",
+      operationalEvent: "tiktok_oauth_callback_failed",
+      error: error?.name || "Error",
+    });
+    return sendCodeClipTikTokOAuthError(res, error);
+  }
+});
+
 function isExplicitTrue(value) {
   return String(value || "").trim().toLowerCase() === "true";
 }
