@@ -275,7 +275,8 @@ const PROVIDER_POLICIES = {
       responseTtlSeconds: 86400,
     },
   },
-  // TikTok: poll_only credentials provider. Detection/grace deferred until poll adapter.
+  // TikTok Display API polling uses a codeNXT initial grace policy.
+  // TikTok does not document a guaranteed public-video publishing delay.
   tiktok: {
     provider: "tiktok",
     routeEnabled: false,
@@ -295,6 +296,20 @@ const PROVIDER_POLICIES = {
       claimTtlSeconds: 300,
       responseTtlSeconds: 86400,
       requireStoreForLiveProvider: true,
+    },
+    detection: {
+      defaultSource: "display_api_polling",
+      sources: {
+        display_api_polling: {
+          deliverySource: "provider_polling",
+        },
+      },
+    },
+    grace: {
+      defaultMs: 120000,
+      minMs: 60000,
+      maxMs: 3600000,
+      sourceOverrides: {},
     },
   },
 };

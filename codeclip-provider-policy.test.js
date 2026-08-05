@@ -231,8 +231,8 @@ test("codeClip provider policy exposes providerClass and registry capabilities f
   assert.equal(tiktok.policy.capabilities.webhook, false);
   assert.equal(tiktok.policy.capabilities.polling, true);
   assert.equal(tiktok.policy.capabilities.credentials, true);
-  assert.equal(tiktok.policy.detection, null);
-  assert.equal(tiktok.policy.grace, null);
+  assert.deepEqual(tiktok.policy.detection, TIKTOK_DETECTION);
+  assert.deepEqual(tiktok.policy.grace, TIKTOK_GRACE);
 });
 
 test("codeClip provider policy builds verifier request for test provider", () => {
@@ -423,6 +423,20 @@ const YOUTUBE_GRACE = {
   sourceOverrides: {},
 };
 
+const TIKTOK_DETECTION = {
+  defaultSource: "display_api_polling",
+  sources: {
+    display_api_polling: { deliverySource: "provider_polling" },
+  },
+};
+
+const TIKTOK_GRACE = {
+  defaultMs: 120000,
+  minMs: 60000,
+  maxMs: 3600000,
+  sourceOverrides: {},
+};
+
 test("codeClip provider policy resolves default youtube detection source", () => {
   assert.deepEqual(resolveCodeClipProviderDetectionSource("youtube"), {
     ok: true,
@@ -501,18 +515,46 @@ test("codeClip provider policy push-only providers return detection and grace no
   }
 });
 
-test("codeClip provider policy tiktok has no detection/grace/provider_polling mapping yet", () => {
+test("codeClip provider policy tiktok maps Display API polling to provider_polling", () => {
+  const policy = resolveCodeClipProviderPolicy("tiktok");
+  assert.equal(policy.ok, true);
+  assert.equal(policy.policy.providerClass, "poll_only");
+  assert.equal(policy.policy.capabilities.webhook, false);
+  assert.equal(policy.policy.capabilities.polling, true);
+  assert.equal(policy.policy.capabilities.credentials, true);
+  assert.deepEqual(policy.policy.detection, TIKTOK_DETECTION);
+  assert.deepEqual(policy.policy.grace, TIKTOK_GRACE);
+
   assert.deepEqual(resolveCodeClipProviderDetectionSource("tiktok"), {
-    ok: false,
-    reason: "DETECTION_NOT_SUPPORTED",
+    ok: true,
+    detectionSource: "display_api_polling",
   });
-  assert.deepEqual(resolveCodeClipProviderGrace({ provider: "tiktok" }), {
-    ok: false,
-    reason: "GRACE_NOT_SUPPORTED",
+  assert.deepEqual(resolveCodeClipProviderDetectionSource("tiktok", " DISPLAY_API_POLLING "), {
+    ok: true,
+    detectionSource: "display_api_polling",
   });
   assert.deepEqual(
-    mapCodeClipProviderDetectionSourceToDeliverySource("tiktok", "poll"),
-    { ok: false, reason: "DETECTION_NOT_SUPPORTED" }
+    mapCodeClipProviderDetectionSourceToDeliverySource("tiktok", "display_api_polling"),
+    { ok: true, deliverySource: "provider_polling" }
+  );
+  assert.deepEqual(resolveCodeClipProviderGrace({ provider: "tiktok" }), {
+    ok: true,
+    graceMs: 120000,
+  });
+  assert.deepEqual(
+    resolveCodeClipProviderGrace({
+      provider: "tiktok",
+      detectionSource: "display_api_polling",
+    }),
+    { ok: true, graceMs: 120000 }
+  );
+  assert.deepEqual(
+    resolveCodeClipProviderDetectionSource("tiktok", "data_api_polling"),
+    { ok: false, reason: "UNSUPPORTED_DETECTION_SOURCE" }
+  );
+  assert.deepEqual(
+    mapCodeClipProviderDetectionSourceToDeliverySource("tiktok", "atom_reconciliation"),
+    { ok: false, reason: "UNSUPPORTED_DETECTION_SOURCE" }
   );
 });
 
@@ -582,7 +624,7 @@ test("codeClip provider policy default detection source is in allowlist and maps
 });
 
 test("codeClip provider policy detection only appears with polling capability", () => {
-  for (const name of ["meta", "sms", "test", "youtube"]) {
+  for (const name of ["meta", "sms", "test", "youtube", "tiktok"]) {
     const result = resolveCodeClipProviderPolicy(name);
     assert.equal(result.ok, true);
     if (result.policy.capabilities.polling === true) {
@@ -665,6 +707,14 @@ test("codeClip provider policy F1B keeps F1A providerClass and capabilities unch
   assert.equal(youtube.policy.capabilities.credentials, true);
   assert.deepEqual(youtube.policy.detection, YOUTUBE_DETECTION);
   assert.deepEqual(youtube.policy.grace, YOUTUBE_GRACE);
+
+  const tiktok = resolveCodeClipProviderPolicy("tiktok");
+  assert.equal(tiktok.policy.providerClass, "poll_only");
+  assert.equal(tiktok.policy.capabilities.webhook, false);
+  assert.equal(tiktok.policy.capabilities.polling, true);
+  assert.equal(tiktok.policy.capabilities.credentials, true);
+  assert.deepEqual(tiktok.policy.detection, TIKTOK_DETECTION);
+  assert.deepEqual(tiktok.policy.grace, TIKTOK_GRACE);
 });
 
 test("codeClip provider policy existing resolve API remains backward compatible", () => {
