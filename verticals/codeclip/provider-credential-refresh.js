@@ -775,6 +775,7 @@ async function completeCodeClipProviderCredentialRefresh(
     accessTokenExpiresAt,
     tokenType,
     scopes,
+    metadata,
     actor,
     reason = "refresh_succeeded",
     now,
@@ -793,13 +794,25 @@ async function completeCodeClipProviderCredentialRefresh(
   const mutationReason = requireReasonCode(reason, "refresh_succeeded");
   const injectedNow = normalizeInjectedNow(now);
 
-  const patch = { accessToken };
-  if (refreshToken !== undefined) patch.refreshToken = refreshToken;
-  if (accessTokenExpiresAt !== undefined) {
-    patch.accessTokenExpiresAt = accessTokenExpiresAt;
+  if (metadata !== undefined) {
+    if (
+      metadata === null ||
+      typeof metadata !== "object" ||
+      Array.isArray(metadata)
+    ) {
+      throw refreshError("INVALID_CREDENTIAL_INPUT", "metadata is invalid", {
+        fieldName: "metadata",
+      });
+    }
   }
-  if (tokenType !== undefined) patch.tokenType = tokenType;
-  if (scopes !== undefined) patch.scopes = scopes;
+
+  const basePatch = { accessToken };
+  if (refreshToken !== undefined) basePatch.refreshToken = refreshToken;
+  if (accessTokenExpiresAt !== undefined) {
+    basePatch.accessTokenExpiresAt = accessTokenExpiresAt;
+  }
+  if (tokenType !== undefined) basePatch.tokenType = tokenType;
+  if (scopes !== undefined) basePatch.scopes = scopes;
 
   const outcome = await withRefreshTransaction(client, async (tx) => {
     const { operationNowIso, operationNowMs } = await resolveOperationNow(
@@ -864,6 +877,18 @@ async function completeCodeClipProviderCredentialRefresh(
     }
 
     assertActiveClaimOwnership(current, normalizedOwner, operationNowMs);
+
+    // Optional metadata: shallow-merge onto locked current row (omit = preserve).
+    const patch = { ...basePatch };
+    if (metadata !== undefined) {
+      const currentMeta =
+        current.metadata &&
+        typeof current.metadata === "object" &&
+        !Array.isArray(current.metadata)
+          ? JSON.parse(JSON.stringify(current.metadata))
+          : {};
+      patch.metadata = { ...currentMeta, ...metadata };
+    }
 
     let prepared;
     try {

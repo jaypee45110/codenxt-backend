@@ -322,6 +322,7 @@ function createCredentialStoreClient(options = {}) {
                 provider: row.provider,
                 environment: row.environment,
                 status: row.status,
+                provider_account_id: row.provider_account_id,
                 has_access_token: row.has_access_token,
                 access_token_expires_at: row.access_token_expires_at,
                 has_refresh_token: row.has_refresh_token,
@@ -1432,6 +1433,8 @@ test("codeClip credentials secret-read refresh returns refresh only", async () =
   assert.equal(active.credential.status, "active");
   assert.equal(active.credential.hasAccessToken, true);
   assert.equal(active.credential.expired, true);
+  assert.equal(active.credential.providerAccountId, "page-secret-refresh");
+  assert.equal(Object.hasOwn(active.credential, "maskedAccountId"), false);
 
   client.rows[0].status = "reauthorization_required";
   const reauth = await getCodeClipProviderCredentialSecretsForUse(

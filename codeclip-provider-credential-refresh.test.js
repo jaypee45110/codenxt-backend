@@ -1168,6 +1168,61 @@ test("codeClip credential refresh complete recovers reauthorization_required", a
   assert.equal(refresh.plaintext, "fresh-refresh");
 });
 
+test("codeClip credential refresh complete merges optional metadata", async () => {
+  const client = createRefreshStoreClient();
+  const env = seedClaimed(client, {
+    id: 210,
+    row: { metadata: { priorKey: "keep-me", refreshTokenExpiresAt: "old" } },
+  });
+  const result = await completeCodeClipProviderCredentialRefresh(
+    {
+      credentialId: 210,
+      owner: "worker.a",
+      accessToken: "new-access-token",
+      refreshToken: "new-refresh-token",
+      metadata: {
+        refreshTokenExpiresAt: "2026-08-06T12:00:00.000Z",
+      },
+      actor: SYSTEM_ACTOR,
+      now: OPERATION_NOW,
+    },
+    { queryClient: client, env }
+  );
+  assert.equal(result.status, "completed");
+  assert.equal(result.credential.metadata.priorKey, "keep-me");
+  assert.equal(
+    result.credential.metadata.refreshTokenExpiresAt,
+    "2026-08-06T12:00:00.000Z"
+  );
+  assert.equal(client.rows[0].metadata.priorKey, "keep-me");
+  assert.equal(
+    client.rows[0].metadata.refreshTokenExpiresAt,
+    "2026-08-06T12:00:00.000Z"
+  );
+  assert.equal(JSON.stringify(result).includes("new-access-token"), false);
+  assert.equal(JSON.stringify(result).includes("new-refresh-token"), false);
+});
+
+test("codeClip credential refresh complete omits metadata to preserve existing", async () => {
+  const client = createRefreshStoreClient();
+  const env = seedClaimed(client, {
+    id: 211,
+    row: { metadata: { keep: true } },
+  });
+  const result = await completeCodeClipProviderCredentialRefresh(
+    {
+      credentialId: 211,
+      owner: "worker.a",
+      accessToken: "new-access-token",
+      actor: SYSTEM_ACTOR,
+      now: OPERATION_NOW,
+    },
+    { queryClient: client, env }
+  );
+  assert.deepEqual(result.credential.metadata, { keep: true });
+  assert.deepEqual(client.rows[0].metadata, { keep: true });
+});
+
 test("codeClip credential refresh complete rejects missing/mismatch/stale claim", async () => {
   const client = createRefreshStoreClient();
   const env = makeCryptoEnv();

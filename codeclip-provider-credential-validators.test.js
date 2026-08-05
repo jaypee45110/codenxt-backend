@@ -108,9 +108,10 @@ test("codeClip credential account ref normalizes lookup key as account id", () =
 });
 
 test("codeClip credential account ref rejects unknown provider and bad account ids", () => {
+  // tiktok is a registered credentials-capable provider (F2A1); use a non-provider.
   assert.deepEqual(
     normalizeCodeClipProviderCredentialAccountRef({
-      provider: "tiktok",
+      provider: "not-a-registered-provider",
       providerAccountId: "x",
       environment: "sandbox",
     }),

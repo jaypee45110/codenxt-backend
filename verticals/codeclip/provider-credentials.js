@@ -105,12 +105,13 @@ const SECRET_PROVIDER_API_COLUMNS = `
   access_token_envelope
 `.replace(/\s+/g, " ").trim();
 
-/** Secret-read: refresh — refresh envelope only. */
+/** Secret-read: refresh — refresh envelope + authoritative account identity. */
 const SECRET_REFRESH_COLUMNS = `
   id,
   provider,
   environment,
   status,
+  provider_account_id,
   has_access_token,
   access_token_expires_at,
   has_refresh_token,
@@ -1579,6 +1580,16 @@ async function getCodeClipProviderCredentialSecretsForUse(
       return secretReadFailure(decrypted.reason);
     }
 
+    // providerAccountId is authoritative identity for refresh verification
+    // (memory-only; never part of operator serialization).
+    const providerAccountId =
+      row.provider_account_id !== undefined && row.provider_account_id !== null
+        ? String(row.provider_account_id)
+        : null;
+    if (!providerAccountId) {
+      return secretReadFailure("CREDENTIAL_NOT_USABLE");
+    }
+
     return {
       ok: true,
       purpose: "refresh",
@@ -1588,6 +1599,7 @@ async function getCodeClipProviderCredentialSecretsForUse(
         provider: row.provider,
         environment: row.environment,
         status: row.status,
+        providerAccountId,
         hasAccessToken: Boolean(row.has_access_token),
         accessTokenExpiresAt: expiresAt,
         expired,
