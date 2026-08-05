@@ -177,6 +177,15 @@ async function withPollSourceTransaction(queryClient, work) {
   return work(queryClient);
 }
 
+function hasActivePollClaim(row, operationNowMs) {
+  if (!row || operationNowMs === null) return false;
+  if (row.poll_claim_owner == null || String(row.poll_claim_owner).trim() === "") {
+    return false;
+  }
+  const expiresMs = parseTimestampMs(row.poll_claim_expires_at);
+  return expiresMs !== null && expiresMs > operationNowMs;
+}
+
 function normalizePositiveBigIntId(value, fieldName = "id") {
   let normalized;
   if (typeof value === "string") {
@@ -778,7 +787,7 @@ async function createCodeClipProviderPollSource(
   );
 
   return withPollSourceTransaction(client, async (tx) => {
-    const { operationNowIso } = await resolveOperationNow(tx, injectedNow);
+    const { operationNowIso, operationNowMs } = await resolveOperationNow(tx, injectedNow);
     const nextPollAt = nextPollAtOverride || operationNowIso;
 
     let result;
@@ -881,6 +890,54 @@ async function getCodeClipProviderPollSourceById(
   const row = result.rows?.[0] || null;
   if (!row) return null;
   return toPublicPollSource(row);
+}
+
+async function findCodeClipProviderPollSource(
+  { provider, providerAccountId, environment } = {},
+  { queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  const accountRef = normalizeCodeClipProviderCredentialAccountRef({
+    provider,
+    providerAccountId,
+    environment,
+  });
+  if (!accountRef.ok) {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      "provider account reference is invalid",
+      {
+        fieldName:
+          accountRef.reason === "INVALID_PROVIDER"
+            ? "provider"
+            : accountRef.reason === "INVALID_ENVIRONMENT"
+              ? "environment"
+              : "providerAccountId",
+        reason: accountRef.reason || null,
+      }
+    );
+  }
+
+  assertPollingCapableProvider(accountRef.provider);
+
+  const result = await client.query(
+    `
+      SELECT ${SAFE_SELECT_COLUMNS}
+      FROM codeclip_provider_poll_sources
+      WHERE vertical = $1
+        AND provider = $2
+        AND environment = $3
+        AND account_lookup_key = $4
+      LIMIT 1
+    `,
+    [
+      CODECLIP_VERTICAL,
+      accountRef.provider,
+      accountRef.environment,
+      accountRef.accountLookupKey,
+    ]
+  );
+  return toPublicPollSource(result.rows?.[0] || null);
 }
 
 /**
@@ -1405,6 +1462,101 @@ async function completeCodeClipProviderPollSourceClaim(
   });
 }
 
+async function reactivateCodeClipProviderPollSource(
+  {
+    pollSourceId,
+    id,
+    nextPollAt,
+    next_poll_at,
+    now,
+  } = {},
+  { queryClient } = {}
+) {
+  const client = requireQueryClient(queryClient);
+  const normalizedId = normalizePositiveBigIntId(
+    pollSourceId ?? id,
+    "pollSourceId"
+  );
+  const injectedNow = normalizeInjectedNow(now);
+  const nextPollAtInput =
+    nextPollAt !== undefined ? nextPollAt : next_poll_at;
+  const resolvedNextPollAt = normalizeOptionalTimestamp(
+    nextPollAtInput,
+    "nextPollAt"
+  );
+  if (!resolvedNextPollAt) {
+    throw pollSourceError(
+      "INVALID_POLL_SOURCE_INPUT",
+      "nextPollAt is required",
+      { fieldName: "nextPollAt" }
+    );
+  }
+
+  return withPollSourceTransaction(client, async (tx) => {
+    const { operationNowIso, operationNowMs } = await resolveOperationNow(tx, injectedNow);
+
+    const locked = await tx.query(
+      `
+        SELECT ${SAFE_SELECT_COLUMNS}
+        FROM codeclip_provider_poll_sources
+        WHERE id = $1
+          AND vertical = $2
+        FOR UPDATE
+      `,
+      [normalizedId, CODECLIP_VERTICAL]
+    );
+    const current = locked.rows?.[0] || null;
+    if (!current) {
+      throw pollSourceError("POLL_SOURCE_NOT_FOUND", "poll source was not found");
+    }
+    if (current.status !== "paused") {
+      throw pollSourceError(
+        "POLL_SOURCE_NOT_REACTIVATABLE",
+        "poll source is not paused",
+        { status: current.status || "unknown" }
+      );
+    }
+    if (hasActivePollClaim(current, operationNowMs)) {
+      throw pollSourceError(
+        "POLL_SOURCE_NOT_REACTIVATABLE",
+        "poll source has an active claim",
+        { status: current.status || "unknown" }
+      );
+    }
+
+    const updated = await tx.query(
+      `
+        UPDATE codeclip_provider_poll_sources
+        SET
+          status = 'active',
+          next_poll_at = $2::timestamptz,
+          last_error_code = NULL,
+          poll_claim_owner = NULL,
+          poll_claimed_at = NULL,
+          poll_claim_expires_at = NULL,
+          updated_at = $3::timestamptz
+        WHERE id = $1
+          AND vertical = $4
+          AND status = 'paused'
+          AND (
+            poll_claim_expires_at IS NULL
+            OR poll_claim_expires_at <= $3::timestamptz
+          )
+        RETURNING ${SAFE_SELECT_COLUMNS}
+      `,
+      [normalizedId, resolvedNextPollAt, operationNowIso, CODECLIP_VERTICAL]
+    );
+    const row = updated.rows?.[0] || null;
+    if (!row) {
+      throw pollSourceError("POLL_SOURCE_RACE", "poll source reactivation raced");
+    }
+    return {
+      status: "reactivated",
+      pollSource: toPublicPollSource(row),
+    };
+  });
+}
+
 /**
  * Release a fenced claim. Optionally apply failure scheduling/observability
  * in the same guarded UPDATE (F1D2B). Checkpoint is never advanced.
@@ -1633,8 +1785,10 @@ module.exports = {
   CodeClipProviderPollSourceError,
   createCodeClipProviderPollSource,
   getCodeClipProviderPollSourceById,
+  findCodeClipProviderPollSource,
   listDueCodeClipProviderPollSources,
   claimCodeClipProviderPollSource,
   completeCodeClipProviderPollSourceClaim,
+  reactivateCodeClipProviderPollSource,
   releaseCodeClipProviderPollSourceClaim,
 };

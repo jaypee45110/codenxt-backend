@@ -5,9 +5,11 @@ const {
   CodeClipProviderPollSourceError,
   createCodeClipProviderPollSource,
   getCodeClipProviderPollSourceById,
+  findCodeClipProviderPollSource,
   listDueCodeClipProviderPollSources,
   claimCodeClipProviderPollSource,
   completeCodeClipProviderPollSourceClaim,
+  reactivateCodeClipProviderPollSource,
   releaseCodeClipProviderPollSourceClaim,
 } = require("./verticals/codeclip/provider-poll-sources");
 
@@ -25,9 +27,11 @@ const PUBLIC_EXPORTS = Object.freeze([
   "CodeClipProviderPollSourceError",
   "createCodeClipProviderPollSource",
   "getCodeClipProviderPollSourceById",
+  "findCodeClipProviderPollSource",
   "listDueCodeClipProviderPollSources",
   "claimCodeClipProviderPollSource",
   "completeCodeClipProviderPollSourceClaim",
+  "reactivateCodeClipProviderPollSource",
   "releaseCodeClipProviderPollSourceClaim",
 ]);
 
@@ -175,6 +179,21 @@ function createPollStoreClient(options = {}) {
       if (
         /^\s*SELECT\b/i.test(sql) &&
         /FROM codeclip_provider_poll_sources/.test(sql) &&
+        /account_lookup_key = \$4/.test(sql)
+      ) {
+        const row = rows.find(
+          (r) =>
+            r.vertical === params[0] &&
+            r.provider === params[1] &&
+            r.environment === params[2] &&
+            r.account_lookup_key === params[3]
+        );
+        return { rows: row ? [{ ...row }] : [] };
+      }
+
+      if (
+        /^\s*SELECT\b/i.test(sql) &&
+        /FROM codeclip_provider_poll_sources/.test(sql) &&
         /next_poll_at <=/.test(sql)
       ) {
         const operationNow = params[1];
@@ -247,6 +266,26 @@ function createPollStoreClient(options = {}) {
               },
             ],
           };
+        }
+
+        // Reactivation path: paused -> active, explicit next_poll_at, clear error/claim.
+        if (/status = 'active'/.test(sql) && /AND status = 'paused'/.test(sql)) {
+          if (row.status !== "paused") return { rows: [] };
+          if (
+            row.poll_claim_owner &&
+            row.poll_claim_expires_at &&
+            Date.parse(row.poll_claim_expires_at) > Date.parse(params[2])
+          ) {
+            return { rows: [] };
+          }
+          row.status = "active";
+          row.next_poll_at = params[1];
+          row.last_error_code = null;
+          row.poll_claim_owner = null;
+          row.poll_claimed_at = null;
+          row.poll_claim_expires_at = null;
+          row.updated_at = params[2];
+          return { rows: [{ ...row }] };
         }
 
         // Complete path: checkpoint + next_poll + claim clear (+ observability)
@@ -458,6 +497,137 @@ test("create poll source succeeds for polling-capable provider", async () => {
   const insert = client.calls.find((c) => /INSERT INTO codeclip_provider_poll_sources/.test(c.sql));
   assert.ok(insert);
   assert.equal(insert.params[5], POLL_INTERVAL_MS);
+});
+
+test("find poll source by provider identity returns safe row or null", async () => {
+  const client = createPollStoreClient();
+  client.seed({
+    id: 31,
+    provider: "tiktok",
+    environment: "sandbox",
+    account_lookup_key: "tiktok-account-31",
+    provider_account_id: "tiktok-account-31",
+    checkpoint: { initialized: true },
+  });
+
+  const found = await findCodeClipProviderPollSource(
+    {
+      provider: "tiktok",
+      environment: "sandbox",
+      providerAccountId: "tiktok-account-31",
+    },
+    { queryClient: client }
+  );
+  assert.equal(found.id, "31");
+  assert.equal(found.provider, "tiktok");
+  assert.deepEqual(found.checkpoint, { initialized: true });
+
+  const missing = await findCodeClipProviderPollSource(
+    {
+      provider: "tiktok",
+      environment: "production",
+      providerAccountId: "tiktok-account-31",
+    },
+    { queryClient: client }
+  );
+  assert.equal(missing, null);
+});
+
+test("reactivate paused poll source preserves checkpoint and clears error/claim", async () => {
+  const client = createPollStoreClient();
+  client.seed({
+    id: 32,
+    provider: "tiktok",
+    environment: "sandbox",
+    account_lookup_key: "tiktok-account-32",
+    provider_account_id: "tiktok-account-32",
+    status: "paused",
+    next_poll_at: null,
+    checkpoint: {
+      initialized: true,
+      highWaterPublishedAt: "2026-08-04T11:00:00.000Z",
+      highWaterVideoId: "vid-old",
+    },
+    poll_claim_owner: "old.worker",
+    poll_claimed_at: "2026-08-04T11:00:00.000Z",
+    poll_claim_expires_at: "2026-08-04T11:01:00.000Z",
+    last_error_code: "reauthorization_required",
+    consecutive_failures: 4,
+  });
+
+  const result = await reactivateCodeClipProviderPollSource(
+    {
+      pollSourceId: 32,
+      nextPollAt: OPERATION_NOW,
+      now: OPERATION_NOW,
+    },
+    { queryClient: client }
+  );
+
+  assert.equal(result.status, "reactivated");
+  assert.equal(result.pollSource.status, "active");
+  assert.equal(result.pollSource.nextPollAt, OPERATION_NOW);
+  assert.equal(result.pollSource.lastErrorCode, null);
+  assert.equal(result.pollSource.pollClaimOwner, null);
+  assert.equal(result.pollSource.consecutiveFailures, 4);
+  assert.deepEqual(result.pollSource.checkpoint, {
+    initialized: true,
+    highWaterPublishedAt: "2026-08-04T11:00:00.000Z",
+    highWaterVideoId: "vid-old",
+  });
+});
+
+test("reactivate rejects non-paused sources and races fail closed", async () => {
+  const client = createPollStoreClient();
+  client.seed({ id: 33, status: "active" });
+  await assert.rejects(
+    () =>
+      reactivateCodeClipProviderPollSource(
+        { pollSourceId: 33, nextPollAt: OPERATION_NOW, now: OPERATION_NOW },
+        { queryClient: client }
+      ),
+    (error) => {
+      assertPollError(error, "POLL_SOURCE_NOT_REACTIVATABLE");
+      assert.equal(error.details.status, "active");
+      return true;
+    }
+  );
+
+  const raced = createPollStoreClient({ forceUpdateRace: true });
+  raced.seed({ id: 34, status: "paused" });
+  await assert.rejects(
+    () =>
+      reactivateCodeClipProviderPollSource(
+        { pollSourceId: 34, nextPollAt: OPERATION_NOW, now: OPERATION_NOW },
+        { queryClient: raced }
+      ),
+    (error) => {
+      assertPollError(error, "POLL_SOURCE_RACE");
+      return true;
+    }
+  );
+
+  const claimed = createPollStoreClient();
+  claimed.seed({
+    id: 35,
+    status: "paused",
+    poll_claim_owner: "worker.active",
+    poll_claimed_at: OPERATION_NOW,
+    poll_claim_expires_at: EXPECTED_EXPIRES,
+  });
+
+  await assert.rejects(
+    () =>
+      reactivateCodeClipProviderPollSource(
+        { pollSourceId: 35, nextPollAt: OPERATION_NOW, now: OPERATION_NOW },
+        { queryClient: claimed }
+      ),
+    (error) => {
+      assertPollError(error, "POLL_SOURCE_NOT_REACTIVATABLE");
+      assert.equal(error.details.status, "paused");
+      return true;
+    }
+  );
 });
 
 test("create poll source rejects push-only providers via registry gate", async () => {
