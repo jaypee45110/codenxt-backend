@@ -6,6 +6,7 @@ const path = require("node:path");
 const {
   CodeClipTikTokOAuthClientError,
   exchangeCodeClipTikTokAuthorizationCode,
+  refreshCodeClipTikTokAccessToken,
 } = require("./verticals/codeclip/tiktok/oauth-client");
 
 const TOKEN_ENDPOINT = "https://open.tiktokapis.com/v2/oauth/token/";
@@ -15,6 +16,8 @@ const NOW = "2026-08-05T12:00:00.000Z";
 const AUTH_CODE = "tt-auth-code-secret-value-do-not-leak";
 const CLIENT_KEY = "tt_client_key_test_value";
 const CLIENT_SECRET = "tt_client_secret_test_value_never_expose";
+const INPUT_REFRESH = "input-refresh-token-secret-do-not-leak";
+const ROTATED_REFRESH = "rotated-refresh-token-secret-do-not-leak";
 
 function envBase(extra = {}) {
   return {
@@ -85,6 +88,9 @@ function assertNoLeakage(error, extras = []) {
     CLIENT_SECRET,
     "access-token-value-xyz",
     "refresh-token-value-xyz",
+    INPUT_REFRESH,
+    ROTATED_REFRESH,
+    "OpenId_CaseSensitive_123",
     "error_description",
     "log_id",
     "raw body should not appear",
@@ -105,6 +111,7 @@ test("public API is minimal", () => {
   assert.deepEqual(Object.keys(mod).sort(), [
     "CodeClipTikTokOAuthClientError",
     "exchangeCodeClipTikTokAuthorizationCode",
+    "refreshCodeClipTikTokAccessToken",
   ]);
 });
 
@@ -675,4 +682,357 @@ test("content-type application/json; charset=utf-8 is accepted", async () => {
     }
   );
   assert.equal(result.tokenType, "Bearer");
+});
+
+// ---------------------------------------------------------------------------
+// F2B1: refreshCodeClipTikTokAccessToken
+// ---------------------------------------------------------------------------
+
+test("refresh succeeds without redirect URI in config or request", async () => {
+  const { fetchImpl, calls } = captureFetch(async () =>
+    jsonResponse(
+      validTokenBody({
+        refresh_token: ROTATED_REFRESH,
+        open_id: "OpenId_CaseSensitive_123",
+        extra_field: "ignored",
+      })
+    )
+  );
+
+  const result = await refreshCodeClipTikTokAccessToken(
+    { refreshToken: INPUT_REFRESH, now: NOW },
+    {
+      env: {
+        CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+        CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+        // no CODECLIP_TIKTOK_REDIRECT_URI
+      },
+      fetchImpl,
+    }
+  );
+
+  assert.equal(result.openId, "OpenId_CaseSensitive_123");
+  assert.equal(result.accessToken, "access-token-value-xyz");
+  assert.equal(result.refreshToken, ROTATED_REFRESH);
+  assert.equal(result.tokenType, "Bearer");
+  assert.deepEqual(result.scopes, ["user.info.basic"]);
+  assert.equal(result.expiresIn, 3600);
+  assert.equal(result.refreshExpiresIn, 86400);
+  assert.equal(result.accessTokenExpiresAt, "2026-08-05T13:00:00.000Z");
+  assert.equal(result.refreshTokenExpiresAt, "2026-08-06T12:00:00.000Z");
+  assert.equal(Object.hasOwn(result, "extra_field"), false);
+  assert.equal(Object.hasOwn(result, "raw"), false);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, TOKEN_ENDPOINT);
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.redirect, "manual");
+  assert.equal(
+    calls[0].init.headers["Content-Type"],
+    "application/x-www-form-urlencoded"
+  );
+  assert.equal(calls[0].init.headers.Accept, "application/json");
+  assert.ok(!String(calls[0].url).includes("?"));
+
+  const params = new URLSearchParams(calls[0].init.body);
+  assert.equal(params.get("client_key"), CLIENT_KEY);
+  assert.equal(params.get("client_secret"), CLIENT_SECRET);
+  assert.equal(params.get("grant_type"), "refresh_token");
+  assert.equal(params.get("refresh_token"), INPUT_REFRESH);
+  assert.equal(params.get("redirect_uri"), null);
+  assert.equal(params.get("code"), null);
+  assert.equal(
+    [...params.keys()].sort().join(","),
+    ["client_key", "client_secret", "grant_type", "refresh_token"].sort().join(",")
+  );
+});
+
+test("refresh returns same refresh token explicitly when not rotated", async () => {
+  const result = await refreshCodeClipTikTokAccessToken(
+    { refreshToken: INPUT_REFRESH, now: NOW },
+    {
+      env: {
+        CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+        CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+      },
+      fetchImpl: async () =>
+        jsonResponse(validTokenBody({ refresh_token: INPUT_REFRESH })),
+    }
+  );
+  assert.equal(result.refreshToken, INPUT_REFRESH);
+});
+
+test("refresh missing client key fails closed", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, now: NOW },
+        {
+          env: { CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET },
+          fetchImpl: async () => {
+            throw new Error("should not fetch");
+          },
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_CONFIG_NOT_AVAILABLE");
+      assertNoLeakage(error);
+      return true;
+    }
+  );
+});
+
+test("refresh missing client secret fails closed", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, now: NOW },
+        {
+          env: { CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY },
+          fetchImpl: async () => {
+            throw new Error("should not fetch");
+          },
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_CONFIG_NOT_AVAILABLE");
+      assertNoLeakage(error);
+      return true;
+    }
+  );
+});
+
+test("refresh token required", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: "   ", now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+          },
+          fetchImpl: async () => {
+            throw new Error("should not fetch");
+          },
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "REFRESH_TOKEN_REQUIRED");
+      assertNoLeakage(error);
+      return true;
+    }
+  );
+});
+
+test("refresh missing response refresh_token fails without falling back to input", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+          },
+          fetchImpl: async () =>
+            jsonResponse(validTokenBody({ refresh_token: "" })),
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "INVALID_TIKTOK_REFRESH_RESPONSE");
+      assertNoLeakage(error);
+      return true;
+    }
+  );
+});
+
+test("refresh invalid_grant maps to reauthorization required", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+          },
+          fetchImpl: async () =>
+            jsonResponse(
+              {
+                error: "invalid_grant",
+                error_description: "Refresh token is expired or revoked",
+                log_id: "log-refresh-1",
+              },
+              { status: 400 }
+            ),
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_REAUTHORIZATION_REQUIRED");
+      assertNoLeakage(error, [
+        "Refresh token is expired or revoked",
+        "log-refresh-1",
+      ]);
+      return true;
+    }
+  );
+});
+
+test("refresh 429 maps to rate limited", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+          },
+          fetchImpl: async () =>
+            jsonResponse(
+              { error: "rate_limit_exceeded", error_description: "slow" },
+              { status: 429 }
+            ),
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_RATE_LIMITED");
+      assertNoLeakage(error, ["slow"]);
+      return true;
+    }
+  );
+});
+
+test("refresh 500 maps to service unavailable", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+          },
+          fetchImpl: async () =>
+            jsonResponse(
+              { error: "server_error", error_description: "oops" },
+              { status: 500 }
+            ),
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_SERVICE_UNAVAILABLE");
+      assertNoLeakage(error, ["oops"]);
+      return true;
+    }
+  );
+});
+
+test("refresh timeout maps to refresh failed", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+          },
+          timeoutMs: 1000,
+          fetchImpl: async (_url, init) =>
+            new Promise((_resolve, reject) => {
+              init.signal.addEventListener("abort", () => {
+                const err = new Error("The operation was aborted");
+                err.name = "AbortError";
+                reject(err);
+              });
+            }),
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_REFRESH_FAILED");
+      assert.match(String(error.message), /timed out/i);
+      assertNoLeakage(error);
+      return true;
+    }
+  );
+});
+
+test("refresh wrong content type fails with refresh invalid response", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+          },
+          fetchImpl: async () =>
+            jsonResponse(null, {
+              status: 200,
+              headers: { "content-type": "text/html" },
+              asText: "<html>raw body should not appear</html>",
+            }),
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "INVALID_TIKTOK_REFRESH_RESPONSE");
+      assertNoLeakage(error);
+      return true;
+    }
+  );
+});
+
+test("refresh missing user.info.basic fails closed", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+          },
+          fetchImpl: async () =>
+            jsonResponse(validTokenBody({ scope: "video.list" })),
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "INVALID_TIKTOK_REFRESH_RESPONSE");
+      assertNoLeakage(error);
+      return true;
+    }
+  );
+});
+
+test("code exchange still requires redirect URI; refresh does not use it", async () => {
+  await assert.rejects(
+    () =>
+      exchangeCodeClipTikTokAuthorizationCode(
+        { code: AUTH_CODE, redirectUri: REDIRECT, now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+            // missing redirect
+          },
+          fetchImpl: async () => jsonResponse(validTokenBody()),
+        }
+      ),
+    (error) => error.code === "TIKTOK_CONFIG_NOT_AVAILABLE"
+  );
+
+  const refreshed = await refreshCodeClipTikTokAccessToken(
+    { refreshToken: INPUT_REFRESH, now: NOW },
+    {
+      env: {
+        CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+        CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+      },
+      fetchImpl: async () => jsonResponse(validTokenBody()),
+    }
+  );
+  assert.equal(refreshed.tokenType, "Bearer");
 });

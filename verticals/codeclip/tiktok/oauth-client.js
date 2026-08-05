@@ -1,8 +1,11 @@
 /**
- * TikTok OAuth token exchange client (F2A2A).
+ * TikTok OAuth token HTTP client (F2A2A + F2B1).
  *
- * Isolated HTTP client for authorization-code → token exchange.
- * No routes, credentials persistence, bindings, refresh, or DB.
+ * Isolated HTTP client for:
+ * - authorization-code → token exchange
+ * - refresh_token → token refresh
+ *
+ * No routes, credentials persistence, bindings, orchestrator, or DB.
  */
 
 const TOKEN_ENDPOINT = "https://open.tiktokapis.com/v2/oauth/token/";
@@ -171,6 +174,21 @@ function loadTokenExchangeConfig(env = process.env) {
   return { clientKey, clientSecret, redirectUri };
 }
 
+/** Refresh needs client key/secret only — not redirect URI. */
+function loadTokenRefreshConfig(env = process.env) {
+  const clientKey = readRequiredEnvString(
+    env,
+    "CODECLIP_TIKTOK_CLIENT_KEY",
+    CLIENT_KEY_MAX
+  );
+  const clientSecret = readRequiredEnvString(
+    env,
+    "CODECLIP_TIKTOK_CLIENT_SECRET",
+    CLIENT_SECRET_MAX
+  );
+  return { clientKey, clientSecret };
+}
+
 function normalizeAuthorizationCode(code) {
   if (typeof code !== "string") {
     throw clientError(
@@ -185,6 +203,25 @@ function normalizeAuthorizationCode(code) {
       "AUTHORIZATION_CODE_REQUIRED",
       "authorization code is required",
       { fieldName: "code" }
+    );
+  }
+  return trimmed;
+}
+
+function normalizeRefreshTokenInput(refreshToken) {
+  if (typeof refreshToken !== "string") {
+    throw clientError(
+      "REFRESH_TOKEN_REQUIRED",
+      "refresh token is required",
+      { fieldName: "refreshToken" }
+    );
+  }
+  const trimmed = refreshToken.trim();
+  if (!trimmed || trimmed.length > TOKEN_MAX) {
+    throw clientError(
+      "REFRESH_TOKEN_REQUIRED",
+      "refresh token is required",
+      { fieldName: "refreshToken" }
     );
   }
   return trimmed;
@@ -226,15 +263,16 @@ function isJsonContentType(contentType) {
   return mediaType === "application/json";
 }
 
-async function readBoundedText(response, maxBytes) {
+async function readBoundedText(
+  response,
+  maxBytes,
+  invalidCode = "INVALID_TIKTOK_RESPONSE"
+) {
   const contentLengthHeader = getHeader(response?.headers, "content-length");
   if (contentLengthHeader != null && contentLengthHeader !== "") {
     const contentLength = Number(contentLengthHeader);
     if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-      throw clientError(
-        "INVALID_TIKTOK_RESPONSE",
-        "TikTok token response exceeds size limit"
-      );
+      throw clientError(invalidCode, "TikTok token response exceeds size limit");
     }
   }
 
@@ -255,7 +293,7 @@ async function readBoundedText(response, maxBytes) {
             // ignore cancel failure
           }
           throw clientError(
-            "INVALID_TIKTOK_RESPONSE",
+            invalidCode,
             "TikTok token response exceeds size limit"
           );
         }
@@ -274,57 +312,36 @@ async function readBoundedText(response, maxBytes) {
   }
 
   if (typeof response?.text !== "function") {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response body is unavailable"
-    );
+    throw clientError(invalidCode, "TikTok token response body is unavailable");
   }
 
   let text;
   try {
     text = await response.text();
   } catch {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response body is unreadable"
-    );
+    throw clientError(invalidCode, "TikTok token response body is unreadable");
   }
   if (typeof text !== "string") {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response body is unreadable"
-    );
+    throw clientError(invalidCode, "TikTok token response body is unreadable");
   }
   if (Buffer.byteLength(text, "utf8") > maxBytes) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response exceeds size limit"
-    );
+    throw clientError(invalidCode, "TikTok token response exceeds size limit");
   }
   return text;
 }
 
-function parseJsonObject(text) {
+function parseJsonObject(text, invalidCode = "INVALID_TIKTOK_RESPONSE") {
   if (typeof text !== "string" || !text.trim()) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response body is empty"
-    );
+    throw clientError(invalidCode, "TikTok token response body is empty");
   }
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is not valid JSON"
-    );
+    throw clientError(invalidCode, "TikTok token response is not valid JSON");
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is not a JSON object"
-    );
+    throw clientError(invalidCode, "TikTok token response is not a JSON object");
   }
   return parsed;
 }
@@ -351,6 +368,29 @@ function mapTikTokErrorSlug(errorSlug, status) {
   return "TOKEN_EXCHANGE_FAILED";
 }
 
+/** Refresh-path mapping: invalid grants mean reauthorization, not code errors. */
+function mapTikTokRefreshErrorSlug(errorSlug, status) {
+  const slug =
+    typeof errorSlug === "string" ? errorSlug.trim().toLowerCase() : "";
+
+  if (status === 429) return "TIKTOK_RATE_LIMITED";
+  if (status >= 500 && status <= 599) return "TIKTOK_SERVICE_UNAVAILABLE";
+
+  if (
+    slug === "invalid_grant" ||
+    slug === "access_denied" ||
+    slug === "invalid_token" ||
+    slug === "unauthorized_client"
+  ) {
+    return "TIKTOK_REAUTHORIZATION_REQUIRED";
+  }
+  if (slug.includes("expired") || slug.includes("revoked")) {
+    return "TIKTOK_REAUTHORIZATION_REQUIRED";
+  }
+
+  return "TIKTOK_REFRESH_FAILED";
+}
+
 function extractSafeErrorSlug(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const error = body.error;
@@ -369,85 +409,88 @@ function throwForNonSuccess(status, body) {
   });
 }
 
-function requireNonEmptyString(value, fieldName, maxLen) {
+function throwForRefreshNonSuccess(status, body) {
+  const slug = extractSafeErrorSlug(body);
+  const code = mapTikTokRefreshErrorSlug(slug, status);
+  throw clientError(code, "TikTok token refresh failed", {
+    reason: slug || `http_${status || 0}`,
+  });
+}
+
+function requireNonEmptyString(
+  value,
+  fieldName,
+  maxLen,
+  invalidCode = "INVALID_TIKTOK_RESPONSE"
+) {
   if (typeof value !== "string") {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is invalid",
-      { fieldName }
-    );
+    throw clientError(invalidCode, "TikTok token response is invalid", {
+      fieldName,
+    });
   }
   const trimmed = value.trim();
   if (!trimmed || trimmed.length > maxLen) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is invalid",
-      { fieldName }
-    );
+    throw clientError(invalidCode, "TikTok token response is invalid", {
+      fieldName,
+    });
   }
   return trimmed;
 }
 
-function normalizeTokenType(value) {
+function normalizeTokenType(value, invalidCode = "INVALID_TIKTOK_RESPONSE") {
   if (typeof value !== "string" || !value.trim()) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is invalid",
-      { fieldName: "token_type" }
-    );
+    throw clientError(invalidCode, "TikTok token response is invalid", {
+      fieldName: "token_type",
+    });
   }
   if (value.trim().toLowerCase() !== "bearer") {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is invalid",
-      { fieldName: "token_type" }
-    );
+    throw clientError(invalidCode, "TikTok token response is invalid", {
+      fieldName: "token_type",
+    });
   }
   return "Bearer";
 }
 
-function normalizePositiveDurationSeconds(value, fieldName, maxSeconds) {
+function normalizePositiveDurationSeconds(
+  value,
+  fieldName,
+  maxSeconds,
+  invalidCode = "INVALID_TIKTOK_RESPONSE"
+) {
   if (typeof value === "string" && value.trim() !== "") {
     if (!/^[0-9]+$/.test(value.trim())) {
-      throw clientError(
-        "INVALID_TIKTOK_RESPONSE",
-        "TikTok token response is invalid",
-        { fieldName }
-      );
+      throw clientError(invalidCode, "TikTok token response is invalid", {
+        fieldName,
+      });
     }
     value = Number(value.trim());
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is invalid",
-      { fieldName }
-    );
+    throw clientError(invalidCode, "TikTok token response is invalid", {
+      fieldName,
+    });
   }
   if (value < 1 || value > maxSeconds) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is invalid",
-      { fieldName }
-    );
+    throw clientError(invalidCode, "TikTok token response is invalid", {
+      fieldName,
+    });
   }
   return value;
 }
 
-function normalizeGrantedScopes(scopeValue) {
+function normalizeGrantedScopes(
+  scopeValue,
+  invalidCode = "INVALID_TIKTOK_RESPONSE"
+) {
   if (typeof scopeValue !== "string" || !scopeValue.trim()) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is invalid",
-      { fieldName: "scope" }
-    );
+    throw clientError(invalidCode, "TikTok token response is invalid", {
+      fieldName: "scope",
+    });
   }
   if (scopeValue.length > SCOPE_RAW_MAX) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is invalid",
-      { fieldName: "scope" }
-    );
+    throw clientError(invalidCode, "TikTok token response is invalid", {
+      fieldName: "scope",
+    });
   }
   const parts = scopeValue.split(",");
   const seen = new Set();
@@ -457,11 +500,9 @@ function normalizeGrantedScopes(scopeValue) {
     const scope = part.trim();
     if (!scope) continue;
     if (scope.length > SCOPE_ENTRY_MAX) {
-      throw clientError(
-        "INVALID_TIKTOK_RESPONSE",
-        "TikTok token response is invalid",
-        { fieldName: "scope" }
-      );
+      throw clientError(invalidCode, "TikTok token response is invalid", {
+        fieldName: "scope",
+      });
     }
     if (!seen.has(scope)) {
       seen.add(scope);
@@ -470,15 +511,13 @@ function normalizeGrantedScopes(scopeValue) {
   }
   scopes.sort();
   if (scopes.length === 0 || scopes.length > SCOPES_MAX_COUNT) {
-    throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
-      "TikTok token response is invalid",
-      { fieldName: "scope" }
-    );
+    throw clientError(invalidCode, "TikTok token response is invalid", {
+      fieldName: "scope",
+    });
   }
   if (!scopes.includes(REQUIRED_SCOPE)) {
     throw clientError(
-      "INVALID_TIKTOK_RESPONSE",
+      invalidCode,
       "TikTok token response is missing required scope",
       { fieldName: "scope" }
     );
@@ -486,31 +525,44 @@ function normalizeGrantedScopes(scopeValue) {
   return scopes;
 }
 
-function normalizeSuccessTokenPayload(body, nowIso) {
-  const openId = requireNonEmptyString(body.open_id, "open_id", OPEN_ID_MAX);
+function normalizeSuccessTokenPayload(
+  body,
+  nowIso,
+  invalidCode = "INVALID_TIKTOK_RESPONSE"
+) {
+  const openId = requireNonEmptyString(
+    body.open_id,
+    "open_id",
+    OPEN_ID_MAX,
+    invalidCode
+  );
   // Preserve opaque open_id without lowercasing (only outer trim).
   const accessToken = requireNonEmptyString(
     body.access_token,
     "access_token",
-    TOKEN_MAX
+    TOKEN_MAX,
+    invalidCode
   );
   const refreshToken = requireNonEmptyString(
     body.refresh_token,
     "refresh_token",
-    TOKEN_MAX
+    TOKEN_MAX,
+    invalidCode
   );
-  const tokenType = normalizeTokenType(body.token_type);
+  const tokenType = normalizeTokenType(body.token_type, invalidCode);
   const expiresIn = normalizePositiveDurationSeconds(
     body.expires_in,
     "expires_in",
-    MAX_EXPIRES_IN_SECONDS
+    MAX_EXPIRES_IN_SECONDS,
+    invalidCode
   );
   const refreshExpiresIn = normalizePositiveDurationSeconds(
     body.refresh_expires_in,
     "refresh_expires_in",
-    MAX_REFRESH_EXPIRES_IN_SECONDS
+    MAX_REFRESH_EXPIRES_IN_SECONDS,
+    invalidCode
   );
-  const scopes = normalizeGrantedScopes(body.scope);
+  const scopes = normalizeGrantedScopes(body.scope, invalidCode);
 
   const nowMs = Date.parse(nowIso);
   if (!Number.isFinite(nowMs)) {
@@ -658,7 +710,125 @@ async function exchangeCodeClipTikTokAuthorizationCode(
   return normalizeSuccessTokenPayload(parsedBody, operationNowIso);
 }
 
+/**
+ * Refresh TikTok access (and rotated refresh) tokens (memory-only result).
+ * Does not require redirect URI. Does not compare open_id to credentials.
+ */
+async function refreshCodeClipTikTokAccessToken(
+  { refreshToken, now } = {},
+  { env = process.env, fetchImpl = global.fetch, timeoutMs } = {}
+) {
+  const invalidCode = "INVALID_TIKTOK_REFRESH_RESPONSE";
+
+  if (typeof fetchImpl !== "function") {
+    throw clientError(
+      "TIKTOK_REFRESH_FAILED",
+      "TikTok token refresh is unavailable"
+    );
+  }
+
+  const config = loadTokenRefreshConfig(env);
+  const normalizedRefreshToken = normalizeRefreshTokenInput(refreshToken);
+  const operationNowIso = normalizeInjectedNow(now);
+  const effectiveTimeoutMs = normalizeTimeoutMs(timeoutMs);
+
+  const body = new URLSearchParams({
+    client_key: config.clientKey,
+    client_secret: config.clientSecret,
+    grant_type: "refresh_token",
+    refresh_token: normalizedRefreshToken,
+  }).toString();
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    try {
+      controller.abort();
+    } catch {
+      // ignore
+    }
+  }, effectiveTimeoutMs);
+
+  let response;
+  try {
+    response = await fetchImpl(TOKEN_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body,
+      redirect: "manual",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (
+      error?.name === "AbortError" ||
+      error?.code === "ABORT_ERR" ||
+      /aborted|abort/i.test(String(error?.message || ""))
+    ) {
+      throw clientError(
+        "TIKTOK_REFRESH_FAILED",
+        "TikTok token refresh timed out"
+      );
+    }
+    throw clientError(
+      "TIKTOK_REFRESH_FAILED",
+      "TikTok token refresh unavailable"
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response || typeof response !== "object") {
+    throw clientError("TIKTOK_REFRESH_FAILED", "TikTok token refresh failed");
+  }
+
+  const status = Number(response.status || 0);
+  if (status >= 300 && status < 400) {
+    throw clientError("TIKTOK_REFRESH_FAILED", "TikTok token refresh failed", {
+      reason: "unexpected_redirect",
+    });
+  }
+
+  const contentType = getHeader(response.headers, "content-type");
+  if (!isJsonContentType(contentType)) {
+    try {
+      await readBoundedText(response, MAX_BODY_BYTES, invalidCode);
+    } catch (error) {
+      if (error instanceof CodeClipTikTokOAuthClientError) throw error;
+    }
+    throw clientError(
+      invalidCode,
+      "TikTok token response content type is invalid"
+    );
+  }
+
+  const text = await readBoundedText(response, MAX_BODY_BYTES, invalidCode);
+
+  let parsedBody = null;
+  try {
+    parsedBody = parseJsonObject(text, invalidCode);
+  } catch (error) {
+    if (status < 200 || status >= 300) {
+      throw clientError(
+        mapTikTokRefreshErrorSlug(null, status),
+        "TikTok token refresh failed",
+        { reason: `http_${status || 0}` }
+      );
+    }
+    throw error;
+  }
+
+  if (status < 200 || status >= 300) {
+    throwForRefreshNonSuccess(status, parsedBody);
+  }
+
+  // Response refresh_token is required (rotation contract); never fall back to input.
+  return normalizeSuccessTokenPayload(parsedBody, operationNowIso, invalidCode);
+}
+
 module.exports = {
   CodeClipTikTokOAuthClientError,
   exchangeCodeClipTikTokAuthorizationCode,
+  refreshCodeClipTikTokAccessToken,
 };
