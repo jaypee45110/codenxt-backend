@@ -275,6 +275,28 @@ const PROVIDER_POLICIES = {
       responseTtlSeconds: 86400,
     },
   },
+  // TikTok: poll_only credentials provider. Detection/grace deferred until poll adapter.
+  tiktok: {
+    provider: "tiktok",
+    routeEnabled: false,
+    adapter: "tiktok",
+    envelopeType: "tiktok",
+    verificationMode: "disabled",
+    secretEnvName: "",
+    capabilities: buildCapabilities({
+      verificationMode: "disabled",
+      liveProvider: true,
+      providerAccountIdRequired: true,
+      durableDeliveryRequired: true,
+      // Registry overwrites webhook/polling/credentials at resolve time.
+    }),
+    idempotency: {
+      enabled: true,
+      claimTtlSeconds: 300,
+      responseTtlSeconds: 86400,
+      requireStoreForLiveProvider: true,
+    },
+  },
 };
 
 function mapProviderResolveFailure(reason) {

@@ -98,6 +98,7 @@ async function initializeCodeClipStartup({
   await databaseClient.ensureCodeClipYouTubeWebSubSubscriptionsTable();
   await databaseClient.ensureCodeClipYouTubeWebSubDiagnosticProbeTables();
   await databaseClient.ensureCodeClipYouTubeOAuthStatesTable();
+  await databaseClient.ensureCodeClipTikTokOAuthStatesTable();
 }
 
 function parsePositiveInteger(value, fallback) {

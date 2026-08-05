@@ -224,6 +224,15 @@ test("codeClip provider policy exposes providerClass and registry capabilities f
   assert.equal(youtube.policy.capabilities.webhook, true);
   assert.equal(youtube.policy.capabilities.polling, true);
   assert.equal(youtube.policy.capabilities.credentials, true);
+
+  const tiktok = resolveCodeClipProviderPolicy("tiktok");
+  assert.equal(tiktok.ok, true);
+  assert.equal(tiktok.policy.providerClass, "poll_only");
+  assert.equal(tiktok.policy.capabilities.webhook, false);
+  assert.equal(tiktok.policy.capabilities.polling, true);
+  assert.equal(tiktok.policy.capabilities.credentials, true);
+  assert.equal(tiktok.policy.detection, null);
+  assert.equal(tiktok.policy.grace, null);
 });
 
 test("codeClip provider policy builds verifier request for test provider", () => {
@@ -490,6 +499,21 @@ test("codeClip provider policy push-only providers return detection and grace no
       reason: "GRACE_NOT_SUPPORTED",
     });
   }
+});
+
+test("codeClip provider policy tiktok has no detection/grace/provider_polling mapping yet", () => {
+  assert.deepEqual(resolveCodeClipProviderDetectionSource("tiktok"), {
+    ok: false,
+    reason: "DETECTION_NOT_SUPPORTED",
+  });
+  assert.deepEqual(resolveCodeClipProviderGrace({ provider: "tiktok" }), {
+    ok: false,
+    reason: "GRACE_NOT_SUPPORTED",
+  });
+  assert.deepEqual(
+    mapCodeClipProviderDetectionSourceToDeliverySource("tiktok", "poll"),
+    { ok: false, reason: "DETECTION_NOT_SUPPORTED" }
+  );
 });
 
 test("codeClip provider policy resolves youtube grace default", () => {

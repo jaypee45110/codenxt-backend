@@ -1664,7 +1664,7 @@ async function ensureCodeClipProviderAccountBindingsTable(queryClient = pool) {
   await queryClient.query(`
     ALTER TABLE codeclip_provider_account_bindings
     ADD CONSTRAINT codeclip_provider_account_bindings_provider_check
-    CHECK (provider IN ('meta', 'sms', 'youtube'))
+    CHECK (provider IN ('meta', 'sms', 'youtube', 'tiktok'))
   `);
 
   await queryClient.query(`
@@ -1674,6 +1674,7 @@ async function ensureCodeClipProviderAccountBindingsTable(queryClient = pool) {
       (provider = 'meta' AND channel IN ('instagram', 'messenger', 'whatsapp'))
       OR (provider = 'sms' AND channel = 'sms')
       OR (provider = 'youtube' AND channel = 'youtube')
+      OR (provider = 'tiktok' AND channel = 'tiktok')
     )
   `);
 
@@ -2587,6 +2588,90 @@ async function consumeCodeClipYouTubeOAuthState(state = {}, { queryClient = pool
     return { consumed: false, reason: 'expired', row };
   }
   return { consumed: false, reason: 'unavailable', row };
+}
+
+/**
+ * TikTok OAuth states (F2A1). Durable CSRF + episode/env binding.
+ * No tokens, secrets, or raw state values.
+ */
+async function ensureCodeClipTikTokOAuthStatesTable(queryClient = pool) {
+  if (!queryClient) return;
+
+  await queryClient.query(`
+    CREATE TABLE IF NOT EXISTS codeclip_tiktok_oauth_states (
+      id BIGSERIAL PRIMARY KEY,
+      state_hash TEXT NOT NULL,
+      event_code TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      requested_scopes TEXT[] NOT NULL,
+      return_url TEXT NOT NULL,
+      created_by TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      claim_owner TEXT,
+      claimed_at TIMESTAMPTZ,
+      claim_expires_at TIMESTAMPTZ,
+      claim_version BIGINT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ,
+      consumed_at TIMESTAMPTZ,
+      UNIQUE (state_hash),
+      CHECK (environment IN ('sandbox', 'production')),
+      CHECK (status IN ('pending', 'claimed', 'completed')),
+      CHECK (char_length(state_hash) BETWEEN 32 AND 128),
+      CHECK (char_length(event_code) BETWEEN 1 AND 120),
+      CHECK (char_length(redirect_uri) BETWEEN 1 AND 512),
+      CHECK (char_length(return_url) BETWEEN 1 AND 2048),
+      CHECK (cardinality(requested_scopes) >= 1),
+      CHECK (expires_at > created_at),
+      CHECK (claim_version >= 0),
+      CHECK (
+        (
+          claim_owner IS NULL
+          AND claimed_at IS NULL
+          AND claim_expires_at IS NULL
+        )
+        OR
+        (
+          claim_owner IS NOT NULL
+          AND claimed_at IS NOT NULL
+          AND claim_expires_at IS NOT NULL
+        )
+      ),
+      CHECK (
+        claim_expires_at IS NULL
+        OR claim_expires_at > claimed_at
+      ),
+      CHECK (
+        claim_owner IS NULL
+        OR char_length(claim_owner) BETWEEN 1 AND 128
+      ),
+      CHECK (
+        (
+          status = 'completed'
+          AND completed_at IS NOT NULL
+          AND consumed_at IS NOT NULL
+        )
+        OR
+        (
+          status IN ('pending', 'claimed')
+          AND completed_at IS NULL
+          AND consumed_at IS NULL
+        )
+      )
+    )
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_tiktok_oauth_states_event_expires_idx
+    ON codeclip_tiktok_oauth_states (event_code, expires_at)
+  `);
+
+  await queryClient.query(`
+    CREATE INDEX IF NOT EXISTS codeclip_tiktok_oauth_states_status_expires_idx
+    ON codeclip_tiktok_oauth_states (status, expires_at)
+  `);
 }
 
 async function ensureCodeClipProviderAccountBindingAuditTable(queryClient = pool) {
@@ -5081,6 +5166,7 @@ module.exports = {
   ensureCodeClipYouTubeWebSubSubscriptionsTable,
   ensureCodeClipYouTubeWebSubDiagnosticProbeTables,
   ensureCodeClipYouTubeOAuthStatesTable,
+  ensureCodeClipTikTokOAuthStatesTable,
   ensureCodeClipProviderDeliveriesTable,
   ensureCodeClipYouTubeReconciliationClaimsTable,
   ensureCodeClipYouTubeReconciliationObservabilityTables,

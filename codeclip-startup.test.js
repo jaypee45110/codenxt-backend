@@ -24,6 +24,7 @@ const CODECLIP_STARTUP_ENSURES = [
   ["ensureCodeClipYouTubeWebSubSubscriptionsTable", "ensure-codeclip-youtube-websub-subscriptions"],
   ["ensureCodeClipYouTubeWebSubDiagnosticProbeTables", "ensure-codeclip-youtube-websub-diagnostic-probes"],
   ["ensureCodeClipYouTubeOAuthStatesTable", "ensure-codeclip-youtube-oauth-states"],
+  ["ensureCodeClipTikTokOAuthStatesTable", "ensure-codeclip-tiktok-oauth-states"],
 ];
 
 const EXPECTED_CODECLIP_STARTUP_EVENTS = CODECLIP_STARTUP_ENSURES.map(([, label]) => label);
@@ -224,4 +225,80 @@ test("codeClip startup wires poll sources schema after credentials and before de
       process.env.CODECLIP_PROVIDER_CREDENTIAL_ENCRYPTION_ACTIVE_VERSION = previousActive;
     }
   }
+});
+
+test("codeClip startup requires TikTok OAuth states ensure after YouTube OAuth states", async () => {
+  const calls = [];
+  const tiktokEnvKeys = Object.keys(process.env).filter((key) =>
+    key.startsWith("CODECLIP_TIKTOK_")
+  );
+  const savedTikTokEnv = {};
+  for (const key of tiktokEnvKeys) {
+    savedTikTokEnv[key] = process.env[key];
+    delete process.env[key];
+  }
+
+  try {
+    await initializeCodeClipStartup({
+      databaseClient: createCodeClipStartupDatabaseClient(calls),
+    });
+
+    const youtubeOauthIndex = calls.indexOf("ensure-codeclip-youtube-oauth-states");
+    const tiktokOauthIndex = calls.indexOf("ensure-codeclip-tiktok-oauth-states");
+
+    assert.ok(youtubeOauthIndex >= 0, "YouTube OAuth states ensure must run");
+    assert.ok(tiktokOauthIndex >= 0, "TikTok OAuth states ensure must run");
+    assert.equal(
+      tiktokOauthIndex,
+      youtubeOauthIndex + 1,
+      "TikTok OAuth ensure follows YouTube OAuth ensure"
+    );
+    assert.equal(
+      calls.filter((label) => label === "ensure-codeclip-tiktok-oauth-states").length,
+      1,
+      "TikTok OAuth ensure runs exactly once"
+    );
+    assert.equal(
+      calls[calls.length - 1],
+      "ensure-codeclip-tiktok-oauth-states",
+      "TikTok OAuth ensure is the final codeClip schema ensure"
+    );
+  } finally {
+    for (const key of tiktokEnvKeys) {
+      if (savedTikTokEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = savedTikTokEnv[key];
+      }
+    }
+  }
+});
+
+test("codeClip startup fails closed when TikTok OAuth states ensure is not wired", async () => {
+  const events = [];
+  const databaseClient = createCodeClipStartupDatabaseClient(events);
+  delete databaseClient.ensureCodeClipTikTokOAuthStatesTable;
+
+  await assert.rejects(
+    () => initializeCodeClipStartup({ databaseClient }),
+    (error) => {
+      assert.ok(error instanceof TypeError || error instanceof Error);
+      assert.match(
+        String(error && error.message),
+        /ensureCodeClipTikTokOAuthStatesTable|is not a function|undefined/
+      );
+      return true;
+    }
+  );
+
+  assert.equal(
+    events.includes("ensure-codeclip-tiktok-oauth-states"),
+    false,
+    "TikTok ensure label must not be recorded when method is missing"
+  );
+  assert.equal(
+    events.includes("ensure-codeclip-youtube-oauth-states"),
+    true,
+    "prior ensures still run before the missing TikTok ensure throws"
+  );
 });

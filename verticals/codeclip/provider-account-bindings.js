@@ -18,6 +18,7 @@ const PROVIDER_CHANNELS = Object.freeze({
   meta: new Set(["instagram", "messenger", "whatsapp"]),
   sms: new Set(["sms"]),
   youtube: new Set(["youtube"]),
+  tiktok: new Set(["tiktok"]),
 });
 
 const VALID_STATUSES = new Set([ACTIVE_STATUS, DISABLED_STATUS]);

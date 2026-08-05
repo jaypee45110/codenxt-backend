@@ -291,9 +291,10 @@ test("codeClip provider account binding schema defines identity constraints and 
   assert.match(client.calls[2].sql, /DROP CONSTRAINT IF EXISTS codeclip_provider_account_bindings_check/);
   assert.match(client.calls[3].sql, /DROP CONSTRAINT IF EXISTS codeclip_provider_account_bindings_provider_channel_check/);
   assert.match(client.calls[4].sql, /ADD CONSTRAINT codeclip_provider_account_bindings_provider_check/);
-  assert.match(client.calls[4].sql, /provider IN \('meta', 'sms', 'youtube'\)/);
+  assert.match(client.calls[4].sql, /provider IN \('meta', 'sms', 'youtube', 'tiktok'\)/);
   assert.match(client.calls[5].sql, /ADD CONSTRAINT codeclip_provider_account_bindings_provider_channel_check/);
   assert.match(client.calls[5].sql, /provider = 'youtube' AND channel = 'youtube'/);
+  assert.match(client.calls[5].sql, /provider = 'tiktok' AND channel = 'tiktok'/);
   assert.match(client.calls[6].sql, /codeclip_provider_account_bindings_active_identity_idx/);
   assert.match(client.calls[6].sql, /vertical, provider, provider_account_id/);
   assert.match(client.calls[6].sql, /WHERE status = 'active'/);

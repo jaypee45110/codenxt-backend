@@ -120,6 +120,15 @@ const CODECLIP_PROVIDER_DEFINITIONS = Object.freeze({
       credentials: true,
     },
   }),
+  tiktok: freezeProviderDefinition({
+    name: "tiktok",
+    providerClass: "poll_only",
+    capabilities: {
+      webhook: false,
+      polling: true,
+      credentials: true,
+    },
+  }),
 });
 
 const CODECLIP_PROVIDER_NAMES = Object.freeze(Object.keys(CODECLIP_PROVIDER_DEFINITIONS));

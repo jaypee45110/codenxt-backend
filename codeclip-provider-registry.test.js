@@ -15,7 +15,13 @@ const {
 } = require("./verticals/codeclip/provider-registry");
 
 test("codeClip provider registry exposes registered providers", () => {
-  assert.deepEqual(getCodeClipRegisteredProviders(), ["meta", "sms", "test", "youtube"]);
+  assert.deepEqual(getCodeClipRegisteredProviders(), [
+    "meta",
+    "sms",
+    "test",
+    "youtube",
+    "tiktok",
+  ]);
 });
 
 test("codeClip provider registry returns a stable provider list", () => {
@@ -26,7 +32,13 @@ test("codeClip provider registry returns a defensive copy", () => {
   const providers = getCodeClipRegisteredProviders();
   providers.push("custom");
 
-  assert.deepEqual(getCodeClipRegisteredProviders(), ["meta", "sms", "test", "youtube"]);
+  assert.deepEqual(getCodeClipRegisteredProviders(), [
+    "meta",
+    "sms",
+    "test",
+    "youtube",
+    "tiktok",
+  ]);
 });
 
 test("codeClip provider registry normalizes provider names", () => {
@@ -34,6 +46,7 @@ test("codeClip provider registry normalizes provider names", () => {
   assert.equal(normalizeCodeClipProviderName("Meta"), "meta");
   assert.equal(normalizeCodeClipProviderName(" TEST "), "test");
   assert.equal(normalizeCodeClipProviderName(" YouTube "), "youtube");
+  assert.equal(normalizeCodeClipProviderName(" TikTok "), "tiktok");
 });
 
 test("codeClip provider registry normalizes missing provider to empty string", () => {
@@ -47,6 +60,7 @@ test("codeClip provider registry checks registered providers", () => {
   assert.equal(isCodeClipProviderRegistered("meta"), true);
   assert.equal(isCodeClipProviderRegistered("test"), true);
   assert.equal(isCodeClipProviderRegistered("youtube"), true);
+  assert.equal(isCodeClipProviderRegistered("tiktok"), true);
   assert.equal(isCodeClipProviderRegistered("unknown"), false);
   assert.equal(isCodeClipProviderRegistered(""), false);
 });
@@ -109,11 +123,19 @@ test("codeClip provider registry exports explicit class metadata", () => {
     polling: false,
     credentials: false,
   });
+
+  const tiktok = getCodeClipProviderDefinition("tiktok");
+  assert.equal(tiktok.providerClass, "poll_only");
+  assert.deepEqual(tiktok.capabilities, {
+    webhook: false,
+    polling: true,
+    credentials: true,
+  });
 });
 
 test("codeClip provider registry definitions list is a defensive copy", () => {
   const definitions = getCodeClipProviderDefinitions();
-  assert.equal(definitions.length, 4);
+  assert.equal(definitions.length, 5);
   definitions[0].providerClass = "poll_only";
   definitions[0].capabilities.webhook = false;
 
