@@ -191,14 +191,36 @@ async function ensureCredentialsSchema(queryClient) {
   }
 }
 
+function hasQueryMethod(value) {
+  return Boolean(value && typeof value.query === "function");
+}
+
+function isCallerOwnedQueryClient(value) {
+  if (!hasQueryMethod(value)) return false;
+  // pg PoolClient exposes query(), release(), and a connect() method inherited
+  // from Client. release() is the stable signal that this is an already
+  // acquired caller-owned connection.
+  if (typeof value.release === "function") return true;
+  return typeof value.connect !== "function";
+}
+
+function isPoolLikeQueryClient(value) {
+  return Boolean(
+    value &&
+      typeof value.connect === "function" &&
+      hasQueryMethod(value) &&
+      typeof value.release !== "function"
+  );
+}
+
 /**
  * Transaction contract for multi-statement credential mutations (FOR UPDATE + UPDATE):
  *
- * - Pool (has connect): repository owns the transaction.
+ * - Pool (has connect/query and no release): repository owns the transaction.
  *   connect → BEGIN → work(client) → COMMIT|ROLLBACK → release.
  *   Matches db.withCodeClipCorePersistenceTransaction ownership model.
  *
- * - Explicit client (query only, no connect): caller owns the transaction.
+ * - Explicit client (query only, or acquired PoolClient with release): caller owns the transaction.
  *   Repository does NOT BEGIN/COMMIT/ROLLBACK.
  *   Caller must already be inside an active transaction so FOR UPDATE
  *   holds until UPDATE (autocommit clients are not safe for this path).
@@ -214,8 +236,12 @@ async function withCredentialTransaction(queryClient, work) {
     );
   }
 
+  if (isCallerOwnedQueryClient(queryClient)) {
+    return work(queryClient);
+  }
+
   // Pool path: repository-owned transaction (same model as withCodeClipCorePersistenceTransaction).
-  if (typeof queryClient.connect === "function") {
+  if (isPoolLikeQueryClient(queryClient)) {
     let client = null;
     try {
       client = await queryClient.connect();
@@ -248,14 +274,10 @@ async function withCredentialTransaction(queryClient, work) {
     }
   }
 
-  // Caller-owned client: must already participate in an active transaction.
-  if (typeof queryClient.query !== "function") {
-    throw credentialError(
-      "DATABASE_UNAVAILABLE",
-      "codeClip provider credential repository requires an explicit query client"
-    );
-  }
-  return work(queryClient);
+  throw credentialError(
+    "DATABASE_UNAVAILABLE",
+    "codeClip provider credential repository requires an explicit query client"
+  );
 }
 
 /**

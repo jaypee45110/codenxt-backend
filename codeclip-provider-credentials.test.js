@@ -437,6 +437,7 @@ function createCredentialStorePool(options = {}) {
     get auditRows() {
       return store.auditRows;
     },
+    query: store.query.bind(store),
     async connect() {
       return {
         query: store.query.bind(store),
@@ -447,6 +448,27 @@ function createCredentialStorePool(options = {}) {
     },
   };
   return pool;
+}
+
+function createPoolClientLikeCredentialStoreClient(options = {}) {
+  const client = createCredentialStoreClient(options);
+  let connectCalls = 0;
+  let releaseCalls = 0;
+  return Object.assign(client, {
+    get connectCalls() {
+      return connectCalls;
+    },
+    get releaseCalls() {
+      return releaseCalls;
+    },
+    async connect() {
+      connectCalls += 1;
+      throw new Error("PoolClient connect must not be called");
+    },
+    release() {
+      releaseCalls += 1;
+    },
+  });
 }
 
 function extractSafeProjectionClause(sql) {
@@ -576,6 +598,33 @@ test("codeClip credentials create access-only and returns safe row", async () =>
   assert.equal(decrypted.ok, true);
   assert.equal(decrypted.plaintext, "access-secret-token");
   assert.equal(JSON.stringify(result).includes("access-secret-token"), false);
+});
+
+test("codeClip credentials create accepts caller-owned PoolClient-like client without nested connect", async () => {
+  const env = makeCryptoEnv();
+  const client = createPoolClientLikeCredentialStoreClient();
+
+  const result = await createCodeClipProviderCredential(
+    {
+      provider: "tiktok",
+      providerAccountId: "sandbox-open-id",
+      environment: "sandbox",
+      accessToken: "sandbox-access-token",
+      refreshToken: "sandbox-refresh-token",
+      tokenType: "Bearer",
+      scopes: ["user.info.basic"],
+    },
+    { queryClient: client, env, actor: SYSTEM_ACTOR }
+  );
+
+  assert.equal(result.status, "created");
+  assert.equal(client.connectCalls, 0);
+  assert.equal(client.releaseCalls, 0);
+  assert.equal(client.calls.some((c) => /^\s*BEGIN/i.test(String(c.sql).trim())), false);
+  assert.equal(client.calls.some((c) => /^\s*COMMIT/i.test(String(c.sql).trim())), false);
+  assert.equal(client.calls.some((c) => /^\s*ROLLBACK/i.test(String(c.sql).trim())), false);
+  assert.equal(client.calls.some((c) => /INSERT INTO codeclip_provider_credentials/i.test(c.sql)), true);
+  assert.equal(client.calls.some((c) => /INSERT INTO codeclip_provider_credential_audit/i.test(c.sql)), true);
 });
 
 test("codeClip credentials create both tokens with same key version", async () => {
