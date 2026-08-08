@@ -156,6 +156,33 @@ test("create authorization uses production client key for production environment
   assert.equal(url.searchParams.get("redirect_uri"), REDIRECT);
 });
 
+test("create authorization includes requested video.list scope with user.info.basic", async () => {
+  const client = createStateStore();
+  const result = await createCodeClipTikTokOAuthAuthorization(
+    {
+      eventCode: "CC-EP-1",
+      environment: "sandbox",
+      redirectUri: REDIRECT,
+      returnUrl: RETURN,
+      requestedScopes: ["video.list", "user.info.basic"],
+      actor: { type: "system" },
+      now: NOW,
+    },
+    {
+      queryClient: client,
+      env: envBase(),
+      getEventByCode: async () => ({ vertical: "codeclip" }),
+    }
+  );
+
+  const url = new URL(result.authorizationUrl);
+  assert.equal(url.searchParams.get("scope"), "user.info.basic,video.list");
+  assert.deepEqual(client.rows[0].requested_scopes, [
+    "user.info.basic",
+    "video.list",
+  ]);
+});
+
 test("sandbox authorization fails closed without sandbox client key", async () => {
   const client = createStateStore();
   await assert.rejects(

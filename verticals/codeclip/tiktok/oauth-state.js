@@ -403,7 +403,7 @@ function normalizeScopes(value) {
       fieldName: "requestedScopes",
     });
   }
-  const allowed = new Set(["user.info.basic"]);
+  const allowed = new Set(["user.info.basic", "video.list"]);
   const seen = new Set();
   const scopes = [];
   for (const entry of list) {
@@ -424,7 +424,7 @@ function normalizeScopes(value) {
     }
   }
   scopes.sort();
-  if (scopes.length === 0) {
+  if (scopes.length === 0 || !scopes.includes("user.info.basic")) {
     throw oauthError("INVALID_SCOPES", "requestedScopes is invalid", {
       fieldName: "requestedScopes",
     });

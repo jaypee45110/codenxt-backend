@@ -182,6 +182,19 @@ test("create TikTok OAuth state stores only hash and returns raw state for URL",
   assert.equal(created.expiresAt, "2026-08-05T12:10:00.000Z");
 });
 
+test("create TikTok OAuth state accepts user.info.basic with video.list", async () => {
+  const client = createStateStore();
+  const created = await createCodeClipTikTokOAuthState(
+    { ...baseCreate, requestedScopes: ["video.list", "user.info.basic"] },
+    { queryClient: client }
+  );
+
+  assert.deepEqual(created.oauthState.requestedScopes, [
+    "user.info.basic",
+    "video.list",
+  ]);
+});
+
 test("claim pending state increments version; contention and stale reclaim", async () => {
   const client = createStateStore();
   const created = await createCodeClipTikTokOAuthState(baseCreate, {
@@ -401,6 +414,14 @@ test("invalid scopes and environments rejected", async () => {
     () =>
       createCodeClipTikTokOAuthState(
         { ...baseCreate, requestedScopes: ["video.list"] },
+        { queryClient: client }
+      ),
+    (error) => error.code === "INVALID_SCOPES"
+  );
+  await assert.rejects(
+    () =>
+      createCodeClipTikTokOAuthState(
+        { ...baseCreate, requestedScopes: ["user.info.basic", "comment.list"] },
         { queryClient: client }
       ),
     (error) => error.code === "INVALID_SCOPES"

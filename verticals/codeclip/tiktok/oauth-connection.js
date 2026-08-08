@@ -368,6 +368,24 @@ function mapUnknownError(error) {
   );
 }
 
+function hasAllRequestedScopes({ requestedScopes, grantedScopes }) {
+  const effectiveRequestedScopes = Array.isArray(requestedScopes)
+    ? requestedScopes
+    : ["user.info.basic"];
+  if (!Array.isArray(grantedScopes)) {
+    return false;
+  }
+  const granted = new Set(
+    grantedScopes
+      .filter((scope) => typeof scope === "string")
+      .map((scope) => scope.trim())
+      .filter(Boolean)
+  );
+  return effectiveRequestedScopes.every(
+    (scope) => typeof scope === "string" && granted.has(scope.trim())
+  );
+}
+
 async function withCallerOwnedTransaction(pool, work) {
   if (!pool || typeof pool.connect !== "function") {
     throw connectionError("DATABASE_UNAVAILABLE", "database pool is unavailable");
@@ -873,6 +891,34 @@ async function completeCodeClipTikTokOAuthConnection(
   }
 
   if (!tokenResult || typeof tokenResult.openId !== "string" || !tokenResult.openId.trim()) {
+    const diagnostic = {
+      stage: "token_response_validation",
+      internalErrorCode: "INVALID_TOKEN_RESPONSE",
+      environment,
+      eventCode,
+      redirectUriMatch:
+        typeof env.CODECLIP_TIKTOK_REDIRECT_URI === "string" &&
+        env.CODECLIP_TIKTOK_REDIRECT_URI.trim() === redirectUri,
+    };
+    return {
+      ok: false,
+      status: "authorization_failed",
+      redirectUrl: buildSafeRedirect(returnUrl, "authorization_failed"),
+      eventCode,
+      errorCode: "INVALID_TOKEN_RESPONSE",
+      errorStage: diagnostic.stage,
+      environment,
+      redirectUriMatch: diagnostic.redirectUriMatch,
+      diagnostics: diagnostic,
+    };
+  }
+
+  if (
+    !hasAllRequestedScopes({
+      requestedScopes: oauthState.requestedScopes,
+      grantedScopes: tokenResult.scopes,
+    })
+  ) {
     const diagnostic = {
       stage: "token_response_validation",
       internalErrorCode: "INVALID_TOKEN_RESPONSE",

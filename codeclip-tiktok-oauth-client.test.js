@@ -387,6 +387,19 @@ test("scopes are split, trimmed, deduped, sorted; unknown fields ignored", async
   assert.equal(Object.hasOwn(result, "error_description"), false);
 });
 
+test("token exchange preserves granted video.list scope", async () => {
+  const result = await exchangeCodeClipTikTokAuthorizationCode(
+    { code: AUTH_CODE, redirectUri: REDIRECT, now: NOW },
+    {
+      env: envBase(),
+      fetchImpl: async () =>
+        jsonResponse(validTokenBody({ scope: "video.list,user.info.basic" })),
+    }
+  );
+
+  assert.deepEqual(result.scopes, ["user.info.basic", "video.list"]);
+});
+
 // ---------------------------------------------------------------------------
 // Missing / invalid fields
 // ---------------------------------------------------------------------------

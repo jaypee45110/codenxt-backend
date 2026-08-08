@@ -299,6 +299,7 @@ test("success path creates credential + binding + completes state in one TX", as
         assert.equal(input.provider, "tiktok");
         assert.equal(input.providerAccountId, OPEN_ID);
         assert.equal(input.accessToken, ACCESS);
+        assert.deepEqual(input.scopes, ["user.info.basic"]);
         assert.deepEqual(input.metadata, {
           refreshTokenExpiresAt: "2026-08-06T12:00:00.000Z",
         });
@@ -524,7 +525,8 @@ test("existing active credential updates tokens; same-event binding is idempoten
         claimVersion: 2,
         oauthState: claimedState({ claimVersion: 2 }),
       }),
-      exchangeCode: async () => tokenResult(),
+      exchangeCode: async () =>
+        tokenResult({ scopes: ["user.info.basic", "video.list"] }),
       findCredential: async () => ({
         id: "7",
         status: "active",
@@ -537,6 +539,7 @@ test("existing active credential updates tokens; same-event binding is idempoten
         updated = true;
         assert.equal(String(id), "7");
         assert.equal(patch.accessToken, ACCESS);
+        assert.deepEqual(patch.scopes, ["user.info.basic", "video.list"]);
         assert.equal(patch.metadata.refreshTokenExpiresAt, "2026-08-06T12:00:00.000Z");
         assert.equal(patch.metadata.prior, true);
         return { credential: { id: "7", status: "active" } };
@@ -1146,6 +1149,86 @@ test("malformed token result redirects with safe token response diagnostic", asy
     "authorization_failed"
   );
   assertNoLeak(result);
+});
+
+test("callback fails closed when granted scopes omit requested video.list", async () => {
+  let createCred = 0;
+  let createBind = 0;
+  let complete = 0;
+  const result = await completeCodeClipTikTokOAuthConnection(
+    { code: AUTH_CODE, state: RAW_STATE, now: NOW },
+    {
+      queryClient: createPoolHarness().pool,
+      env: envBase(),
+      claimState: async () => ({
+        ok: true,
+        claimVersion: 1,
+        oauthState: claimedState({
+          requestedScopes: ["user.info.basic", "video.list"],
+        }),
+      }),
+      exchangeCode: async () => tokenResult({ scopes: ["user.info.basic"] }),
+      createCredential: async () => {
+        createCred += 1;
+      },
+      createBinding: async () => {
+        createBind += 1;
+      },
+      completeState: async () => {
+        complete += 1;
+      },
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.errorCode, "INVALID_TOKEN_RESPONSE");
+  assert.equal(result.errorStage, "token_response_validation");
+  assert.equal(result.environment, "sandbox");
+  assert.equal(new URL(result.redirectUrl).searchParams.get("tiktok"), "authorization_failed");
+  assert.equal(createCred, 0);
+  assert.equal(createBind, 0);
+  assert.equal(complete, 0);
+  assertNoLeak(result);
+});
+
+test("callback succeeds when granted scopes include requested video.list", async () => {
+  const result = await completeCodeClipTikTokOAuthConnection(
+    { code: AUTH_CODE, state: RAW_STATE, now: NOW },
+    {
+      queryClient: createPoolHarness().pool,
+      env: envBase(),
+      claimState: async () => ({
+        ok: true,
+        claimVersion: 1,
+        oauthState: claimedState({
+          requestedScopes: ["user.info.basic", "video.list"],
+        }),
+      }),
+      exchangeCode: async () =>
+        tokenResult({ scopes: ["user.info.basic", "video.list"] }),
+      findCredential: async () => null,
+      createCredential: async (input) => {
+        assert.deepEqual(input.scopes, ["user.info.basic", "video.list"]);
+        return { created: true, credential: { id: "9", status: "active" } };
+      },
+      createBinding: async () => ({
+        created: true,
+        row: {
+          id: "b1",
+          eventCode: EVENT,
+          provider: "tiktok",
+          channel: "tiktok",
+          status: "active",
+        },
+      }),
+      appendBindingAudit: async () => ({}),
+      completeState: async () => ({ status: "completed" }),
+      getEventByCode: async () => ({ event_code: EVENT, vertical: "codeclip" }),
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "connected");
 });
 
 test("state completion failure rolls back credential and binding", async () => {
