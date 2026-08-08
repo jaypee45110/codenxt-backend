@@ -936,6 +936,7 @@ test("exchange failure redirects authorization_failed without persistence", asyn
     { code: AUTH_CODE, state: RAW_STATE, now: NOW },
     {
       queryClient: createPoolHarness().pool,
+      env: envBase(),
       claimState: async () => ({
         ok: true,
         claimVersion: 1,
@@ -947,7 +948,8 @@ test("exchange failure redirects authorization_failed without persistence", asyn
         } = require("./verticals/codeclip/tiktok/oauth-client");
         throw new CodeClipTikTokOAuthClientError(
           "AUTHORIZATION_CODE_INVALID",
-          "bad code"
+          "bad code",
+          { reason: "invalid_grant" }
         );
       },
       createCredential: async () => {
@@ -957,10 +959,61 @@ test("exchange failure redirects authorization_failed without persistence", asyn
   );
   assert.equal(createCred, 0);
   assert.equal(result.ok, false);
+  assert.equal(result.errorCode, "TOKEN_EXCHANGE_FAILED");
+  assert.equal(result.errorStage, "token_exchange");
+  assert.equal(result.environment, "sandbox");
+  assert.equal(result.redirectUriMatch, true);
+  assert.deepEqual(result.diagnostics, {
+    stage: "token_exchange",
+    internalErrorCode: "TOKEN_EXCHANGE_FAILED",
+    providerErrorCode: "invalid_grant",
+    providerErrorSlug: "invalid_grant",
+    environment: "sandbox",
+    eventCode: EVENT,
+    redirectUriMatch: true,
+  });
   assert.equal(
     new URL(result.redirectUrl).searchParams.get("tiktok"),
     "authorization_failed"
   );
+  assertNoLeak(result);
+});
+
+test("malformed token result redirects with safe token response diagnostic", async () => {
+  const result = await completeCodeClipTikTokOAuthConnection(
+    { code: AUTH_CODE, state: RAW_STATE, now: NOW },
+    {
+      queryClient: createPoolHarness().pool,
+      env: envBase(),
+      claimState: async () => ({
+        ok: true,
+        claimVersion: 1,
+        oauthState: claimedState(),
+      }),
+      exchangeCode: async () => ({ openId: "" }),
+      createCredential: async () => {
+        throw new Error("should not persist");
+      },
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.errorCode, "INVALID_TOKEN_RESPONSE");
+  assert.equal(result.errorStage, "token_response_validation");
+  assert.equal(result.environment, "sandbox");
+  assert.equal(result.redirectUriMatch, true);
+  assert.deepEqual(result.diagnostics, {
+    stage: "token_response_validation",
+    internalErrorCode: "INVALID_TOKEN_RESPONSE",
+    environment: "sandbox",
+    eventCode: EVENT,
+    redirectUriMatch: true,
+  });
+  assert.equal(
+    new URL(result.redirectUrl).searchParams.get("tiktok"),
+    "authorization_failed"
+  );
+  assertNoLeak(result);
 });
 
 test("state completion failure rolls back credential and binding", async () => {

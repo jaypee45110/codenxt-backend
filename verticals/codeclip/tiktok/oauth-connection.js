@@ -57,6 +57,7 @@ const ACTOR_ID_MAX = 80;
 const ACTOR_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 
 const SAFE_DETAIL_KEYS = new Set(["fieldName", "reason", "status"]);
+const SAFE_PROVIDER_REASON_PATTERN = /^[a-z0-9_.-]+$/i;
 
 class CodeClipTikTokOAuthConnectionError extends Error {
   constructor(code, message, details = {}) {
@@ -287,6 +288,36 @@ function mapClientError(error) {
     return connectionError("TOKEN_EXCHANGE_FAILED", "TikTok token exchange failed");
   }
   return connectionError("TOKEN_EXCHANGE_FAILED", "TikTok token exchange failed");
+}
+
+function normalizeSafeProviderReason(reason) {
+  if (typeof reason !== "string") return null;
+  const normalized = reason.trim().toLowerCase();
+  if (!normalized || normalized.length > 80) return null;
+  if (!SAFE_PROVIDER_REASON_PATTERN.test(normalized)) return null;
+  return normalized;
+}
+
+function buildTokenExchangeFailureDiagnostic(error, mapped, context = {}) {
+  const diagnostic = {
+    stage: "token_exchange",
+    internalErrorCode: mapped?.code || "TOKEN_EXCHANGE_FAILED",
+    environment: context.environment || null,
+    eventCode: context.eventCode || null,
+    redirectUriMatch: Boolean(context.redirectUriMatch),
+  };
+  const providerErrorCode = normalizeSafeProviderReason(error?.details?.reason);
+  if (providerErrorCode) {
+    diagnostic.providerErrorCode = providerErrorCode;
+    diagnostic.providerErrorSlug = providerErrorCode;
+    const httpMatch = /^http_([0-9]{3})$/.exec(providerErrorCode);
+    if (httpMatch) {
+      const status = Number(httpMatch[1]);
+      diagnostic.httpStatus = status;
+      diagnostic.statusClass = `${Math.floor(status / 100)}xx`;
+    }
+  }
+  return diagnostic;
 }
 
 function mapCredentialError(error) {
@@ -817,6 +848,13 @@ async function completeCodeClipTikTokOAuthConnection(
     );
   } catch (error) {
     const mapped = mapClientError(error) || mapUnknownError(error);
+    const diagnostic = buildTokenExchangeFailureDiagnostic(error, mapped, {
+      environment,
+      eventCode,
+      redirectUriMatch:
+        typeof env.CODECLIP_TIKTOK_REDIRECT_URI === "string" &&
+        env.CODECLIP_TIKTOK_REDIRECT_URI.trim() === redirectUri,
+    });
     // Exchange failed after claim: redirect safe failure (state stays claimed/expires).
     if (returnUrl) {
       return {
@@ -825,18 +863,35 @@ async function completeCodeClipTikTokOAuthConnection(
         redirectUrl: buildSafeRedirect(returnUrl, "authorization_failed"),
         eventCode,
         errorCode: mapped.code,
+        errorStage: diagnostic.stage,
+        environment,
+        redirectUriMatch: diagnostic.redirectUriMatch,
+        diagnostics: diagnostic,
       };
     }
     throw mapped;
   }
 
   if (!tokenResult || typeof tokenResult.openId !== "string" || !tokenResult.openId.trim()) {
+    const diagnostic = {
+      stage: "token_response_validation",
+      internalErrorCode: "INVALID_TOKEN_RESPONSE",
+      environment,
+      eventCode,
+      redirectUriMatch:
+        typeof env.CODECLIP_TIKTOK_REDIRECT_URI === "string" &&
+        env.CODECLIP_TIKTOK_REDIRECT_URI.trim() === redirectUri,
+    };
     return {
       ok: false,
       status: "authorization_failed",
       redirectUrl: buildSafeRedirect(returnUrl, "authorization_failed"),
       eventCode,
       errorCode: "INVALID_TOKEN_RESPONSE",
+      errorStage: diagnostic.stage,
+      environment,
+      redirectUriMatch: diagnostic.redirectUriMatch,
+      diagnostics: diagnostic,
     };
   }
 

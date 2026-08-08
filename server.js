@@ -7383,6 +7383,54 @@ function sendCodeClipTikTokOAuthError(res, error) {
     });
 }
 
+function readSafeTikTokOAuthCallbackDiagnostic(result) {
+  if (!result || result.status !== "authorization_failed") return null;
+  const diagnostics =
+    result.diagnostics && typeof result.diagnostics === "object"
+      ? result.diagnostics
+      : {};
+  const stage = String(
+    diagnostics.stage || result.errorStage || ""
+  ).trim();
+  if (stage !== "token_exchange" && stage !== "token_response_validation") {
+    return null;
+  }
+  const internalErrorCode = String(
+    diagnostics.internalErrorCode || result.errorCode || "TOKEN_EXCHANGE_FAILED"
+  )
+    .trim()
+    .slice(0, 80);
+  const safe = {
+    vertical: "codeclip",
+    provider: "tiktok",
+    route: "/api/codeclip/providers/tiktok/oauth/callback",
+    operationalEvent: "tiktok_oauth_callback_token_exchange_failed",
+    stage,
+    internalErrorCode,
+  };
+  for (const key of ["environment", "eventCode", "providerErrorCode", "providerErrorSlug", "statusClass"]) {
+    const value = diagnostics[key] ?? result[key];
+    if (value !== undefined && value !== null && String(value).trim()) {
+      safe[key] = String(value).trim().slice(0, 120);
+    }
+  }
+  if (diagnostics.httpStatus !== undefined && diagnostics.httpStatus !== null) {
+    const status = Number(diagnostics.httpStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) {
+      safe.httpStatus = status;
+    }
+  }
+  if (
+    diagnostics.redirectUriMatch !== undefined ||
+    result.redirectUriMatch !== undefined
+  ) {
+    safe.redirectUriMatch = Boolean(
+      diagnostics.redirectUriMatch ?? result.redirectUriMatch
+    );
+  }
+  return safe;
+}
+
 // TikTok OAuth start (operator). No TikTok HTTP; durable state + authorize URL only.
 app.post(
   "/api/codeclip/providers/tiktok/oauth/start",
@@ -7447,10 +7495,15 @@ app.get("/api/codeclip/providers/tiktok/oauth/callback", async (req, res) => {
         env: process.env,
         getEventByCode: getCampaignByCode,
       }
-    );
+      );
 
-    if (result?.redirectUrl) {
-      return res
+      const diagnostic = readSafeTikTokOAuthCallbackDiagnostic(result);
+      if (diagnostic) {
+        console.warn("codeClip TikTok OAuth callback token exchange failed", diagnostic);
+      }
+
+      if (result?.redirectUrl) {
+        return res
         .status(302)
         .set("Cache-Control", "no-store")
         .set("Location", result.redirectUrl)

@@ -68,6 +68,10 @@ const AUTH_CODE = "route-auth-code-secret";
 const RAW_STATE = "route-state-secret";
 const OPEN_ID = "route-open-id-secret";
 const RETURN_SAFE = "https://app.example.test/checkout/tiktok";
+const CLIENT_SECRET = "route-client-secret";
+const ACCESS_TOKEN = "route-access-token-secret";
+const REFRESH_TOKEN = "route-refresh-token-secret";
+const PROVIDER_PAYLOAD = "route-provider-payload-secret";
 
 function resetMocks() {
   startCalls.length = 0;
@@ -143,6 +147,36 @@ function callApp({
 
     app.handle(req, res, reject);
   });
+}
+
+async function captureWarns(work) {
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+  try {
+    const result = await work();
+    return { result, warnings };
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
+function assertNoDiagnosticLeak(value) {
+  const text = JSON.stringify(value);
+  for (const forbidden of [
+    AUTH_CODE,
+    RAW_STATE,
+    CLIENT_SECRET,
+    ACCESS_TOKEN,
+    REFRESH_TOKEN,
+    PROVIDER_PAYLOAD,
+    OPEN_ID,
+    "client_secret",
+    "access_token",
+    "refresh_token",
+  ]) {
+    assert.equal(text.includes(forbidden), false, `leaked ${forbidden}`);
+  }
 }
 
 test("start route requires admin auth", async () => {
@@ -257,6 +291,128 @@ test("callback binding conflict redirects", async () => {
   });
   assert.equal(response.status, 302);
   assert.match(String(response.headers.location), /tiktok=binding_conflict/);
+});
+
+test("callback token exchange failure logs safe operational diagnostic and preserves redirect", async () => {
+  resetMocks();
+  completeResult = {
+    ok: false,
+    status: "authorization_failed",
+    redirectUrl: `${RETURN_SAFE}?tiktok=authorization_failed`,
+    eventCode: "CC-TIKTOK-1",
+    errorCode: "TOKEN_EXCHANGE_FAILED",
+    errorStage: "token_exchange",
+    environment: "sandbox",
+    redirectUriMatch: true,
+    diagnostics: {
+      stage: "token_exchange",
+      internalErrorCode: "TOKEN_EXCHANGE_FAILED",
+      providerErrorCode: "invalid_request",
+      providerErrorSlug: "invalid_request",
+      environment: "sandbox",
+      eventCode: "CC-TIKTOK-1",
+      redirectUriMatch: true,
+      httpStatus: 400,
+      statusClass: "4xx",
+      ignoredSecret: `${AUTH_CODE} ${RAW_STATE} ${CLIENT_SECRET}`,
+    },
+  };
+
+  const { result: response, warnings } = await captureWarns(() =>
+    callApp({
+      method: "GET",
+      path: `${CALLBACK_ROUTE}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(RAW_STATE)}`,
+      adminKey: null,
+    })
+  );
+
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.location, `${RETURN_SAFE}?tiktok=authorization_failed`);
+  assert.equal(warnings.length, 1);
+  assert.equal(
+    warnings[0][0],
+    "codeClip TikTok OAuth callback token exchange failed"
+  );
+  assert.deepEqual(warnings[0][1], {
+    vertical: "codeclip",
+    provider: "tiktok",
+    route: "/api/codeclip/providers/tiktok/oauth/callback",
+    operationalEvent: "tiktok_oauth_callback_token_exchange_failed",
+    stage: "token_exchange",
+    internalErrorCode: "TOKEN_EXCHANGE_FAILED",
+    environment: "sandbox",
+    eventCode: "CC-TIKTOK-1",
+    providerErrorCode: "invalid_request",
+    providerErrorSlug: "invalid_request",
+    statusClass: "4xx",
+    httpStatus: 400,
+    redirectUriMatch: true,
+  });
+  assertNoDiagnosticLeak(warnings);
+  assertNoDiagnosticLeak(response);
+});
+
+test("callback malformed token response logs safe diagnostic without provider payload", async () => {
+  resetMocks();
+  completeResult = {
+    ok: false,
+    status: "authorization_failed",
+    redirectUrl: `${RETURN_SAFE}?tiktok=authorization_failed`,
+    eventCode: "CC-TIKTOK-1",
+    errorCode: "INVALID_TOKEN_RESPONSE",
+    errorStage: "token_response_validation",
+    environment: "sandbox",
+    redirectUriMatch: true,
+    diagnostics: {
+      stage: "token_response_validation",
+      internalErrorCode: "INVALID_TOKEN_RESPONSE",
+      environment: "sandbox",
+      eventCode: "CC-TIKTOK-1",
+      redirectUriMatch: true,
+      providerPayload: PROVIDER_PAYLOAD,
+    },
+  };
+
+  const { result: response, warnings } = await captureWarns(() =>
+    callApp({
+      method: "GET",
+      path: `${CALLBACK_ROUTE}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(RAW_STATE)}`,
+      adminKey: null,
+    })
+  );
+
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.location, `${RETURN_SAFE}?tiktok=authorization_failed`);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0][1].stage, "token_response_validation");
+  assert.equal(warnings[0][1].internalErrorCode, "INVALID_TOKEN_RESPONSE");
+  assert.equal(warnings[0][1].environment, "sandbox");
+  assert.equal(warnings[0][1].eventCode, "CC-TIKTOK-1");
+  assert.equal(warnings[0][1].redirectUriMatch, true);
+  assert.equal(Object.hasOwn(warnings[0][1], "providerPayload"), false);
+  assertNoDiagnosticLeak(warnings);
+});
+
+test("callback non-token authorization failure does not log token diagnostic", async () => {
+  resetMocks();
+  completeResult = {
+    ok: false,
+    status: "binding_conflict",
+    redirectUrl: `${RETURN_SAFE}?tiktok=binding_conflict`,
+    errorCode: "BINDING_CONFLICT",
+  };
+
+  const { result: response, warnings } = await captureWarns(() =>
+    callApp({
+      method: "GET",
+      path: `${CALLBACK_ROUTE}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(RAW_STATE)}`,
+      adminKey: null,
+    })
+  );
+
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.location, `${RETURN_SAFE}?tiktok=binding_conflict`);
+  assert.equal(warnings.length, 0);
 });
 
 test("callback internal failure returns safe JSON without secrets", async () => {
