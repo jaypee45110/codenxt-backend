@@ -379,6 +379,138 @@ test("success path creates credential + binding + completes state in one TX", as
   assertNoLeak(result);
 });
 
+test("success path completes OAuth state on caller-owned PoolClient-like persistence client", async () => {
+  const events = [];
+  let completeStateUpdated = false;
+  let nestedConnectCalls = 0;
+  let releaseCalls = 0;
+  const claimOwner = "tiktok-oauth-callback:req-state";
+  const stateRow = {
+    id: "42",
+    state_hash: "hash-only",
+    event_code: EVENT,
+    environment: "sandbox",
+    redirect_uri: REDIRECT,
+    requested_scopes: ["user.info.basic"],
+    return_url: RETURN,
+    created_by: "operator_key:system",
+    status: "claimed",
+    claim_owner: claimOwner,
+    claimed_at: NOW,
+    claim_expires_at: "2026-08-05T12:01:00.000Z",
+    claim_version: 1,
+    created_at: "2026-08-05T11:59:00.000Z",
+    expires_at: "2026-08-05T12:10:00.000Z",
+    completed_at: null,
+    consumed_at: null,
+  };
+  const client = {
+    async query(sql, params = []) {
+      const normalized = String(sql).trim().toUpperCase();
+      if (normalized === "BEGIN" || normalized === "COMMIT" || normalized === "ROLLBACK") {
+        events.push(normalized);
+        return { rows: [] };
+      }
+      if (/SELECT COALESCE\(\$1::timestamptz, NOW\(\)\) AS operation_now/i.test(sql)) {
+        events.push("STATE_CLOCK");
+        return { rows: [{ operation_now: new Date(params[0] || NOW) }] };
+      }
+      if (/FROM codeclip_tiktok_oauth_states/.test(sql) && /WHERE id = \$1/.test(sql)) {
+        events.push("STATE_LOCK");
+        return { rows: [{ ...stateRow }] };
+      }
+      if (/UPDATE codeclip_tiktok_oauth_states/.test(sql) && /status = 'completed'/.test(sql)) {
+        events.push("STATE_COMPLETE");
+        assert.equal(String(params[0]), "42");
+        assert.equal(params[2], claimOwner);
+        assert.equal(String(params[3]), "1");
+        completeStateUpdated = true;
+        return {
+          rows: [
+            {
+              ...stateRow,
+              status: "completed",
+              claim_owner: null,
+              claimed_at: null,
+              claim_expires_at: null,
+              completed_at: params[1],
+              consumed_at: params[1],
+            },
+          ],
+        };
+      }
+      events.push("QUERY");
+      return { rows: [] };
+    },
+    async connect() {
+      nestedConnectCalls += 1;
+      throw new Error("PoolClient connect must not be called");
+    },
+    release() {
+      releaseCalls += 1;
+    },
+  };
+  const pool = {
+    async connect() {
+      events.push("CONNECT");
+      return client;
+    },
+  };
+
+  const result = await completeCodeClipTikTokOAuthConnection(
+    {
+      code: AUTH_CODE,
+      state: RAW_STATE,
+      now: NOW,
+      requestId: "req-state",
+    },
+    {
+      queryClient: pool,
+      env: envBase(),
+      claimState: async () => ({
+        ok: true,
+        claimVersion: 1,
+        oauthState: claimedState({
+          claimOwner,
+          claimVersion: 1,
+        }),
+        alreadyCompleted: false,
+      }),
+      exchangeCode: async () => tokenResult(),
+      findCredential: async () => null,
+      createCredential: async () => ({
+        created: true,
+        credential: { id: "9", status: "active" },
+      }),
+      createBinding: async () => ({
+        created: true,
+        row: {
+          id: "b1",
+          vertical: "codeclip",
+          eventCode: EVENT,
+          provider: "tiktok",
+          channel: "tiktok",
+          providerAccountId: OPEN_ID,
+          status: "active",
+        },
+      }),
+      appendBindingAudit: async () => ({}),
+      getEventByCode: async () => ({ event_code: EVENT, vertical: "codeclip" }),
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "connected");
+  assert.equal(completeStateUpdated, true);
+  assert.equal(nestedConnectCalls, 0);
+  assert.equal(releaseCalls, 1);
+  assert.deepEqual(events.filter((e) => e === "BEGIN" || e === "COMMIT"), [
+    "BEGIN",
+    "COMMIT",
+  ]);
+  assert.equal(events.includes("ROLLBACK"), false);
+});
+
 test("existing active credential updates tokens; same-event binding is idempotent", async () => {
   const harness = createPoolHarness();
   let updated = false;

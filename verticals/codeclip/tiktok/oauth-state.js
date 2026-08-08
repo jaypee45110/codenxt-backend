@@ -92,7 +92,18 @@ function requireQueryClient(queryClient) {
 }
 
 async function withStateTransaction(queryClient, work) {
-  if (typeof queryClient.connect === "function") {
+  const hasQuery = typeof queryClient?.query === "function";
+  const hasConnect = typeof queryClient?.connect === "function";
+  const hasRelease = typeof queryClient?.release === "function";
+
+  // pg PoolClient exposes query(), release(), and a connect() method inherited
+  // from Client. release() is the stable signal that this is an already
+  // acquired caller-owned connection.
+  if (hasQuery && (hasRelease || !hasConnect)) {
+    return work(queryClient);
+  }
+
+  if (hasQuery && hasConnect && !hasRelease) {
     let client = null;
     try {
       client = await queryClient.connect();
@@ -122,10 +133,8 @@ async function withStateTransaction(queryClient, work) {
       }
     }
   }
-  if (typeof queryClient.query !== "function") {
-    throw oauthError("DATABASE_UNAVAILABLE", "TikTok OAuth state requires query client");
-  }
-  return work(queryClient);
+
+  throw oauthError("DATABASE_UNAVAILABLE", "TikTok OAuth state requires query client");
 }
 
 function hashState(rawState) {

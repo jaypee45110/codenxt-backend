@@ -119,6 +119,34 @@ function createStateStore() {
   };
 }
 
+function createPoolClientLikeStateStoreClient() {
+  const store = createStateStore();
+  let connectCalls = 0;
+  let releaseCalls = 0;
+  return {
+    ...store,
+    get connectCalls() {
+      return connectCalls;
+    },
+    get releaseCalls() {
+      return releaseCalls;
+    },
+    async connect() {
+      connectCalls += 1;
+      throw new Error("PoolClient connect must not be called");
+    },
+    release() {
+      releaseCalls += 1;
+    },
+  };
+}
+
+function countTransactionCalls(client, statement) {
+  const pattern = new RegExp(`^\\s*${statement}\\s*$`, "i");
+  return client.calls.filter((call) => pattern.test(String(call.sql || "").trim()))
+    .length;
+}
+
 const baseCreate = {
   eventCode: "CC-TIKTOK-1",
   environment: "sandbox",
@@ -256,6 +284,89 @@ test("complete is fenced; wrong version fails; correct completes", async () => {
   assert.equal(again.ok, true);
   assert.equal(again.alreadyCompleted, true);
   assert.equal(again.status, "completed");
+});
+
+test("complete accepts caller-owned PoolClient-like client without nested connect or release", async () => {
+  const client = createPoolClientLikeStateStoreClient();
+  const created = await createCodeClipTikTokOAuthState(baseCreate, {
+    queryClient: client,
+  });
+  const claimed = await claimCodeClipTikTokOAuthState(
+    {
+      state: created.rawState,
+      owner: "worker-a",
+      leaseMs: 60_000,
+      now: NOW,
+    },
+    { queryClient: client }
+  );
+
+  const completed = await completeCodeClipTikTokOAuthState(
+    {
+      stateId: created.oauthState.id,
+      owner: "worker-a",
+      expectedClaimVersion: claimed.claimVersion,
+      now: NOW,
+    },
+    { queryClient: client }
+  );
+
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.oauthState.status, "completed");
+  assert.equal(client.connectCalls, 0);
+  assert.equal(client.releaseCalls, 0);
+  assert.equal(countTransactionCalls(client, "BEGIN"), 0);
+  assert.equal(countTransactionCalls(client, "COMMIT"), 0);
+  assert.equal(countTransactionCalls(client, "ROLLBACK"), 0);
+});
+
+test("state mutations use pool-owned transaction for pool-like query clients", async () => {
+  const store = createStateStore();
+  const events = [];
+  const acquiredClient = {
+    async query(sql, params = []) {
+      const normalized = String(sql).trim().toUpperCase();
+      if (normalized === "BEGIN" || normalized === "COMMIT" || normalized === "ROLLBACK") {
+        events.push(normalized);
+        return { rows: [] };
+      }
+      events.push("QUERY");
+      return store.query(sql, params);
+    },
+    release() {
+      events.push("RELEASE");
+    },
+  };
+  const pool = {
+    async query(sql, params = []) {
+      return store.query(sql, params);
+    },
+    async connect() {
+      events.push("CONNECT");
+      return acquiredClient;
+    },
+  };
+
+  const created = await createCodeClipTikTokOAuthState(baseCreate, {
+    queryClient: pool,
+  });
+
+  assert.equal(created.oauthState.status, "pending");
+  assert.deepEqual(events, ["CONNECT", "BEGIN", "QUERY", "QUERY", "COMMIT", "RELEASE"]);
+});
+
+test("state mutations fail closed for unknown database client shape", async () => {
+  await assert.rejects(
+    () =>
+      createCodeClipTikTokOAuthState(baseCreate, {
+        queryClient: { connect: async () => ({ release() {} }) },
+      }),
+    (error) => {
+      assert.ok(error instanceof CodeClipTikTokOAuthError);
+      assert.equal(error.code, "DATABASE_UNAVAILABLE");
+      return true;
+    }
+  );
 });
 
 test("expired and missing state fail closed", async () => {
