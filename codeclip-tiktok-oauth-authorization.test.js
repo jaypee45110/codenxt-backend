@@ -11,10 +11,13 @@ const REDIRECT =
   "https://api.example.test/api/codeclip/providers/tiktok/oauth/callback";
 const RETURN = "https://app.example.test/checkout/tiktok";
 const NOW = "2026-08-05T12:00:00.000Z";
+const PRODUCTION_CLIENT_KEY = "tt_client_key_test";
+const SANDBOX_CLIENT_KEY = "tt_sandbox_client_key_test";
 
 function envBase(extra = {}) {
   return {
-    CODECLIP_TIKTOK_CLIENT_KEY: "tt_client_key_test",
+    CODECLIP_TIKTOK_CLIENT_KEY: PRODUCTION_CLIENT_KEY,
+    CODECLIP_TIKTOK_SANDBOX_CLIENT_KEY: SANDBOX_CLIENT_KEY,
     CODECLIP_TIKTOK_REDIRECT_URI: REDIRECT,
     CODECLIP_TIKTOK_RETURN_URL_ALLOWLIST: RETURN,
     ...extra,
@@ -120,13 +123,64 @@ test("create authorization returns URL without separate raw state", async () => 
   assert.equal(Object.hasOwn(result, "rawState"), false);
   assert.equal(Object.hasOwn(result, "state"), false);
   const url = new URL(result.authorizationUrl);
-  assert.equal(url.searchParams.get("client_key"), "tt_client_key_test");
+  assert.equal(url.searchParams.get("client_key"), SANDBOX_CLIENT_KEY);
   assert.equal(url.searchParams.get("response_type"), "code");
   assert.ok(url.searchParams.get("state"));
   assert.equal(result.expiresAt, "2026-08-05T12:10:00.000Z");
 
   const serialized = JSON.stringify(result);
   assert.equal(serialized.includes("client_secret"), false);
+});
+
+test("create authorization uses production client key for production environment", async () => {
+  const client = createStateStore();
+  const result = await createCodeClipTikTokOAuthAuthorization(
+    {
+      eventCode: "CC-EP-1",
+      environment: "production",
+      redirectUri: REDIRECT,
+      returnUrl: RETURN,
+      actor: { type: "system" },
+      now: NOW,
+    },
+    {
+      queryClient: client,
+      env: envBase(),
+      getEventByCode: async () => ({ vertical: "codeclip" }),
+    }
+  );
+
+  const url = new URL(result.authorizationUrl);
+  assert.equal(url.searchParams.get("client_key"), PRODUCTION_CLIENT_KEY);
+  assert.equal(url.searchParams.get("scope"), "user.info.basic");
+  assert.equal(url.searchParams.get("redirect_uri"), REDIRECT);
+});
+
+test("sandbox authorization fails closed without sandbox client key", async () => {
+  const client = createStateStore();
+  await assert.rejects(
+    () =>
+      createCodeClipTikTokOAuthAuthorization(
+        {
+          eventCode: "CC-EP-1",
+          environment: "sandbox",
+          redirectUri: REDIRECT,
+          returnUrl: RETURN,
+          actor: { type: "system" },
+          now: NOW,
+        },
+        {
+          queryClient: client,
+          env: envBase({ CODECLIP_TIKTOK_SANDBOX_CLIENT_KEY: "" }),
+          getEventByCode: async () => ({ vertical: "codeclip" }),
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_CONFIG_NOT_AVAILABLE");
+      assert.equal(JSON.stringify(error).includes(SANDBOX_CLIENT_KEY), false);
+      return true;
+    }
+  );
 });
 
 test("create authorization fails closed on missing config and event", async () => {

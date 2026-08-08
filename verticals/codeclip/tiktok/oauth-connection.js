@@ -809,6 +809,7 @@ async function completeCodeClipTikTokOAuthConnection(
     tokenResult = await exchangeCode(
       {
         code: authorizationCode,
+        environment,
         redirectUri,
         now: operationNow,
       },

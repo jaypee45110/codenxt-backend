@@ -125,6 +125,37 @@ function readRequiredEnvString(env, name, maxLen) {
   return trimmed;
 }
 
+function normalizeConfigEnvironment(environment) {
+  if (environment === undefined || environment === null || environment === "") {
+    return "production";
+  }
+  if (typeof environment !== "string") {
+    throw clientError("INVALID_OAUTH_REQUEST", "environment is invalid", {
+      fieldName: "environment",
+    });
+  }
+  const normalized = environment.trim().toLowerCase();
+  if (normalized !== "production" && normalized !== "sandbox") {
+    throw clientError("INVALID_OAUTH_REQUEST", "environment is invalid", {
+      fieldName: "environment",
+    });
+  }
+  return normalized;
+}
+
+function getTikTokClientEnvNames(environment) {
+  if (environment === "sandbox") {
+    return {
+      clientKey: "CODECLIP_TIKTOK_SANDBOX_CLIENT_KEY",
+      clientSecret: "CODECLIP_TIKTOK_SANDBOX_CLIENT_SECRET",
+    };
+  }
+  return {
+    clientKey: "CODECLIP_TIKTOK_CLIENT_KEY",
+    clientSecret: "CODECLIP_TIKTOK_CLIENT_SECRET",
+  };
+}
+
 function normalizeConfiguredRedirectUri(value) {
   if (typeof value !== "string" || !value.trim()) {
     throw clientError(
@@ -157,15 +188,17 @@ function normalizeConfiguredRedirectUri(value) {
   return trimmed;
 }
 
-function loadTokenExchangeConfig(env = process.env) {
+function loadTokenExchangeConfig(env = process.env, environment) {
+  const normalizedEnvironment = normalizeConfigEnvironment(environment);
+  const names = getTikTokClientEnvNames(normalizedEnvironment);
   const clientKey = readRequiredEnvString(
     env,
-    "CODECLIP_TIKTOK_CLIENT_KEY",
+    names.clientKey,
     CLIENT_KEY_MAX
   );
   const clientSecret = readRequiredEnvString(
     env,
-    "CODECLIP_TIKTOK_CLIENT_SECRET",
+    names.clientSecret,
     CLIENT_SECRET_MAX
   );
   const redirectUri = normalizeConfiguredRedirectUri(
@@ -175,15 +208,17 @@ function loadTokenExchangeConfig(env = process.env) {
 }
 
 /** Refresh needs client key/secret only — not redirect URI. */
-function loadTokenRefreshConfig(env = process.env) {
+function loadTokenRefreshConfig(env = process.env, environment) {
+  const normalizedEnvironment = normalizeConfigEnvironment(environment);
+  const names = getTikTokClientEnvNames(normalizedEnvironment);
   const clientKey = readRequiredEnvString(
     env,
-    "CODECLIP_TIKTOK_CLIENT_KEY",
+    names.clientKey,
     CLIENT_KEY_MAX
   );
   const clientSecret = readRequiredEnvString(
     env,
-    "CODECLIP_TIKTOK_CLIENT_SECRET",
+    names.clientSecret,
     CLIENT_SECRET_MAX
   );
   return { clientKey, clientSecret };
@@ -590,7 +625,7 @@ function normalizeSuccessTokenPayload(
  * Exchange a TikTok authorization code for tokens (memory-only result).
  */
 async function exchangeCodeClipTikTokAuthorizationCode(
-  { code, redirectUri, now } = {},
+  { code, redirectUri, environment, now } = {},
   { env = process.env, fetchImpl = global.fetch, timeoutMs } = {}
 ) {
   if (typeof fetchImpl !== "function") {
@@ -600,7 +635,7 @@ async function exchangeCodeClipTikTokAuthorizationCode(
     );
   }
 
-  const config = loadTokenExchangeConfig(env);
+  const config = loadTokenExchangeConfig(env, environment);
   const authorizationCode = normalizeAuthorizationCode(code);
   const matchedRedirectUri = normalizeCallerRedirectUri(
     redirectUri,
@@ -715,7 +750,7 @@ async function exchangeCodeClipTikTokAuthorizationCode(
  * Does not require redirect URI. Does not compare open_id to credentials.
  */
 async function refreshCodeClipTikTokAccessToken(
-  { refreshToken, now } = {},
+  { refreshToken, environment, now } = {},
   { env = process.env, fetchImpl = global.fetch, timeoutMs } = {}
 ) {
   const invalidCode = "INVALID_TIKTOK_REFRESH_RESPONSE";
@@ -727,7 +762,7 @@ async function refreshCodeClipTikTokAccessToken(
     );
   }
 
-  const config = loadTokenRefreshConfig(env);
+  const config = loadTokenRefreshConfig(env, environment);
   const normalizedRefreshToken = normalizeRefreshTokenInput(refreshToken);
   const operationNowIso = normalizeInjectedNow(now);
   const effectiveTimeoutMs = normalizeTimeoutMs(timeoutMs);

@@ -31,6 +31,8 @@ function envBase(extra = {}) {
   return {
     CODECLIP_TIKTOK_CLIENT_KEY: "tt_client_key",
     CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+    CODECLIP_TIKTOK_SANDBOX_CLIENT_KEY: "tt_sandbox_client_key",
+    CODECLIP_TIKTOK_SANDBOX_CLIENT_SECRET: "tt_sandbox_client_secret",
     CODECLIP_TIKTOK_REDIRECT_URI: REDIRECT,
     CODECLIP_TIKTOK_RETURN_URL_ALLOWLIST: RETURN,
     ...extra,
@@ -205,7 +207,7 @@ test("start returns authorization URL without raw state field", async () => {
   assert.equal(Object.hasOwn(result, "state"), false);
   const url = new URL(result.authorizationUrl);
   assert.ok(url.searchParams.get("state"));
-  assert.equal(url.searchParams.get("client_key"), "tt_client_key");
+  assert.equal(url.searchParams.get("client_key"), "tt_sandbox_client_key");
 });
 
 test("start rejects operator_key actor and invalid actor shapes", async () => {
@@ -282,6 +284,7 @@ test("success path creates credential + binding + completes state in one TX", as
       exchangeCode: async (input) => {
         calls.exchange += 1;
         assert.equal(input.code, AUTH_CODE);
+        assert.equal(input.environment, "sandbox");
         assert.equal(input.redirectUri, REDIRECT);
         assert.equal(harness.events.includes("BEGIN"), false);
         return tokenResult();

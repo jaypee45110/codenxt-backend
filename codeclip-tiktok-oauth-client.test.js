@@ -16,6 +16,8 @@ const NOW = "2026-08-05T12:00:00.000Z";
 const AUTH_CODE = "tt-auth-code-secret-value-do-not-leak";
 const CLIENT_KEY = "tt_client_key_test_value";
 const CLIENT_SECRET = "tt_client_secret_test_value_never_expose";
+const SANDBOX_CLIENT_KEY = "tt_sandbox_client_key_test_value";
+const SANDBOX_CLIENT_SECRET = "tt_sandbox_client_secret_test_value_never_expose";
 const INPUT_REFRESH = "input-refresh-token-secret-do-not-leak";
 const ROTATED_REFRESH = "rotated-refresh-token-secret-do-not-leak";
 
@@ -23,6 +25,8 @@ function envBase(extra = {}) {
   return {
     CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
     CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+    CODECLIP_TIKTOK_SANDBOX_CLIENT_KEY: SANDBOX_CLIENT_KEY,
+    CODECLIP_TIKTOK_SANDBOX_CLIENT_SECRET: SANDBOX_CLIENT_SECRET,
     CODECLIP_TIKTOK_REDIRECT_URI: REDIRECT,
     ...extra,
   };
@@ -86,6 +90,8 @@ function assertNoLeakage(error, extras = []) {
     AUTH_CODE,
     CLIENT_KEY,
     CLIENT_SECRET,
+    SANDBOX_CLIENT_KEY,
+    SANDBOX_CLIENT_SECRET,
     "access-token-value-xyz",
     "refresh-token-value-xyz",
     INPUT_REFRESH,
@@ -175,6 +181,87 @@ test("exchange succeeds with valid config and full token response", async () => 
     "grant_type",
     "redirect_uri",
   ].sort().join(","));
+});
+
+test("exchange uses sandbox client credentials for sandbox environment", async () => {
+  const { fetchImpl, calls } = captureFetch(async () => jsonResponse(validTokenBody()));
+
+  await exchangeCodeClipTikTokAuthorizationCode(
+    {
+      code: AUTH_CODE,
+      environment: "sandbox",
+      redirectUri: REDIRECT,
+      now: NOW,
+    },
+    { env: envBase(), fetchImpl }
+  );
+
+  const params = new URLSearchParams(calls[0].init.body);
+  assert.equal(params.get("client_key"), SANDBOX_CLIENT_KEY);
+  assert.equal(params.get("client_secret"), SANDBOX_CLIENT_SECRET);
+  assert.equal(params.get("redirect_uri"), REDIRECT);
+});
+
+test("sandbox exchange fails closed without sandbox client key or secret", async () => {
+  await assert.rejects(
+    () =>
+      exchangeCodeClipTikTokAuthorizationCode(
+        { code: AUTH_CODE, environment: "sandbox", redirectUri: REDIRECT, now: NOW },
+        {
+          env: envBase({ CODECLIP_TIKTOK_SANDBOX_CLIENT_KEY: "" }),
+          fetchImpl: async () => {
+            throw new Error("should not fetch");
+          },
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_CONFIG_NOT_AVAILABLE");
+      assertNoLeakage(error);
+      return true;
+    }
+  );
+
+  await assert.rejects(
+    () =>
+      exchangeCodeClipTikTokAuthorizationCode(
+        { code: AUTH_CODE, environment: "sandbox", redirectUri: REDIRECT, now: NOW },
+        {
+          env: envBase({ CODECLIP_TIKTOK_SANDBOX_CLIENT_SECRET: "" }),
+          fetchImpl: async () => {
+            throw new Error("should not fetch");
+          },
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_CONFIG_NOT_AVAILABLE");
+      assertNoLeakage(error);
+      return true;
+    }
+  );
+});
+
+test("sandbox exchange does not fall back to production credentials", async () => {
+  await assert.rejects(
+    () =>
+      exchangeCodeClipTikTokAuthorizationCode(
+        { code: AUTH_CODE, environment: "sandbox", redirectUri: REDIRECT, now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+            CODECLIP_TIKTOK_REDIRECT_URI: REDIRECT,
+          },
+          fetchImpl: async () => {
+            throw new Error("should not fetch");
+          },
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_CONFIG_NOT_AVAILABLE");
+      assertNoLeakage(error);
+      return true;
+    }
+  );
 });
 
 test("missing client key fails closed without leaking secrets", async () => {
@@ -744,6 +831,43 @@ test("refresh succeeds without redirect URI in config or request", async () => {
   assert.equal(
     [...params.keys()].sort().join(","),
     ["client_key", "client_secret", "grant_type", "refresh_token"].sort().join(",")
+  );
+});
+
+test("refresh uses sandbox client credentials for sandbox environment", async () => {
+  const { fetchImpl, calls } = captureFetch(async () => jsonResponse(validTokenBody()));
+
+  await refreshCodeClipTikTokAccessToken(
+    { refreshToken: INPUT_REFRESH, environment: "sandbox", now: NOW },
+    { env: envBase(), fetchImpl }
+  );
+
+  const params = new URLSearchParams(calls[0].init.body);
+  assert.equal(params.get("client_key"), SANDBOX_CLIENT_KEY);
+  assert.equal(params.get("client_secret"), SANDBOX_CLIENT_SECRET);
+  assert.equal(params.get("grant_type"), "refresh_token");
+});
+
+test("sandbox refresh does not fall back to production credentials", async () => {
+  await assert.rejects(
+    () =>
+      refreshCodeClipTikTokAccessToken(
+        { refreshToken: INPUT_REFRESH, environment: "sandbox", now: NOW },
+        {
+          env: {
+            CODECLIP_TIKTOK_CLIENT_KEY: CLIENT_KEY,
+            CODECLIP_TIKTOK_CLIENT_SECRET: CLIENT_SECRET,
+          },
+          fetchImpl: async () => {
+            throw new Error("should not fetch");
+          },
+        }
+      ),
+    (error) => {
+      assert.equal(error.code, "TIKTOK_CONFIG_NOT_AVAILABLE");
+      assertNoLeakage(error);
+      return true;
+    }
   );
 });
 

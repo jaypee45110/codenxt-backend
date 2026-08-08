@@ -260,6 +260,7 @@ test("success path: claim, HTTP, complete with rotation and metadata", async () 
   stubs.refreshHttp = async (input) => {
     httpArgs = input;
     assert.equal(input.refreshToken, REFRESH_OLD);
+    assert.equal(input.environment, "sandbox");
     return tokenResult();
   };
   stubs.complete = async (input) => {

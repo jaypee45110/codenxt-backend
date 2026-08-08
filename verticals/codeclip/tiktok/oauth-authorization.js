@@ -39,6 +39,22 @@ function readRequiredEnv(env, name) {
   return value.trim();
 }
 
+function normalizeConfigEnvironment(environment) {
+  const normalized = String(environment || "").trim().toLowerCase();
+  if (normalized !== "production" && normalized !== "sandbox") {
+    throw oauthError("INVALID_ENVIRONMENT", "environment is invalid", {
+      fieldName: "environment",
+    });
+  }
+  return normalized;
+}
+
+function getClientKeyEnvName(environment) {
+  return environment === "sandbox"
+    ? "CODECLIP_TIKTOK_SANDBOX_CLIENT_KEY"
+    : "CODECLIP_TIKTOK_CLIENT_KEY";
+}
+
 function normalizeConfiguredRedirectUri(value) {
   if (typeof value !== "string" || !value.trim()) {
     throw oauthError(
@@ -138,8 +154,9 @@ function assertReturnUrlAllowed(returnUrl, allowlist) {
   return normalized;
 }
 
-function loadTikTokAuthorizationConfig(env = process.env) {
-  const clientKey = readRequiredEnv(env, "CODECLIP_TIKTOK_CLIENT_KEY");
+function loadTikTokAuthorizationConfig(env = process.env, environment) {
+  const normalizedEnvironment = normalizeConfigEnvironment(environment);
+  const clientKey = readRequiredEnv(env, getClientKeyEnvName(normalizedEnvironment));
   const redirectUri = normalizeConfiguredRedirectUri(
     env.CODECLIP_TIKTOK_REDIRECT_URI
   );
@@ -267,7 +284,7 @@ async function createCodeClipTikTokOAuthAuthorization(
 
   let config;
   try {
-    config = loadTikTokAuthorizationConfig(env);
+    config = loadTikTokAuthorizationConfig(env, environment);
   } catch (error) {
     if (error instanceof CodeClipTikTokOAuthError) throw error;
     throw oauthError(

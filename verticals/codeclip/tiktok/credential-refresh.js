@@ -323,6 +323,9 @@ async function refreshCodeClipTikTokCredential(
   }
 
   const providerAccountId = secrets.credential?.providerAccountId;
+  const environment = String(secrets.credential?.environment || "")
+    .trim()
+    .toLowerCase();
   const refreshToken = secrets.refreshToken;
   if (typeof refreshToken !== "string" || !refreshToken) {
     await safeRelease({
@@ -356,7 +359,7 @@ async function refreshCodeClipTikTokCredential(
   let tokenResult;
   try {
     tokenResult = await refreshCodeClipTikTokAccessToken(
-      { refreshToken, now },
+      { refreshToken, environment, now },
       { env, fetchImpl, timeoutMs }
     );
   } catch (error) {
