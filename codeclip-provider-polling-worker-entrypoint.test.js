@@ -184,6 +184,44 @@ test("valid recurring startup registers signals without closing shared pool", as
   assert.equal(proc.handlers.size, 0);
 });
 
+test("recurring owned pool is not ended while running and ends only after stop", async () => {
+  const { runCodeClipProviderPollingWorkerEntrypoint } = loadEntrypoint();
+  const db = pool();
+  const proc = processLike();
+  let stopCalls = 0;
+  const resultPromise = runCodeClipProviderPollingWorkerEntrypoint({
+    argv: [],
+    env: {},
+    queryClient: db,
+    logger: logger(),
+    processLike: proc,
+    closeOwnedPool: true,
+    loadConfig: () => ({ enabled: true, oneShot: false }),
+    createRuntime: () => ({
+      start: async () => ({ ok: true, status: "running" }),
+      stop: async () => {
+        stopCalls += 1;
+        // Pool must still be open while runtime is stopping/running work.
+        assert.equal(db.endCalls, 0);
+        return { ok: true, status: "stopped" };
+      },
+    }),
+  });
+
+  // Allow start path to register handlers and park on signalStopPromise.
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(proc.handlers.has("SIGTERM"), true);
+  assert.equal(db.endCalls, 0, "pool must not end while status is running");
+
+  await proc.handlers.get("SIGTERM")();
+  const result = await resultPromise;
+  assert.equal(result.status, "stopped");
+  assert.equal(stopCalls, 1);
+  assert.equal(db.endCalls, 1, "pool ends only after runtime has stopped");
+  assert.equal(proc.handlers.size, 0);
+});
+
 test("signal handler path asks runtime to stop safely", async () => {
   const { runCodeClipProviderPollingWorkerEntrypoint } = loadEntrypoint();
   const proc = processLike();

@@ -119,7 +119,10 @@ async function runCodeClipProviderPollingWorkerEntrypoint({
     if (result?.status === "disabled" || config.oneShot) {
       await stopRuntime();
     } else if (result?.status === "running") {
-      return signalStopPromise;
+      // Await stop so finally/closeOwnedPool cannot end the shared pool while
+      // the recurring runtime is still running (async finally runs before a
+      // non-awaited returned Promise settles).
+      return await signalStopPromise;
     }
     return result;
   } catch (error) {
