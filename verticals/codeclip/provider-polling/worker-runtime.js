@@ -11,6 +11,9 @@ const {
   runCodeClipProviderPollingWorkerCycle,
 } = require("./worker-core");
 const {
+  runCodeClipProviderPollingDeliveryCompletionCycle,
+} = require("./delivery-completion");
+const {
   resolveCodeClipProviderPolicy,
 } = require("../provider-policy");
 
@@ -383,6 +386,20 @@ function validateTimers(timers) {
   return timers;
 }
 
+function validateCompletionCycle(completionCycle) {
+  if (completionCycle === undefined || completionCycle === null) {
+    return runCodeClipProviderPollingDeliveryCompletionCycle;
+  }
+  if (typeof completionCycle !== "function") {
+    throw runtimeError(
+      "INVALID_WORKER_RUNTIME_DEPENDENCY",
+      "completionCycle is invalid",
+      { fieldName: "completionCycle" }
+    );
+  }
+  return completionCycle;
+}
+
 function isoFromClock(clock) {
   const value = clock.now();
   const date = value instanceof Date ? value : new Date(value);
@@ -447,6 +464,7 @@ function createCodeClipProviderPollingWorkerRuntime(
     logger,
     clock,
     timers,
+    completionCycle,
   } = {}
 ) {
   const normalized = validateConfig(config);
@@ -455,6 +473,7 @@ function createCodeClipProviderPollingWorkerRuntime(
   const log = validateLogger(logger);
   const runtimeClock = validateClock(clock);
   const runtimeTimers = validateTimers(timers);
+  const runCompletionCycle = validateCompletionCycle(completionCycle);
 
   let state = "idle";
   let startedAt = null;
@@ -538,7 +557,18 @@ function createCodeClipProviderPollingWorkerRuntime(
         adapterRegistry: registry,
       }
     )
-      .then((summary) => {
+      .then(async (summary) => {
+        const completionSummary = await runCompletionCycle(
+          {
+            provider: normalized.provider,
+            environment: normalized.environment,
+            limit: normalized.limit,
+          },
+          {
+            queryClient: pool,
+            logger: log,
+          }
+        );
         cyclesCompleted += 1;
         lastCycleCompletedAt = isoFromClock(runtimeClock);
         lastCycleStatus =
@@ -548,7 +578,26 @@ function createCodeClipProviderPollingWorkerRuntime(
           cycleNumber,
           ...sanitizeCycleSummary(summary),
         });
-        return summary;
+        safeLog("info", "provider_polling_completion_completed", {
+          cycleNumber,
+          status: "completed",
+          attempted: completionSummary?.selected || 0,
+          succeeded: completionSummary?.completed || 0,
+          failed:
+            (completionSummary?.retryableFailed || 0) +
+            (completionSummary?.terminalFailed || 0),
+          skipped: completionSummary?.skipped || 0,
+        });
+        return {
+          ...summary,
+          completion: {
+            selected: completionSummary?.selected || 0,
+            completed: completionSummary?.completed || 0,
+            skipped: completionSummary?.skipped || 0,
+            retryableFailed: completionSummary?.retryableFailed || 0,
+            terminalFailed: completionSummary?.terminalFailed || 0,
+          },
+        };
       })
       .catch((error) => {
         cyclesFailed += 1;

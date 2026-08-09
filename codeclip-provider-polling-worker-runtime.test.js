@@ -299,6 +299,70 @@ test("runOnce is single-flight and forwards config without public worker-core DI
   await runtime.stop();
 });
 
+test("cycle runs bounded delivery completion with the same provider and environment", async () => {
+  const calls = [];
+  const completionCalls = [];
+  const log = logger();
+  const { createCodeClipProviderPollingWorkerRuntime } = loadRuntime({
+    runCycle: async (input, deps) => {
+      calls.push({ input, deps });
+      return successSummary({ scanned: 1, attempted: 1, succeeded: 1 });
+    },
+  });
+  const runtime = createCodeClipProviderPollingWorkerRuntime(
+    {
+      provider: "tiktok",
+      environment: "sandbox",
+      limit: 7,
+      runOnStart: false,
+    },
+    {
+      queryClient: pool(),
+      adapterRegistry: registry(),
+      logger: log,
+      clock: clock(),
+      timers: manualTimers(),
+      completionCycle: async (input, deps) => {
+        completionCalls.push({ input, deps });
+        return {
+          ok: true,
+          selected: 2,
+          completed: 1,
+          skipped: 1,
+          retryableFailed: 0,
+          terminalFailed: 0,
+        };
+      },
+    }
+  );
+
+  await runtime.start();
+  const summary = await runtime.runOnce();
+  await runtime.stop();
+
+  assert.equal(calls.length, 1);
+  assert.equal(completionCalls.length, 1);
+  assert.deepEqual(completionCalls[0].input, {
+    provider: "tiktok",
+    environment: "sandbox",
+    limit: 7,
+  });
+  assert.equal(completionCalls[0].deps.queryClient.query instanceof Function, true);
+  assert.equal(completionCalls[0].deps.logger, log);
+  assert.deepEqual(summary.completion, {
+    selected: 2,
+    completed: 1,
+    skipped: 1,
+    retryableFailed: 0,
+    terminalFailed: 0,
+  });
+  assert.equal(
+    log.events.some((entry) => entry.event === "provider_polling_completion_completed"),
+    true
+  );
+  assertNoLeak(log.events);
+});
+
 test("completion-based scheduling prevents overlap and uses failure backoff", async () => {
   let active = 0;
   let maxActive = 0;
@@ -395,6 +459,7 @@ test("dependency validation rejects invalid pool, registry, logger, clock and ti
   assert.throws(() => createCodeClipProviderPollingWorkerRuntime({}, { queryClient: pool(), logger: { info() {} } }), /logger/);
   assert.throws(() => createCodeClipProviderPollingWorkerRuntime({}, { queryClient: pool(), clock: {} }), /clock/);
   assert.throws(() => createCodeClipProviderPollingWorkerRuntime({}, { queryClient: pool(), timers: {} }), /timers/);
+  assert.throws(() => createCodeClipProviderPollingWorkerRuntime({}, { queryClient: pool(), completionCycle: {} }), /completionCycle/);
 });
 
 test("logs are aggregate safe events only and provider failures in summary are not runtime crashes", async () => {
