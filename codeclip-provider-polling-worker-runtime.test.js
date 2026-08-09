@@ -479,3 +479,90 @@ test("logs are aggregate safe events only and provider failures in summary are n
   assert.equal(log.events.some((entry) => entry.event === "provider_polling_cycle_completed"), true);
   assertNoLeak(log.events);
 });
+
+test("cycle_failed logs safe underlyingCode without message SQL params stack or credentials", async () => {
+  const log = logger();
+  const DATABASE_URL =
+    "postgresql://user:super-secret-pass@postgres.internal:5432/railway";
+  const { createCodeClipProviderPollingWorkerRuntime } = loadRuntime({
+    runCycle: async () => {
+      const error = new Error(
+        `due source scan failed SELECT * FROM codeclip_provider_poll_sources WHERE id=$1 ${DATABASE_URL}`
+      );
+      error.name = "CodeClipProviderPollingWorkerCoreError";
+      error.code = "DATABASE_UNAVAILABLE";
+      error.underlyingCode = "ENOTFOUND";
+      error.stack = `Error: leaked stack with ${DATABASE_URL}\n    at runCycle`;
+      throw error;
+    },
+  });
+  const runtime = createCodeClipProviderPollingWorkerRuntime(
+    { oneShot: true, provider: "tiktok", environment: "sandbox" },
+    {
+      queryClient: pool(),
+      adapterRegistry: registry(),
+      logger: log,
+      clock: clock(),
+      timers: manualTimers(),
+    }
+  );
+  const result = await runtime.start();
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "stopped");
+  assert.equal(result.summary?.errorCode, "DATABASE_UNAVAILABLE");
+  assert.equal(result.summary?.underlyingCode, "ENOTFOUND");
+  const cycleFailed = log.events.find(
+    (entry) => entry.event === "provider_polling_cycle_failed"
+  );
+  assert.ok(cycleFailed);
+  assert.equal(cycleFailed.level, "error");
+  assert.equal(cycleFailed.fields.provider, "tiktok");
+  assert.equal(cycleFailed.fields.environment, "sandbox");
+  assert.equal(cycleFailed.fields.cycleNumber, 1);
+  assert.equal(cycleFailed.fields.errorCode, "DATABASE_UNAVAILABLE");
+  assert.equal(cycleFailed.fields.underlyingCode, "ENOTFOUND");
+  assert.equal(Object.prototype.hasOwnProperty.call(cycleFailed.fields, "message"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(cycleFailed.fields, "stack"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(cycleFailed.fields, "sql"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(cycleFailed.fields, "params"), false);
+
+  const serialized = JSON.stringify(log.events);
+  assert.equal(serialized.includes("super-secret-pass"), false);
+  assert.equal(serialized.includes("DATABASE_URL"), false);
+  assert.equal(serialized.includes("postgresql://"), false);
+  assert.equal(serialized.includes("SELECT "), false);
+  assert.equal(serialized.includes("leaked stack"), false);
+  assert.equal(serialized.includes("due source scan failed SELECT"), false);
+  assertNoLeak(log.events);
+});
+
+test("cycle_failed omits underlyingCode when absent and never logs raw boom message", async () => {
+  const log = logger();
+  const { createCodeClipProviderPollingWorkerRuntime } = loadRuntime({
+    runCycle: async () => {
+      throw Object.assign(new Error("native boom with secret-token"), {
+        code: "DUE_SOURCE_SCAN_FAILED",
+      });
+    },
+  });
+  const runtime = createCodeClipProviderPollingWorkerRuntime(
+    { oneShot: true },
+    {
+      queryClient: pool(),
+      adapterRegistry: registry(),
+      logger: log,
+      clock: clock(),
+      timers: manualTimers(),
+    }
+  );
+  await runtime.start();
+  const cycleFailed = log.events.find(
+    (entry) => entry.event === "provider_polling_cycle_failed"
+  );
+  assert.ok(cycleFailed);
+  assert.equal(cycleFailed.fields.errorCode, "DUE_SOURCE_SCAN_FAILED");
+  assert.equal(cycleFailed.fields.underlyingCode, undefined);
+  assert.equal(JSON.stringify(log.events).includes("native boom"), false);
+  assert.equal(JSON.stringify(log.events).includes("secret-token"), false);
+  assertNoLeak(log.events);
+});

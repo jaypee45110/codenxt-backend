@@ -32,6 +32,18 @@ const OWNER_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
 const MIN_LEASE_MS = 5_000;
 const MAX_LEASE_MS = 300_000;
 
+/** System/network codes that mean the due-source DB is unreachable. */
+const SCAN_DATABASE_UNAVAILABLE_CODES = Object.freeze(
+  new Set([
+    "ENOTFOUND",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+  ])
+);
+
 class CodeClipProviderPollingWorkerCoreError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -42,25 +54,45 @@ class CodeClipProviderPollingWorkerCoreError extends Error {
   }
 
   toJSON() {
-    return {
+    const json = {
       name: this.name,
       code: this.code,
       message: this.message,
       details: this.details,
     };
+    if (this.underlyingCode !== undefined && this.underlyingCode !== null) {
+      json.underlyingCode = this.underlyingCode;
+    }
+    return json;
   }
+}
+
+/**
+ * Normalize only a short error code for observability. Never accepts message,
+ * stack, SQL, params, hostnames, or connection strings.
+ */
+function sanitizeUnderlyingCode(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const code = String(value).trim().slice(0, 80);
+  return code || null;
 }
 
 function workerError(code, message, details = {}) {
   const safe = {};
+  let underlyingCode = null;
   if (details && typeof details === "object") {
     for (const key of ["fieldName", "reason", "classification"]) {
       if (details[key] !== undefined && details[key] !== null) {
         safe[key] = String(details[key]).slice(0, 100);
       }
     }
+    underlyingCode = sanitizeUnderlyingCode(details.underlyingCode);
   }
-  return new CodeClipProviderPollingWorkerCoreError(code, message, safe);
+  const error = new CodeClipProviderPollingWorkerCoreError(code, message, safe);
+  if (underlyingCode) {
+    error.underlyingCode = underlyingCode;
+  }
+  return error;
 }
 
 function normalizeOptionalProvider(value) {
@@ -400,9 +432,30 @@ function summarizeCounts(items) {
 
 function mapScanError(error) {
   if (error instanceof CodeClipProviderPollingWorkerCoreError) throw error;
-  if (error && error.code === "DATABASE_UNAVAILABLE") {
-    throw workerError("DATABASE_UNAVAILABLE", "due source scan failed");
+
+  const underlyingCode = sanitizeUnderlyingCode(error && error.code);
+
+  if (underlyingCode === "DATABASE_UNAVAILABLE") {
+    throw workerError("DATABASE_UNAVAILABLE", "due source scan failed", {
+      underlyingCode,
+    });
   }
+
+  if (
+    underlyingCode &&
+    SCAN_DATABASE_UNAVAILABLE_CODES.has(underlyingCode)
+  ) {
+    throw workerError("DATABASE_UNAVAILABLE", "due source scan failed", {
+      underlyingCode,
+    });
+  }
+
+  if (underlyingCode) {
+    throw workerError("DUE_SOURCE_SCAN_FAILED", "due source scan failed", {
+      underlyingCode,
+    });
+  }
+
   throw workerError("DUE_SOURCE_SCAN_FAILED", "due source scan failed");
 }
 

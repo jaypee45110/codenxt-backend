@@ -275,6 +275,115 @@ test("due scan forwards filters and maps scan failure to typed global error", as
           ),
         (error) => {
           assertWorkerError(error, "DUE_SOURCE_SCAN_FAILED");
+          assert.equal(error.underlyingCode, undefined);
+          const serialized = JSON.stringify(error);
+          assert.equal(serialized.includes("database exploded"), false);
+          assert.equal(serialized.includes(ACCOUNT_ID), false);
+          return true;
+        }
+      );
+    }
+  );
+});
+
+test("due-source scan maps network system codes to DATABASE_UNAVAILABLE with safe underlyingCode", async () => {
+  for (const systemCode of [
+    "ENOTFOUND",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+  ]) {
+    await withWorker(
+      {
+        listDue: async () => {
+          const error = new Error(
+            `connect ${systemCode} secret-host DATABASE_URL=postgresql://user:pass@host/db SELECT * FROM secrets`
+          );
+          error.code = systemCode;
+          error.stack = `Error: leaked stack ${TOKEN}\n    at listDue`;
+          throw error;
+        },
+      },
+      async ({ runCodeClipProviderPollingWorkerCycle }) => {
+        await assert.rejects(
+          () =>
+            runCodeClipProviderPollingWorkerCycle(
+              { now: OPERATION_NOW },
+              { queryClient: pool(), adapterRegistry: registry() }
+            ),
+          (error) => {
+            assertWorkerError(error, "DATABASE_UNAVAILABLE");
+            assert.equal(error.underlyingCode, systemCode);
+            const serialized = JSON.stringify(error);
+            assert.equal(serialized.includes(TOKEN), false);
+            assert.equal(serialized.includes("postgresql://"), false);
+            assert.equal(serialized.includes("DATABASE_URL"), false);
+            assert.equal(serialized.includes("SELECT "), false);
+            assert.equal(serialized.includes("leaked stack"), false);
+            assert.equal(serialized.includes("secret-host"), false);
+            return true;
+          }
+        );
+      }
+    );
+  }
+});
+
+test("due-source scan preserves DATABASE_UNAVAILABLE and PG-style codes safely", async () => {
+  await withWorker(
+    {
+      listDue: async () => {
+        const error = new Error("pool missing");
+        error.code = "DATABASE_UNAVAILABLE";
+        throw error;
+      },
+    },
+    async ({ runCodeClipProviderPollingWorkerCycle }) => {
+      await assert.rejects(
+        () =>
+          runCodeClipProviderPollingWorkerCycle(
+            { now: OPERATION_NOW },
+            { queryClient: pool(), adapterRegistry: registry() }
+          ),
+        (error) => {
+          assertWorkerError(error, "DATABASE_UNAVAILABLE");
+          assert.equal(error.underlyingCode, "DATABASE_UNAVAILABLE");
+          return true;
+        }
+      );
+    }
+  );
+
+  await withWorker(
+    {
+      listDue: async () => {
+        const error = new Error(
+          'relation "codeclip_provider_poll_sources" does not exist'
+        );
+        error.code = "42P01";
+        error.detail = "leaked detail with " + ACCOUNT_ID;
+        error.hint = "leaked hint";
+        throw error;
+      },
+    },
+    async ({ runCodeClipProviderPollingWorkerCycle }) => {
+      await assert.rejects(
+        () =>
+          runCodeClipProviderPollingWorkerCycle(
+            { now: OPERATION_NOW },
+            { queryClient: pool(), adapterRegistry: registry() }
+          ),
+        (error) => {
+          assertWorkerError(error, "DUE_SOURCE_SCAN_FAILED");
+          assert.equal(error.underlyingCode, "42P01");
+          const serialized = JSON.stringify(error);
+          assert.equal(serialized.includes("relation"), false);
+          assert.equal(serialized.includes("does not exist"), false);
+          assert.equal(serialized.includes("leaked detail"), false);
+          assert.equal(serialized.includes("leaked hint"), false);
+          assert.equal(serialized.includes(ACCOUNT_ID), false);
           return true;
         }
       );

@@ -443,6 +443,17 @@ function sanitizeErrorCode(error) {
   );
 }
 
+/**
+ * Safe diagnostic only: short underlying code from worker core errors.
+ * Never copies message, stack, SQL, params, or connection material.
+ */
+function sanitizeUnderlyingCode(error) {
+  const raw = error?.underlyingCode;
+  if (raw === undefined || raw === null || raw === "") return null;
+  const code = String(raw).trim().slice(0, 80);
+  return code || null;
+}
+
 function createController() {
   if (typeof AbortController === "function") {
     return new AbortController();
@@ -506,6 +517,7 @@ function createCodeClipProviderPollingWorkerRuntime(
       "skipped",
       "durationMs",
       "errorCode",
+      "underlyingCode",
       "state",
     ]) {
       if (fields[key] !== undefined && fields[key] !== null) {
@@ -604,9 +616,11 @@ function createCodeClipProviderPollingWorkerRuntime(
         lastCycleCompletedAt = isoFromClock(runtimeClock);
         lastCycleStatus = "failed";
         lastErrorCode = sanitizeErrorCode(error);
+        const underlyingCode = sanitizeUnderlyingCode(error);
         safeLog("error", "provider_polling_cycle_failed", {
           cycleNumber,
           errorCode: lastErrorCode,
+          ...(underlyingCode ? { underlyingCode } : {}),
         });
         return {
           ok: false,
@@ -614,6 +628,7 @@ function createCodeClipProviderPollingWorkerRuntime(
           provider: normalized.provider,
           environment: normalized.environment,
           errorCode: lastErrorCode,
+          ...(underlyingCode ? { underlyingCode } : {}),
           startedAt: lastCycleStartedAt,
           completedAt: lastCycleCompletedAt,
           durationMs: durationBetween(lastCycleStartedAt, lastCycleCompletedAt),
