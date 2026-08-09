@@ -10,6 +10,10 @@ const {
 const {
   listCodeClipYouTubeWebSubSubscriptionStatuses,
 } = require("./youtube-websub-operations");
+const {
+  classifyCodeClipProviderPollingSourceHealth,
+  classifyCodeClipProviderPollingDeliveryHealth,
+} = require("./provider-polling/health-classification");
 
 const CODECLIP_VERTICAL = "codeclip";
 const SURFACE_NAME = "smoothoperator";
@@ -28,6 +32,8 @@ const CAPABILITY_FLAGS = Object.freeze({
   deliveryDrilldown: false,
   manualReplay: false,
   deliveryRetry: false,
+  tiktokStatusRead: true,
+  providerPollingHealthRead: true,
 });
 
 const OPEN_YOUTUBE_SUBSCRIPTION_STATUSES = new Set([
@@ -95,6 +101,134 @@ function buildYouTubeSubscriptionSummary(subscriptions = []) {
   };
 }
 
+async function loadProviderPollingOpsSummary(queryClient) {
+  if (!queryClient || typeof queryClient.query !== "function") {
+    return {
+      sources: { total: 0, active: 0, paused: 0, disabled: 0, byProvider: {} },
+      tiktok: {
+        sandbox: { sourceCount: 0, active: 0 },
+        production: { sourceCount: 0, active: 0 },
+      },
+      delivery: {
+        providerPollingTotal: 0,
+        pendingCompletionReady: 0,
+        terminalFailed: 0,
+      },
+      health: {
+        classification: "not_configured",
+        reason: "unavailable",
+      },
+    };
+  }
+
+  const [sources, tiktokEnv, delivery] = await Promise.all([
+    queryClient.query(
+      `
+        SELECT
+          COUNT(*)::int AS total,
+          COUNT(*) FILTER (WHERE status = 'active')::int AS active,
+          COUNT(*) FILTER (WHERE status = 'paused')::int AS paused,
+          COUNT(*) FILTER (WHERE status = 'disabled')::int AS disabled
+        FROM codeclip_provider_poll_sources
+        WHERE vertical = 'codeclip'
+      `
+    ),
+    queryClient.query(
+      `
+        SELECT
+          environment,
+          COUNT(*)::int AS source_count,
+          COUNT(*) FILTER (WHERE status = 'active')::int AS active,
+          MAX(consecutive_failures)::int AS max_failures,
+          BOOL_OR(last_error_code IS NOT NULL) AS has_error,
+          MAX(last_success_at) AS latest_success_at,
+          MAX(poll_interval_ms)::bigint AS poll_interval_ms
+        FROM codeclip_provider_poll_sources
+        WHERE vertical = 'codeclip'
+          AND provider = 'tiktok'
+        GROUP BY environment
+      `
+    ),
+    queryClient.query(
+      `
+        SELECT
+          COUNT(*)::int AS total,
+          COUNT(*) FILTER (
+            WHERE verification_state = 'verified'
+              AND processing_state = 'processing'
+              AND core_persistence_state = 'not_started'
+              AND completion_state = 'not_completed'
+              AND terminal_state IS FALSE
+          )::int AS pending_completion_ready,
+          COUNT(*) FILTER (
+            WHERE terminal_state IS TRUE
+              AND completion_state IS DISTINCT FROM 'completed'
+          )::int AS terminal_failed
+        FROM codeclip_provider_deliveries
+        WHERE provider = 'tiktok'
+          AND initial_delivery_source = 'provider_polling'
+      `
+    ),
+  ]);
+
+  const sourceRow = sources.rows?.[0] || {};
+  const deliveryRow = delivery.rows?.[0] || {};
+  const byEnv = { sandbox: null, production: null };
+  for (const row of tiktokEnv.rows || []) {
+    const environment = String(row.environment || "");
+    byEnv[environment] = {
+      sourceCount: Number(row.source_count) || 0,
+      active: Number(row.active) || 0,
+      health: classifyCodeClipProviderPollingSourceHealth({
+        source:
+          Number(row.source_count) > 0
+            ? {
+                status: Number(row.active) > 0 ? "active" : "paused",
+                consecutiveFailures: Number(row.max_failures) || 0,
+                lastErrorCode: null,
+                lastSuccessAt: row.latest_success_at || null,
+                pollIntervalMs: Number(row.poll_interval_ms) || 300000,
+              }
+            : null,
+      }),
+    };
+  }
+
+  const deliveryHealth = classifyCodeClipProviderPollingDeliveryHealth({
+    terminalCompletionFailures: Number(deliveryRow.terminal_failed) || 0,
+    pendingCompletionReady: Number(deliveryRow.pending_completion_ready) || 0,
+  });
+
+  const sandboxHealth = byEnv.sandbox?.health || {
+    classification: "not_configured",
+    reason: "no_poll_source",
+  };
+
+  return {
+    sources: {
+      total: Number(sourceRow.total) || 0,
+      active: Number(sourceRow.active) || 0,
+      paused: Number(sourceRow.paused) || 0,
+      disabled: Number(sourceRow.disabled) || 0,
+    },
+    tiktok: {
+      sandbox: byEnv.sandbox || { sourceCount: 0, active: 0, health: sandboxHealth },
+      production: byEnv.production || {
+        sourceCount: 0,
+        active: 0,
+        health: { classification: "not_configured", reason: "no_poll_source" },
+      },
+    },
+    delivery: {
+      providerPollingTotal: Number(deliveryRow.total) || 0,
+      pendingCompletionReady: Number(deliveryRow.pending_completion_ready) || 0,
+      terminalFailed: Number(deliveryRow.terminal_failed) || 0,
+      health: deliveryHealth,
+    },
+    health: sandboxHealth,
+  };
+}
+
 async function buildCodeClipSmoothOperatorProviderOperationsOverview(options = {}) {
   const queryClient = requireQueryClient(options.queryClient);
   const now = options.now instanceof Date ? options.now : new Date();
@@ -104,6 +238,7 @@ async function buildCodeClipSmoothOperatorProviderOperationsOverview(options = {
     bindingSummary,
     deliverySummary,
     youtubeSubscriptions,
+    providerPolling,
   ] = await Promise.all([
     (options.getBindingOperationsSummary || getCodeClipProviderAccountBindingOperationsSummary)(
       { latestLimit: options.latestBindingsLimit || 10 },
@@ -115,6 +250,7 @@ async function buildCodeClipSmoothOperatorProviderOperationsOverview(options = {
       {},
       { queryClient }
     ),
+    (options.loadProviderPollingOpsSummary || loadProviderPollingOpsSummary)(queryClient),
   ]);
 
   return {
@@ -137,6 +273,7 @@ async function buildCodeClipSmoothOperatorProviderOperationsOverview(options = {
     providerDeliveries: {
       summary: deliverySummary,
     },
+    providerPolling,
     youtubeWebSub: {
       subscriptions: buildYouTubeSubscriptionSummary(youtubeSubscriptions),
     },
@@ -148,5 +285,6 @@ async function buildCodeClipSmoothOperatorProviderOperationsOverview(options = {
 
 module.exports = {
   buildCodeClipSmoothOperatorProviderOperationsOverview,
+  loadProviderPollingOpsSummary,
   buildYouTubeSubscriptionSummary,
 };

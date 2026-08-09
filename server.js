@@ -8296,6 +8296,58 @@ app.get("/internal/codeclip/smoothoperator/provider-operations", requireCodeClip
   }
 });
 
+app.get(
+  "/internal/codeclip/events/:eventCode/providers/tiktok/status",
+  requireCodeClipAdmin,
+  async (req, res) => {
+    const route = "/internal/codeclip/events/:eventCode/providers/tiktok/status";
+    const {
+      buildCodeClipTikTokOperatorStatus,
+      CodeClipTikTokOperatorStatusError,
+    } = require("./verticals/codeclip/tiktok/operator-status");
+
+    try {
+      const status = await buildCodeClipTikTokOperatorStatus(
+        {
+          eventCode: req.params.eventCode,
+          environment: req.query?.environment,
+        },
+        { queryClient: database.pool }
+      );
+      return res.set("Cache-Control", "no-store").json(status);
+    } catch (error) {
+      if (error instanceof CodeClipTikTokOperatorStatusError) {
+        const statusCode =
+          error.code === "INVALID_STATUS_INPUT"
+            ? 400
+            : error.code === "DATABASE_UNAVAILABLE"
+              ? 503
+              : 400;
+        return res
+          .status(statusCode)
+          .set("Cache-Control", "no-store")
+          .json({
+            ok: false,
+            error: error.code || "invalid_status_request",
+          });
+      }
+      console.warn("codeClip TikTok operator status failed", {
+        vertical: "codeclip",
+        route,
+        operationalEvent: "tiktok_operator_status_failed",
+        error: error?.name || "Error",
+      });
+      return res
+        .status(503)
+        .set("Cache-Control", "no-store")
+        .json({
+          ok: false,
+          error: "TikTok operator status unavailable",
+        });
+    }
+  }
+);
+
 function mapCodeClipSmoothOperatorProviderDeliveryStatus(code) {
   if (code === "invalid_filter" || code === "invalid_delivery_id") return 400;
   if (code === "delivery_not_found") return 404;

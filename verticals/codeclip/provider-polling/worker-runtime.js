@@ -630,6 +630,11 @@ function createCodeClipProviderPollingWorkerRuntime(
       "skipped",
       "durationMs",
       "errorCode",
+      "detectionCount",
+      "selected",
+      "completed",
+      "terminalFailed",
+      "retryableFailed",
       ...CYCLE_FAILED_DIAGNOSTIC_KEYS,
       "state",
     ]) {
@@ -637,7 +642,10 @@ function createCodeClipProviderPollingWorkerRuntime(
         safe[key] = fields[key];
       }
     }
-    log[level](event, safe);
+    // Prefer single-line structured logger when available.
+    if (typeof log[level] === "function") {
+      log[level](event, safe);
+    }
   }
 
   function clearScheduledTimer() {
@@ -699,18 +707,25 @@ function createCodeClipProviderPollingWorkerRuntime(
         lastCycleStatus =
           typeof summary?.status === "string" ? summary.status : "completed";
         lastErrorCode = null;
+        const cycleSummary = sanitizeCycleSummary(summary);
         safeLog("info", "provider_polling_cycle_completed", {
           cycleNumber,
-          ...sanitizeCycleSummary(summary),
+          status: cycleSummary.status,
+          scanned: cycleSummary.scanned,
+          attempted: cycleSummary.attempted,
+          succeeded: cycleSummary.succeeded,
+          failed: cycleSummary.failed,
+          skipped: cycleSummary.skipped,
+          durationMs: cycleSummary.durationMs,
         });
+        // Completion uses a distinct field set so aggregates are not ambiguous.
         safeLog("info", "provider_polling_completion_completed", {
           cycleNumber,
           status: "completed",
-          attempted: completionSummary?.selected || 0,
-          succeeded: completionSummary?.completed || 0,
-          failed:
-            (completionSummary?.retryableFailed || 0) +
-            (completionSummary?.terminalFailed || 0),
+          selected: completionSummary?.selected || 0,
+          completed: completionSummary?.completed || 0,
+          terminalFailed: completionSummary?.terminalFailed || 0,
+          retryableFailed: completionSummary?.retryableFailed || 0,
           skipped: completionSummary?.skipped || 0,
         });
         return {

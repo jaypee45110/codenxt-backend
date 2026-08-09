@@ -104,7 +104,11 @@ function successSummary(overrides = {}) {
 
 function assertNoLeak(value) {
   const serialized = JSON.stringify(value);
-  assert.doesNotMatch(serialized, /secret-token|providerAccountId|checkpoint|owner-|sql|select/i);
+  // Note: field name "selected" is legitimate; do not ban bare "select".
+  assert.doesNotMatch(
+    serialized,
+    /secret-token|providerAccountId|checkpoint|owner-|"sql"|SELECT\s|\bFROM\s/i
+  );
   assert.doesNotMatch(serialized, /native boom|raw provider|stack/i);
 }
 

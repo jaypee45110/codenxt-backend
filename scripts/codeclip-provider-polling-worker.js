@@ -11,6 +11,9 @@ const {
   createCodeClipProviderPollingWorkerRuntime,
   loadCodeClipProviderPollingWorkerConfig,
 } = require("../verticals/codeclip/provider-polling/worker-runtime");
+const {
+  createCodeClipProviderPollingStructuredLogger,
+} = require("../verticals/codeclip/provider-polling/structured-logger");
 
 function parseArgs(argv = process.argv.slice(2)) {
   const args = { once: false, help: false };
@@ -32,14 +35,7 @@ function usage() {
 }
 
 function createLogger() {
-  return {
-    info: (event, fields) =>
-      console.log("codeClip provider polling worker", event, fields),
-    warn: (event, fields) =>
-      console.warn("codeClip provider polling worker", event, fields),
-    error: (event, fields) =>
-      console.error("codeClip provider polling worker", event, fields),
-  };
+  return createCodeClipProviderPollingStructuredLogger();
 }
 
 function applyCliOverrides(config, args) {
