@@ -940,6 +940,12 @@ test("listDue rejects non-polling provider filter", async () => {
 
 test("listDue tags query failures with due_source_query_failed scanStage", async () => {
   const client = {
+    totalCount: 3,
+    idleCount: 2,
+    waitingCount: 1,
+    async connect() {
+      return { query: async () => ({ rows: [] }), release() {} };
+    },
     async query() {
       const error = new Error(
         "getaddrinfo ENOTFOUND secret-host DATABASE_URL=postgresql://u:p@h/db"
@@ -958,6 +964,12 @@ test("listDue tags query failures with due_source_query_failed scanStage", async
     (error) => {
       assert.equal(error.code, "ENOTFOUND");
       assert.equal(error.scanStage, "due_source_query_failed");
+      assert.equal(error.queryClientKind, "pg_pool");
+      assert.equal(error.poolTotalCount, 3);
+      assert.equal(error.poolIdleCount, 2);
+      assert.equal(error.poolWaitingCount, 1);
+      assert.equal(typeof error.dueSourceQueryElapsedMs, "number");
+      assert.ok(error.dueSourceQueryElapsedMs >= 0);
       assert.equal(String(error.message || "").includes("DATABASE_URL"), true);
       // Stage tagging must not strip the original error; sanitization is worker-core.
       return true;

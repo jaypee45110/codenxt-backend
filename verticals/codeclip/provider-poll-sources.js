@@ -976,30 +976,116 @@ const DUE_SOURCE_SCAN_STAGES = Object.freeze({
   SCAN_FAILED: "due_source_scan_failed",
 });
 
-function attachDueSourceScanStage(error, stage) {
+const QUERY_CLIENT_KINDS = Object.freeze({
+  PG_POOL: "pg_pool",
+  PG_POOL_CLIENT: "pg_pool_client",
+  QUERY_CLIENT: "query_client",
+  UNKNOWN: "unknown",
+});
+
+function classifyDueSourceQueryClient(queryClient) {
+  if (!queryClient || typeof queryClient !== "object") {
+    return QUERY_CLIENT_KINDS.UNKNOWN;
+  }
+  const hasQuery = typeof queryClient.query === "function";
+  const hasConnect = typeof queryClient.connect === "function";
+  const hasRelease = typeof queryClient.release === "function";
+  if (!hasQuery) return QUERY_CLIENT_KINDS.UNKNOWN;
+  // Pool-like: query + connect, no release (pg.Pool).
+  if (hasConnect && !hasRelease) return QUERY_CLIENT_KINDS.PG_POOL;
+  // Already-acquired client: release() is the stable ownership signal.
+  if (hasRelease) return QUERY_CLIENT_KINDS.PG_POOL_CLIENT;
+  return QUERY_CLIENT_KINDS.QUERY_CLIENT;
+}
+
+function sanitizePoolCount(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (!Number.isInteger(value) || value < 0) return null;
+  // Bound absurd counters.
+  if (value > 1_000_000) return null;
+  return value;
+}
+
+/**
+ * Safe numeric pool snapshot only. Never reads options/connectionString/host.
+ */
+function captureSafePoolSnapshot(queryClient) {
+  if (!queryClient || typeof queryClient !== "object") return {};
+  const snapshot = {};
+  const total = sanitizePoolCount(queryClient.totalCount);
+  const idle = sanitizePoolCount(queryClient.idleCount);
+  const waiting = sanitizePoolCount(queryClient.waitingCount);
+  if (total !== null) snapshot.poolTotalCount = total;
+  if (idle !== null) snapshot.poolIdleCount = idle;
+  if (waiting !== null) snapshot.poolWaitingCount = waiting;
+  return snapshot;
+}
+
+function attachDueSourceScanDiagnostics(error, fields = {}) {
   if (!error || typeof error !== "object") return error;
-  if (error.scanStage !== undefined && error.scanStage !== null) return error;
   try {
-    error.scanStage = stage;
+    if (
+      (error.scanStage === undefined || error.scanStage === null) &&
+      fields.scanStage
+    ) {
+      error.scanStage = fields.scanStage;
+    }
+    if (
+      (error.queryClientKind === undefined || error.queryClientKind === null) &&
+      fields.queryClientKind
+    ) {
+      error.queryClientKind = fields.queryClientKind;
+    }
+    for (const key of [
+      "poolTotalCount",
+      "poolIdleCount",
+      "poolWaitingCount",
+      "dueSourceQueryElapsedMs",
+    ]) {
+      if (
+        (error[key] === undefined || error[key] === null) &&
+        fields[key] !== undefined &&
+        fields[key] !== null
+      ) {
+        error[key] = fields[key];
+      }
+    }
   } catch {
     // ignore non-extensible errors
   }
   return error;
 }
 
+function attachDueSourceScanStage(error, stage) {
+  return attachDueSourceScanDiagnostics(error, { scanStage: stage });
+}
+
+function sanitizeQueryElapsedMs(startedAtMs) {
+  if (!Number.isFinite(startedAtMs)) return null;
+  const elapsed = Math.floor(Date.now() - startedAtMs);
+  if (!Number.isFinite(elapsed) || elapsed < 0) return 0;
+  // Cap to 1 hour for log safety.
+  return Math.min(elapsed, 3_600_000);
+}
+
 /**
  * List active sources that are due and not under an active claim.
  *
- * Observability: attaches allowlisted scanStage on thrown errors so worker-core
- * can distinguish enter / query / row-mapping without leaking SQL or messages.
+ * Observability: attaches allowlisted scanStage and safe query diagnostics on
+ * thrown errors so worker-core can distinguish enter / query / row-mapping
+ * without leaking SQL, messages, or connection material.
  */
 async function listDueCodeClipProviderPollSources(
   { limit, provider, environment, now } = {},
   { queryClient } = {}
 ) {
   let scanStage = DUE_SOURCE_SCAN_STAGES.ENTER;
+  let queryClientKind = QUERY_CLIENT_KINDS.UNKNOWN;
+  let poolSnapshot = {};
   try {
     const client = requireQueryClient(queryClient);
+    queryClientKind = classifyDueSourceQueryClient(client);
+    poolSnapshot = captureSafePoolSnapshot(client);
 
     const normalizedLimit = normalizeListLimit(limit);
     const injectedNow = normalizeInjectedNow(now);
@@ -1008,13 +1094,17 @@ async function listDueCodeClipProviderPollSources(
     if (provider !== undefined && provider !== null && provider !== "") {
       const definition = getCodeClipProviderDefinition(provider);
       if (!definition || definition.capabilities.polling !== true) {
-        throw attachDueSourceScanStage(
+        throw attachDueSourceScanDiagnostics(
           pollSourceError(
             "INVALID_POLL_SOURCE_INPUT",
             "provider filter is invalid",
             { fieldName: "provider" }
           ),
-          DUE_SOURCE_SCAN_STAGES.ENTER
+          {
+            scanStage: DUE_SOURCE_SCAN_STAGES.ENTER,
+            queryClientKind,
+            ...poolSnapshot,
+          }
         );
       }
       normalizedProvider = definition.name;
@@ -1024,13 +1114,17 @@ async function listDueCodeClipProviderPollSources(
     if (environment !== undefined && environment !== null && environment !== "") {
       const envResult = normalizeCodeClipProviderCredentialEnvironment(environment);
       if (!envResult.ok) {
-        throw attachDueSourceScanStage(
+        throw attachDueSourceScanDiagnostics(
           pollSourceError(
             "INVALID_POLL_SOURCE_INPUT",
             "environment filter is invalid",
             { fieldName: "environment", reason: envResult.reason || null }
           ),
-          DUE_SOURCE_SCAN_STAGES.ENTER
+          {
+            scanStage: DUE_SOURCE_SCAN_STAGES.ENTER,
+            queryClientKind,
+            ...poolSnapshot,
+          }
         );
       }
       normalizedEnvironment = envResult.environment;
@@ -1039,6 +1133,7 @@ async function listDueCodeClipProviderPollSources(
     // Resolve clock once for consistent due comparison.
     scanStage = DUE_SOURCE_SCAN_STAGES.QUERY_START;
     let clockResult;
+    const clockStartedAt = Date.now();
     try {
       clockResult = await client.query(
         `
@@ -1047,22 +1142,32 @@ async function listDueCodeClipProviderPollSources(
         [injectedNow]
       );
     } catch (error) {
-      throw attachDueSourceScanStage(error, DUE_SOURCE_SCAN_STAGES.QUERY_FAILED);
+      throw attachDueSourceScanDiagnostics(error, {
+        scanStage: DUE_SOURCE_SCAN_STAGES.QUERY_FAILED,
+        queryClientKind,
+        ...poolSnapshot,
+        dueSourceQueryElapsedMs: sanitizeQueryElapsedMs(clockStartedAt),
+      });
     }
 
     let operationNowIso;
     try {
       operationNowIso = toIsoTimestamp(clockResult.rows?.[0]?.operation_now);
     } catch (error) {
-      throw attachDueSourceScanStage(
-        error,
-        DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED
-      );
+      throw attachDueSourceScanDiagnostics(error, {
+        scanStage: DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED,
+        queryClientKind,
+        ...poolSnapshot,
+      });
     }
     if (!operationNowIso) {
-      throw attachDueSourceScanStage(
+      throw attachDueSourceScanDiagnostics(
         pollSourceError("DATABASE_ERROR", "failed to resolve operation clock"),
-        DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED
+        {
+          scanStage: DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED,
+          queryClientKind,
+          ...poolSnapshot,
+        }
       );
     }
 
@@ -1089,6 +1194,7 @@ async function listDueCodeClipProviderPollSources(
 
     scanStage = DUE_SOURCE_SCAN_STAGES.QUERY_START;
     let result;
+    const listStartedAt = Date.now();
     try {
       result = await client.query(
         `
@@ -1101,7 +1207,12 @@ async function listDueCodeClipProviderPollSources(
         params
       );
     } catch (error) {
-      throw attachDueSourceScanStage(error, DUE_SOURCE_SCAN_STAGES.QUERY_FAILED);
+      throw attachDueSourceScanDiagnostics(error, {
+        scanStage: DUE_SOURCE_SCAN_STAGES.QUERY_FAILED,
+        queryClientKind,
+        ...poolSnapshot,
+        dueSourceQueryElapsedMs: sanitizeQueryElapsedMs(listStartedAt),
+      });
     }
 
     scanStage = DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED;
@@ -1109,10 +1220,11 @@ async function listDueCodeClipProviderPollSources(
     try {
       items = (result.rows || []).map((row) => toPublicPollSource(row));
     } catch (error) {
-      throw attachDueSourceScanStage(
-        error,
-        DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED
-      );
+      throw attachDueSourceScanDiagnostics(error, {
+        scanStage: DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED,
+        queryClientKind,
+        ...poolSnapshot,
+      });
     }
 
     return {
@@ -1126,7 +1238,11 @@ async function listDueCodeClipProviderPollSources(
       scanStage === DUE_SOURCE_SCAN_STAGES.QUERY_START
         ? DUE_SOURCE_SCAN_STAGES.QUERY_FAILED
         : scanStage || DUE_SOURCE_SCAN_STAGES.SCAN_FAILED;
-    throw attachDueSourceScanStage(error, fallbackStage);
+    throw attachDueSourceScanDiagnostics(error, {
+      scanStage: fallbackStage,
+      queryClientKind,
+      ...poolSnapshot,
+    });
   }
 }
 

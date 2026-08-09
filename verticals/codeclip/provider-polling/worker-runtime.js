@@ -443,27 +443,6 @@ function sanitizeErrorCode(error) {
   );
 }
 
-/**
- * Safe diagnostic only: short underlying code from worker core errors.
- * Never copies message, stack, SQL, params, or connection material.
- */
-function sanitizeUnderlyingCode(error) {
-  const raw = error?.underlyingCode;
-  if (raw === undefined || raw === null || raw === "") return null;
-  const code = String(raw).trim().slice(0, 80);
-  return code || null;
-}
-
-/**
- * Safe Error.name only from worker core errors.
- */
-function sanitizeUnderlyingName(error) {
-  const raw = error?.underlyingName;
-  if (raw === undefined || raw === null || raw === "") return null;
-  const name = String(raw).trim().slice(0, 80);
-  return name || null;
-}
-
 const SCAN_STAGE_ALLOWLIST = Object.freeze(
   new Set([
     "due_source_scan_enter",
@@ -474,15 +453,118 @@ const SCAN_STAGE_ALLOWLIST = Object.freeze(
   ])
 );
 
+const QUERY_CLIENT_KIND_ALLOWLIST = Object.freeze(
+  new Set(["pg_pool", "pg_pool_client", "query_client", "unknown"])
+);
+
+const SYSCALL_PATTERN = /^[a-z][a-z0-9_]{0,79}$/i;
+
+const CYCLE_FAILED_DIAGNOSTIC_KEYS = Object.freeze([
+  "underlyingCode",
+  "underlyingName",
+  "underlyingErrno",
+  "underlyingSyscall",
+  "underlyingConstructor",
+  "causeCode",
+  "causeName",
+  "causeErrno",
+  "causeSyscall",
+  "scanStage",
+  "queryClientKind",
+  "poolTotalCount",
+  "poolIdleCount",
+  "poolWaitingCount",
+  "dueSourceQueryElapsedMs",
+]);
+
+function sanitizeString80(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const text = String(value).trim().slice(0, 80);
+  return text || null;
+}
+
+function sanitizeErrnoValue(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || !Number.isInteger(value)) return null;
+    if (Math.abs(value) > 1_000_000) return null;
+    return value;
+  }
+  return sanitizeString80(value);
+}
+
+function sanitizeSyscallValue(value) {
+  const syscall = sanitizeString80(value);
+  if (!syscall || !SYSCALL_PATTERN.test(syscall)) return null;
+  return syscall;
+}
+
+function sanitizePoolCountValue(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (!Number.isInteger(value) || value < 0 || value > 1_000_000) return null;
+  return value;
+}
+
+function sanitizeElapsedMsValue(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (!Number.isInteger(value) || value < 0) return null;
+  return Math.min(value, 3_600_000);
+}
+
 /**
- * Allowlisted scan stage only.
+ * Pull only allowlisted safe diagnostic fields from a worker error.
+ * Never copies message, stack, SQL, host, or raw cause objects.
  */
-function sanitizeScanStage(error) {
-  const raw = error?.scanStage;
-  if (raw === undefined || raw === null || raw === "") return null;
-  const stage = String(raw).trim().slice(0, 80);
-  if (!stage || !SCAN_STAGE_ALLOWLIST.has(stage)) return null;
-  return stage;
+function extractSafeCycleFailureDiagnostics(error) {
+  if (!error || typeof error !== "object") return {};
+  const out = {};
+
+  const underlyingCode = sanitizeString80(error.underlyingCode);
+  const underlyingName = sanitizeString80(error.underlyingName);
+  const underlyingErrno = sanitizeErrnoValue(error.underlyingErrno);
+  const underlyingSyscall = sanitizeSyscallValue(error.underlyingSyscall);
+  const underlyingConstructor = sanitizeString80(error.underlyingConstructor);
+  const causeCode = sanitizeString80(error.causeCode);
+  const causeName = sanitizeString80(error.causeName);
+  const causeErrno = sanitizeErrnoValue(error.causeErrno);
+  const causeSyscall = sanitizeSyscallValue(error.causeSyscall);
+  const scanStageRaw = sanitizeString80(error.scanStage);
+  const scanStage =
+    scanStageRaw && SCAN_STAGE_ALLOWLIST.has(scanStageRaw) ? scanStageRaw : null;
+  const queryClientKindRaw = sanitizeString80(error.queryClientKind);
+  const queryClientKind =
+    queryClientKindRaw && QUERY_CLIENT_KIND_ALLOWLIST.has(queryClientKindRaw)
+      ? queryClientKindRaw
+      : null;
+  const poolTotalCount = sanitizePoolCountValue(error.poolTotalCount);
+  const poolIdleCount = sanitizePoolCountValue(error.poolIdleCount);
+  const poolWaitingCount = sanitizePoolCountValue(error.poolWaitingCount);
+  const dueSourceQueryElapsedMs = sanitizeElapsedMsValue(
+    error.dueSourceQueryElapsedMs
+  );
+
+  if (underlyingCode) out.underlyingCode = underlyingCode;
+  if (underlyingName) out.underlyingName = underlyingName;
+  if (underlyingErrno !== null && underlyingErrno !== undefined) {
+    out.underlyingErrno = underlyingErrno;
+  }
+  if (underlyingSyscall) out.underlyingSyscall = underlyingSyscall;
+  if (underlyingConstructor) out.underlyingConstructor = underlyingConstructor;
+  if (causeCode) out.causeCode = causeCode;
+  if (causeName) out.causeName = causeName;
+  if (causeErrno !== null && causeErrno !== undefined) {
+    out.causeErrno = causeErrno;
+  }
+  if (causeSyscall) out.causeSyscall = causeSyscall;
+  if (scanStage) out.scanStage = scanStage;
+  if (queryClientKind) out.queryClientKind = queryClientKind;
+  if (poolTotalCount !== null) out.poolTotalCount = poolTotalCount;
+  if (poolIdleCount !== null) out.poolIdleCount = poolIdleCount;
+  if (poolWaitingCount !== null) out.poolWaitingCount = poolWaitingCount;
+  if (dueSourceQueryElapsedMs !== null) {
+    out.dueSourceQueryElapsedMs = dueSourceQueryElapsedMs;
+  }
+  return out;
 }
 
 function createController() {
@@ -548,9 +630,7 @@ function createCodeClipProviderPollingWorkerRuntime(
       "skipped",
       "durationMs",
       "errorCode",
-      "underlyingCode",
-      "underlyingName",
-      "scanStage",
+      ...CYCLE_FAILED_DIAGNOSTIC_KEYS,
       "state",
     ]) {
       if (fields[key] !== undefined && fields[key] !== null) {
@@ -649,15 +729,11 @@ function createCodeClipProviderPollingWorkerRuntime(
         lastCycleCompletedAt = isoFromClock(runtimeClock);
         lastCycleStatus = "failed";
         lastErrorCode = sanitizeErrorCode(error);
-        const underlyingCode = sanitizeUnderlyingCode(error);
-        const underlyingName = sanitizeUnderlyingName(error);
-        const scanStage = sanitizeScanStage(error);
+        const diagnostics = extractSafeCycleFailureDiagnostics(error);
         safeLog("error", "provider_polling_cycle_failed", {
           cycleNumber,
           errorCode: lastErrorCode,
-          ...(underlyingCode ? { underlyingCode } : {}),
-          ...(underlyingName ? { underlyingName } : {}),
-          ...(scanStage ? { scanStage } : {}),
+          ...diagnostics,
         });
         return {
           ok: false,
@@ -665,9 +741,7 @@ function createCodeClipProviderPollingWorkerRuntime(
           provider: normalized.provider,
           environment: normalized.environment,
           errorCode: lastErrorCode,
-          ...(underlyingCode ? { underlyingCode } : {}),
-          ...(underlyingName ? { underlyingName } : {}),
-          ...(scanStage ? { scanStage } : {}),
+          ...diagnostics,
           startedAt: lastCycleStartedAt,
           completedAt: lastCycleCompletedAt,
           durationMs: durationBetween(lastCycleStartedAt, lastCycleCompletedAt),

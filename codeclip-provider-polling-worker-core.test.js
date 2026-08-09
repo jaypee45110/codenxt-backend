@@ -467,6 +467,151 @@ test("due-source scan ignores arbitrary non-allowlisted scanStage strings", asyn
   );
 });
 
+test("due-source scan preserves errno and syscall without code", async () => {
+  await withWorker(
+    {
+      listDue: async () => {
+        const error = new Error(
+          "connect ETIMEDOUT 10.0.0.1:5432 DATABASE_URL=postgresql://u:p@host/db SELECT * FROM x"
+        );
+        error.errno = "ETIMEDOUT";
+        error.syscall = "connect";
+        error.address = "10.0.0.1";
+        error.port = 5432;
+        error.scanStage = "due_source_query_failed";
+        error.queryClientKind = "pg_pool";
+        error.poolTotalCount = 1;
+        error.poolIdleCount = 0;
+        error.poolWaitingCount = 0;
+        error.dueSourceQueryElapsedMs = 42;
+        error.stack = `Error: leaked ${TOKEN}\n    at query`;
+        throw error;
+      },
+    },
+    async ({ runCodeClipProviderPollingWorkerCycle }) => {
+      await assert.rejects(
+        () =>
+          runCodeClipProviderPollingWorkerCycle(
+            { now: OPERATION_NOW },
+            { queryClient: pool(), adapterRegistry: registry() }
+          ),
+        (error) => {
+          assertWorkerError(error, "DUE_SOURCE_SCAN_FAILED");
+          assert.equal(error.underlyingCode, undefined);
+          assert.equal(error.underlyingName, "Error");
+          assert.equal(error.underlyingErrno, "ETIMEDOUT");
+          assert.equal(error.underlyingSyscall, "connect");
+          assert.equal(error.underlyingConstructor, "Error");
+          assert.equal(error.scanStage, "due_source_query_failed");
+          assert.equal(error.queryClientKind, "pg_pool");
+          assert.equal(error.poolTotalCount, 1);
+          assert.equal(error.poolIdleCount, 0);
+          assert.equal(error.poolWaitingCount, 0);
+          assert.equal(error.dueSourceQueryElapsedMs, 42);
+          const serialized = JSON.stringify(error);
+          assert.equal(serialized.includes(TOKEN), false);
+          assert.equal(serialized.includes("10.0.0.1"), false);
+          assert.equal(serialized.includes("5432"), false);
+          assert.equal(serialized.includes("DATABASE_URL"), false);
+          assert.equal(serialized.includes("postgresql://"), false);
+          assert.equal(serialized.includes("SELECT "), false);
+          assert.equal(serialized.includes("leaked"), false);
+          assert.equal(Object.prototype.hasOwnProperty.call(error, "cause"), false);
+          return true;
+        }
+      );
+    }
+  );
+});
+
+test("due-source scan preserves one-level cause network fields safely", async () => {
+  await withWorker(
+    {
+      listDue: async () => {
+        const cause = new Error(
+          "getaddrinfo ENOTFOUND secret-host.railway.internal"
+        );
+        cause.code = "ENOTFOUND";
+        cause.errno = -3008;
+        cause.syscall = "getaddrinfo";
+        cause.hostname = "secret-host.railway.internal";
+        const error = new Error(
+          "query failed with nested cause SELECT * FROM secrets"
+        );
+        error.cause = cause;
+        error.scanStage = "due_source_query_failed";
+        error.queryClientKind = "pg_pool";
+        error.dueSourceQueryElapsedMs = 7;
+        throw error;
+      },
+    },
+    async ({ runCodeClipProviderPollingWorkerCycle }) => {
+      await assert.rejects(
+        () =>
+          runCodeClipProviderPollingWorkerCycle(
+            { now: OPERATION_NOW },
+            { queryClient: pool(), adapterRegistry: registry() }
+          ),
+        (error) => {
+          // cause network code elevates to DATABASE_UNAVAILABLE classification
+          assertWorkerError(error, "DATABASE_UNAVAILABLE");
+          assert.equal(error.underlyingCode, undefined);
+          assert.equal(error.underlyingName, "Error");
+          assert.equal(error.causeCode, "ENOTFOUND");
+          assert.equal(error.causeName, "Error");
+          assert.equal(error.causeErrno, -3008);
+          assert.equal(error.causeSyscall, "getaddrinfo");
+          assert.equal(error.scanStage, "due_source_query_failed");
+          assert.equal(error.dueSourceQueryElapsedMs, 7);
+          const serialized = JSON.stringify(error);
+          assert.equal(serialized.includes("secret-host"), false);
+          assert.equal(serialized.includes("railway.internal"), false);
+          assert.equal(serialized.includes("SELECT "), false);
+          assert.equal(serialized.includes("nested cause"), false);
+          assert.equal(serialized.includes('"cause":'), false);
+          return true;
+        }
+      );
+    }
+  );
+});
+
+test("due-source scan omits invalid pool counters and hostile syscall values", async () => {
+  await withWorker(
+    {
+      listDue: async () => {
+        const error = new Error("boom");
+        error.scanStage = "due_source_query_failed";
+        error.poolTotalCount = -1;
+        error.poolIdleCount = 1.5;
+        error.poolWaitingCount = "many";
+        error.syscall = "../../etc/passwd";
+        error.dueSourceQueryElapsedMs = -5;
+        throw error;
+      },
+    },
+    async ({ runCodeClipProviderPollingWorkerCycle }) => {
+      await assert.rejects(
+        () =>
+          runCodeClipProviderPollingWorkerCycle(
+            { now: OPERATION_NOW },
+            { queryClient: pool(), adapterRegistry: registry() }
+          ),
+        (error) => {
+          assertWorkerError(error, "DUE_SOURCE_SCAN_FAILED");
+          assert.equal(error.poolTotalCount, undefined);
+          assert.equal(error.poolIdleCount, undefined);
+          assert.equal(error.poolWaitingCount, undefined);
+          assert.equal(error.underlyingSyscall, undefined);
+          assert.equal(error.dueSourceQueryElapsedMs, undefined);
+          assert.equal(JSON.stringify(error).includes("passwd"), false);
+          return true;
+        }
+      );
+    }
+  );
+});
+
 test("source success invokes service once per source with unique safe owners", async () => {
   const calls = [];
   await withWorker(

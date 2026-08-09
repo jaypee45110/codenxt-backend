@@ -55,6 +55,31 @@ const DUE_SOURCE_SCAN_STAGE_ALLOWLIST = Object.freeze(
   ])
 );
 
+const QUERY_CLIENT_KIND_ALLOWLIST = Object.freeze(
+  new Set(["pg_pool", "pg_pool_client", "query_client", "unknown"])
+);
+
+/** Structural syscall names only (no paths / messages). */
+const SYSCALL_PATTERN = /^[a-z][a-z0-9_]{0,79}$/i;
+
+const SAFE_DIAGNOSTIC_TOP_LEVEL_KEYS = Object.freeze([
+  "underlyingCode",
+  "underlyingName",
+  "underlyingErrno",
+  "underlyingSyscall",
+  "underlyingConstructor",
+  "causeCode",
+  "causeName",
+  "causeErrno",
+  "causeSyscall",
+  "scanStage",
+  "queryClientKind",
+  "poolTotalCount",
+  "poolIdleCount",
+  "poolWaitingCount",
+  "dueSourceQueryElapsedMs",
+]);
+
 class CodeClipProviderPollingWorkerCoreError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -71,14 +96,10 @@ class CodeClipProviderPollingWorkerCoreError extends Error {
       message: this.message,
       details: this.details,
     };
-    if (this.underlyingCode !== undefined && this.underlyingCode !== null) {
-      json.underlyingCode = this.underlyingCode;
-    }
-    if (this.underlyingName !== undefined && this.underlyingName !== null) {
-      json.underlyingName = this.underlyingName;
-    }
-    if (this.scanStage !== undefined && this.scanStage !== null) {
-      json.scanStage = this.scanStage;
+    for (const key of SAFE_DIAGNOSTIC_TOP_LEVEL_KEYS) {
+      if (this[key] !== undefined && this[key] !== null) {
+        json[key] = this[key];
+      }
     }
     return json;
   }
@@ -113,30 +134,144 @@ function sanitizeScanStage(value) {
   return stage;
 }
 
+function sanitizeErrno(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || !Number.isInteger(value)) return null;
+    // Bound absurd errno magnitudes.
+    if (Math.abs(value) > 1_000_000) return null;
+    return value;
+  }
+  const text = String(value).trim().slice(0, 80);
+  return text || null;
+}
+
+function sanitizeSyscall(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const syscall = String(value).trim().slice(0, 80);
+  if (!syscall || !SYSCALL_PATTERN.test(syscall)) return null;
+  return syscall;
+}
+
+function sanitizeConstructorName(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const name = String(value).trim().slice(0, 80);
+  if (!name || !/^[A-Za-z_$][A-Za-z0-9_$]{0,79}$/.test(name)) return null;
+  return name;
+}
+
+function sanitizeQueryClientKind(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const kind = String(value).trim().slice(0, 80);
+  if (!QUERY_CLIENT_KIND_ALLOWLIST.has(kind)) return null;
+  return kind;
+}
+
+function sanitizePoolCount(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (!Number.isInteger(value) || value < 0 || value > 1_000_000) return null;
+  return value;
+}
+
+function sanitizeElapsedMs(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (!Number.isInteger(value) || value < 0) return null;
+  return Math.min(value, 3_600_000);
+}
+
+/**
+ * Extract only allowlisted structural fields from a thrown value (and one
+ * level of cause). Never copies message, stack, SQL, address, or raw cause.
+ */
+function extractScanDiagnostics(error) {
+  const diagnostics = {};
+  if (!error || typeof error !== "object") return diagnostics;
+
+  const underlyingCode = sanitizeUnderlyingCode(error.code);
+  const underlyingName = sanitizeUnderlyingName(error.name);
+  const underlyingErrno = sanitizeErrno(error.errno);
+  const underlyingSyscall = sanitizeSyscall(error.syscall);
+  const underlyingConstructor = sanitizeConstructorName(
+    error.constructor && error.constructor.name
+  );
+  const scanStage = sanitizeScanStage(error.scanStage);
+  const queryClientKind = sanitizeQueryClientKind(error.queryClientKind);
+  const poolTotalCount = sanitizePoolCount(error.poolTotalCount);
+  const poolIdleCount = sanitizePoolCount(error.poolIdleCount);
+  const poolWaitingCount = sanitizePoolCount(error.poolWaitingCount);
+  const dueSourceQueryElapsedMs = sanitizeElapsedMs(
+    error.dueSourceQueryElapsedMs
+  );
+
+  if (underlyingCode) diagnostics.underlyingCode = underlyingCode;
+  if (underlyingName) diagnostics.underlyingName = underlyingName;
+  if (underlyingErrno !== null) diagnostics.underlyingErrno = underlyingErrno;
+  if (underlyingSyscall) diagnostics.underlyingSyscall = underlyingSyscall;
+  if (underlyingConstructor) {
+    diagnostics.underlyingConstructor = underlyingConstructor;
+  }
+  if (scanStage) diagnostics.scanStage = scanStage;
+  if (queryClientKind) diagnostics.queryClientKind = queryClientKind;
+  if (poolTotalCount !== null) diagnostics.poolTotalCount = poolTotalCount;
+  if (poolIdleCount !== null) diagnostics.poolIdleCount = poolIdleCount;
+  if (poolWaitingCount !== null) diagnostics.poolWaitingCount = poolWaitingCount;
+  if (dueSourceQueryElapsedMs !== null) {
+    diagnostics.dueSourceQueryElapsedMs = dueSourceQueryElapsedMs;
+  }
+
+  const cause = error.cause;
+  if (cause && typeof cause === "object") {
+    const causeCode = sanitizeUnderlyingCode(cause.code);
+    const causeName = sanitizeUnderlyingName(cause.name);
+    const causeErrno = sanitizeErrno(cause.errno);
+    const causeSyscall = sanitizeSyscall(cause.syscall);
+    if (causeCode) diagnostics.causeCode = causeCode;
+    if (causeName) diagnostics.causeName = causeName;
+    if (causeErrno !== null) diagnostics.causeErrno = causeErrno;
+    if (causeSyscall) diagnostics.causeSyscall = causeSyscall;
+  }
+
+  return diagnostics;
+}
+
 function workerError(code, message, details = {}) {
   const safe = {};
-  let underlyingCode = null;
-  let underlyingName = null;
-  let scanStage = null;
   if (details && typeof details === "object") {
     for (const key of ["fieldName", "reason", "classification"]) {
       if (details[key] !== undefined && details[key] !== null) {
         safe[key] = String(details[key]).slice(0, 100);
       }
     }
-    underlyingCode = sanitizeUnderlyingCode(details.underlyingCode);
-    underlyingName = sanitizeUnderlyingName(details.underlyingName);
-    scanStage = sanitizeScanStage(details.scanStage);
   }
+
+  const applied = {
+    underlyingCode: sanitizeUnderlyingCode(details?.underlyingCode),
+    underlyingName: sanitizeUnderlyingName(details?.underlyingName),
+    underlyingErrno: sanitizeErrno(details?.underlyingErrno),
+    underlyingSyscall: sanitizeSyscall(details?.underlyingSyscall),
+    underlyingConstructor: sanitizeConstructorName(
+      details?.underlyingConstructor
+    ),
+    causeCode: sanitizeUnderlyingCode(details?.causeCode),
+    causeName: sanitizeUnderlyingName(details?.causeName),
+    causeErrno: sanitizeErrno(details?.causeErrno),
+    causeSyscall: sanitizeSyscall(details?.causeSyscall),
+    scanStage: sanitizeScanStage(details?.scanStage),
+    queryClientKind: sanitizeQueryClientKind(details?.queryClientKind),
+    poolTotalCount: sanitizePoolCount(details?.poolTotalCount),
+    poolIdleCount: sanitizePoolCount(details?.poolIdleCount),
+    poolWaitingCount: sanitizePoolCount(details?.poolWaitingCount),
+    dueSourceQueryElapsedMs: sanitizeElapsedMs(
+      details?.dueSourceQueryElapsedMs
+    ),
+  };
+
   const error = new CodeClipProviderPollingWorkerCoreError(code, message, safe);
-  if (underlyingCode) {
-    error.underlyingCode = underlyingCode;
-  }
-  if (underlyingName) {
-    error.underlyingName = underlyingName;
-  }
-  if (scanStage) {
-    error.scanStage = scanStage;
+  for (const key of SAFE_DIAGNOSTIC_TOP_LEVEL_KEYS) {
+    const value = applied[key];
+    if (value !== undefined && value !== null && value !== "") {
+      error[key] = value;
+    }
   }
   return error;
 }
@@ -479,16 +614,12 @@ function summarizeCounts(items) {
 function mapScanError(error) {
   if (error instanceof CodeClipProviderPollingWorkerCoreError) throw error;
 
-  const underlyingCode = sanitizeUnderlyingCode(error && error.code);
-  const underlyingName = sanitizeUnderlyingName(error && error.name);
-  const scanStage =
-    sanitizeScanStage(error && error.scanStage) || "due_source_scan_failed";
+  const diagnostics = extractScanDiagnostics(error);
+  if (!diagnostics.scanStage) {
+    diagnostics.scanStage = "due_source_scan_failed";
+  }
 
-  const diagnostics = {
-    scanStage,
-    ...(underlyingCode ? { underlyingCode } : {}),
-    ...(underlyingName ? { underlyingName } : {}),
-  };
+  const underlyingCode = diagnostics.underlyingCode || null;
 
   if (underlyingCode === "DATABASE_UNAVAILABLE") {
     throw workerError(
@@ -502,6 +633,17 @@ function mapScanError(error) {
     underlyingCode &&
     SCAN_DATABASE_UNAVAILABLE_CODES.has(underlyingCode)
   ) {
+    throw workerError(
+      "DATABASE_UNAVAILABLE",
+      "due source scan failed",
+      diagnostics
+    );
+  }
+
+  // Also treat one-level cause network codes as unavailable when top-level code
+  // is missing (observed Railway shape: plain Error wrapping system cause).
+  const causeCode = diagnostics.causeCode || null;
+  if (causeCode && SCAN_DATABASE_UNAVAILABLE_CODES.has(causeCode)) {
     throw workerError(
       "DATABASE_UNAVAILABLE",
       "due source scan failed",

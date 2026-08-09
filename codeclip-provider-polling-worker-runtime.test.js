@@ -480,7 +480,7 @@ test("logs are aggregate safe events only and provider failures in summary are n
   assertNoLeak(log.events);
 });
 
-test("cycle_failed logs safe underlyingCode name and scanStage without message SQL params stack or credentials", async () => {
+test("cycle_failed logs safe query diagnostics without message SQL params stack or credentials", async () => {
   const log = logger();
   const DATABASE_URL =
     "postgresql://user:super-secret-pass@postgres.internal:5432/railway";
@@ -493,8 +493,25 @@ test("cycle_failed logs safe underlyingCode name and scanStage without message S
       error.code = "DATABASE_UNAVAILABLE";
       error.underlyingCode = "ENOTFOUND";
       error.underlyingName = "Error";
+      error.underlyingErrno = -3008;
+      error.underlyingSyscall = "getaddrinfo";
+      error.underlyingConstructor = "Error";
+      error.causeCode = "ENOTFOUND";
+      error.causeName = "Error";
+      error.causeErrno = -3008;
+      error.causeSyscall = "getaddrinfo";
       error.scanStage = "due_source_query_failed";
+      error.queryClientKind = "pg_pool";
+      error.poolTotalCount = 2;
+      error.poolIdleCount = 1;
+      error.poolWaitingCount = 0;
+      error.dueSourceQueryElapsedMs = 15;
       error.stack = `Error: leaked stack with ${DATABASE_URL}\n    at runCycle`;
+      error.cause = {
+        message: "nested secret",
+        stack: "cause stack",
+        hostname: "postgres.internal",
+      };
       throw error;
     },
   });
@@ -514,7 +531,12 @@ test("cycle_failed logs safe underlyingCode name and scanStage without message S
   assert.equal(result.summary?.errorCode, "DATABASE_UNAVAILABLE");
   assert.equal(result.summary?.underlyingCode, "ENOTFOUND");
   assert.equal(result.summary?.underlyingName, "Error");
+  assert.equal(result.summary?.underlyingErrno, -3008);
+  assert.equal(result.summary?.underlyingSyscall, "getaddrinfo");
   assert.equal(result.summary?.scanStage, "due_source_query_failed");
+  assert.equal(result.summary?.queryClientKind, "pg_pool");
+  assert.equal(result.summary?.poolTotalCount, 2);
+  assert.equal(result.summary?.dueSourceQueryElapsedMs, 15);
   const cycleFailed = log.events.find(
     (entry) => entry.event === "provider_polling_cycle_failed"
   );
@@ -526,23 +548,47 @@ test("cycle_failed logs safe underlyingCode name and scanStage without message S
   assert.equal(cycleFailed.fields.errorCode, "DATABASE_UNAVAILABLE");
   assert.equal(cycleFailed.fields.underlyingCode, "ENOTFOUND");
   assert.equal(cycleFailed.fields.underlyingName, "Error");
+  assert.equal(cycleFailed.fields.underlyingErrno, -3008);
+  assert.equal(cycleFailed.fields.underlyingSyscall, "getaddrinfo");
+  assert.equal(cycleFailed.fields.underlyingConstructor, "Error");
+  assert.equal(cycleFailed.fields.causeCode, "ENOTFOUND");
+  assert.equal(cycleFailed.fields.causeSyscall, "getaddrinfo");
   assert.equal(cycleFailed.fields.scanStage, "due_source_query_failed");
+  assert.equal(cycleFailed.fields.queryClientKind, "pg_pool");
+  assert.equal(cycleFailed.fields.poolTotalCount, 2);
+  assert.equal(cycleFailed.fields.poolIdleCount, 1);
+  assert.equal(cycleFailed.fields.poolWaitingCount, 0);
+  assert.equal(cycleFailed.fields.dueSourceQueryElapsedMs, 15);
   assert.equal(Object.prototype.hasOwnProperty.call(cycleFailed.fields, "message"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(cycleFailed.fields, "stack"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(cycleFailed.fields, "sql"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(cycleFailed.fields, "params"), false);
-  assert.deepEqual(
-    Object.keys(cycleFailed.fields).sort(),
-    [
-      "cycleNumber",
-      "environment",
-      "errorCode",
-      "provider",
-      "scanStage",
-      "underlyingCode",
-      "underlyingName",
-    ].sort()
-  );
+  assert.equal(Object.prototype.hasOwnProperty.call(cycleFailed.fields, "cause"), false);
+
+  const allowed = new Set([
+    "provider",
+    "environment",
+    "cycleNumber",
+    "errorCode",
+    "underlyingCode",
+    "underlyingName",
+    "underlyingErrno",
+    "underlyingSyscall",
+    "underlyingConstructor",
+    "causeCode",
+    "causeName",
+    "causeErrno",
+    "causeSyscall",
+    "scanStage",
+    "queryClientKind",
+    "poolTotalCount",
+    "poolIdleCount",
+    "poolWaitingCount",
+    "dueSourceQueryElapsedMs",
+  ]);
+  for (const key of Object.keys(cycleFailed.fields)) {
+    assert.equal(allowed.has(key), true, `unexpected log field ${key}`);
+  }
 
   const serialized = JSON.stringify(log.events);
   assert.equal(serialized.includes("super-secret-pass"), false);
@@ -552,6 +598,7 @@ test("cycle_failed logs safe underlyingCode name and scanStage without message S
   assert.equal(serialized.includes("leaked stack"), false);
   assert.equal(serialized.includes("due source scan failed SELECT"), false);
   assert.equal(serialized.includes("postgres.internal"), false);
+  assert.equal(serialized.includes("nested secret"), false);
   assertNoLeak(log.events);
 });
 
