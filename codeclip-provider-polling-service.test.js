@@ -316,6 +316,250 @@ test("service maps adapter failure classification to fenced release", async () =
   assert.equal(releases[0].nextPollAt, "2026-08-04T12:01:00.000Z");
 });
 
+test("service refreshes expired provider token once before polling", async () => {
+  const refreshedToken = "secret-refreshed-access-token-value-do-not-leak";
+  const queryClient = makePoolClient();
+  const env = { SAFE_ENV: "1" };
+  let secretReads = 0;
+  let refreshCalls = 0;
+  let seenToken = null;
+
+  const registry = makeRegistry(async (input) => {
+    seenToken = input.accessToken;
+    return {
+      ok: true,
+      detections: [],
+      nextCheckpoint: { cursor: "1" },
+      page: { complete: true },
+    };
+  });
+
+  const result = await pollCodeClipProviderSource(
+    {
+      sourceId: "42",
+      owner: "worker-a",
+      now: OPERATION_NOW,
+      queryClient,
+      credentialEnv: env,
+      adapterRegistry: registry,
+      credentialRefreshRegistry: {
+        get(provider) {
+          assert.equal(provider, "youtube");
+          return async (input, options) => {
+            refreshCalls += 1;
+            assert.equal(input.credentialId, "9");
+            assert.equal(input.owner, "worker-a:refresh");
+            assert.equal(options.queryClient, queryClient);
+            assert.equal(options.env, env);
+            return { ok: true, status: "refreshed", credentialId: "9" };
+          };
+        },
+      },
+      clock: () => Date.parse(OPERATION_NOW),
+    },
+    baseDeps({
+      secretRead: async () => {
+        secretReads += 1;
+        if (secretReads === 1) {
+          return { ok: false, reason: "TOKEN_EXPIRED" };
+        }
+        return {
+          ok: true,
+          accessToken: refreshedToken,
+          credential: { scopes: ["video.list"] },
+        };
+      },
+    })
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.classification, "empty");
+  assert.equal(secretReads, 2);
+  assert.equal(refreshCalls, 1);
+  assert.equal(seenToken, refreshedToken);
+  assert.equal(JSON.stringify(result).includes(refreshedToken), false);
+});
+
+test("service maps failed expired-token refresh to retryable release", async () => {
+  let polled = false;
+  const releases = [];
+  const registry = makeRegistry(async () => {
+    polled = true;
+    return { ok: true, detections: [], nextCheckpoint: {}, page: { complete: true } };
+  });
+
+  const result = await pollCodeClipProviderSource(
+    {
+      sourceId: "42",
+      owner: "worker-a",
+      now: OPERATION_NOW,
+      queryClient: makePoolClient(),
+      adapterRegistry: registry,
+      credentialRefreshRegistry: {
+        get() {
+          return async () => ({
+            ok: false,
+            status: "retryable",
+            classification: "REFRESH_CLAIM_CONTENTION",
+          });
+        },
+      },
+      clock: () => Date.parse(OPERATION_NOW),
+    },
+    baseDeps({
+      secretRead: async () => ({ ok: false, reason: "TOKEN_EXPIRED" }),
+      releaseClaim: async (args) => {
+        releases.push(args);
+        return {
+          status: "released",
+          pollSource: { id: "42", nextPollAt: args.nextPollAt },
+        };
+      },
+    })
+  );
+
+  assert.equal(polled, false);
+  assert.equal(result.ok, false);
+  assert.equal(result.classification, "retryable");
+  assert.equal(releases[0].status, "active");
+  assert.equal(releases[0].lastErrorCode, "retryable");
+});
+
+test("service requires video.list on TikTok credential before polling", async () => {
+  let polled = false;
+  let secretReads = 0;
+  const releases = [];
+  const registry = createCodeClipProviderPollAdapterRegistry();
+  registry.register({
+    provider: "tiktok",
+    poll: async () => {
+      polled = true;
+      return { ok: true, detections: [], nextCheckpoint: {}, page: { complete: true } };
+    },
+  });
+
+  const result = await pollCodeClipProviderSource(
+    {
+      sourceId: "42",
+      owner: "worker-a",
+      now: OPERATION_NOW,
+      queryClient: makePoolClient(),
+      adapterRegistry: registry,
+      clock: () => Date.parse(OPERATION_NOW),
+    },
+    baseDeps({
+      getById: async () => ({
+        id: "42",
+        provider: "tiktok",
+        environment: "sandbox",
+        providerAccountId: "tiktok-account",
+        pollIntervalMs: 30_000,
+        checkpoint: {},
+        consecutiveFailures: 0,
+        status: "active",
+      }),
+      findCredential: async () => ({
+        id: "9",
+        provider: "tiktok",
+        environment: "sandbox",
+        scopes: ["user.info.basic"],
+      }),
+      secretRead: async () => {
+        secretReads += 1;
+        return { ok: true, accessToken: TOKEN };
+      },
+      releaseClaim: async (args) => {
+        releases.push(args);
+        return {
+          status: "released",
+          pollSource: { id: "42", nextPollAt: args.nextPollAt },
+        };
+      },
+    })
+  );
+
+  assert.equal(polled, false);
+  assert.equal(secretReads, 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.classification, "reauthorization_required");
+  assert.equal(releases[0].status, "paused");
+  assert.equal(releases[0].lastErrorCode, "reauthorization_required");
+});
+
+test("service fails closed when TikTok refresh does not preserve video.list", async () => {
+  let polled = false;
+  let findCalls = 0;
+  let secretReads = 0;
+  const releases = [];
+  const registry = createCodeClipProviderPollAdapterRegistry();
+  registry.register({
+    provider: "tiktok",
+    poll: async () => {
+      polled = true;
+      return { ok: true, detections: [], nextCheckpoint: {}, page: { complete: true } };
+    },
+  });
+
+  const result = await pollCodeClipProviderSource(
+    {
+      sourceId: "42",
+      owner: "worker-a",
+      now: OPERATION_NOW,
+      queryClient: makePoolClient(),
+      adapterRegistry: registry,
+      credentialRefreshRegistry: {
+        get() {
+          return async () => ({ ok: true, status: "refreshed", credentialId: "9" });
+        },
+      },
+      clock: () => Date.parse(OPERATION_NOW),
+    },
+    baseDeps({
+      getById: async () => ({
+        id: "42",
+        provider: "tiktok",
+        environment: "sandbox",
+        providerAccountId: "tiktok-account",
+        pollIntervalMs: 30_000,
+        checkpoint: {},
+        consecutiveFailures: 0,
+        status: "active",
+      }),
+      findCredential: async () => {
+        findCalls += 1;
+        return {
+          id: "9",
+          provider: "tiktok",
+          environment: "sandbox",
+          scopes:
+            findCalls === 1
+              ? ["user.info.basic", "video.list"]
+              : ["user.info.basic"],
+        };
+      },
+      secretRead: async () => {
+        secretReads += 1;
+        return { ok: false, reason: "TOKEN_EXPIRED" };
+      },
+      releaseClaim: async (args) => {
+        releases.push(args);
+        return {
+          status: "released",
+          pollSource: { id: "42", nextPollAt: args.nextPollAt },
+        };
+      },
+    })
+  );
+
+  assert.equal(polled, false);
+  assert.equal(findCalls, 2);
+  assert.equal(secretReads, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.classification, "reauthorization_required");
+  assert.equal(releases[0].status, "paused");
+  assert.equal(releases[0].lastErrorCode, "reauthorization_required");
+});
+
 test("service maps adapter throw to provider_malformed_response", async () => {
   const registry = makeRegistry(async () => {
     throw new Error(`boom ${TOKEN}`);

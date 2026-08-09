@@ -166,6 +166,32 @@ function successSummary({
   };
 }
 
+function buildCredentialRefreshOwner(owner, credentialId) {
+  const base = `${String(owner || "").trim()}:refresh`;
+  if (base.length <= 128) return base;
+  const id = String(credentialId || "unknown")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._:-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32) || "credential";
+  return `codeclip.provider.poll.refresh:${id}`;
+}
+
+function getCredentialRefresher(registry, provider) {
+  if (!registry || typeof registry.get !== "function") return null;
+  try {
+    const refresher = registry.get(provider);
+    return typeof refresher === "function" ? refresher : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasCredentialScope(credential, scope) {
+  return Array.isArray(credential?.scopes) && credential.scopes.includes(scope);
+}
+
 async function releaseWithScheduling({
   pollSourceId,
   owner,
@@ -224,6 +250,7 @@ async function pollCodeClipProviderSource(
     queryClient,
     credentialEnv = process.env,
     adapterRegistry,
+    credentialRefreshRegistry,
     clock = () => Date.now(),
   } = {},
   dependencies = {}
@@ -253,6 +280,8 @@ async function pollCodeClipProviderSource(
     dependencies.inspectUsability || inspectCodeClipProviderCredentialUsability;
   const secretRead =
     dependencies.secretRead || getCodeClipProviderCredentialSecretsForUse;
+  const refreshRegistry =
+    dependencies.credentialRefreshRegistry || credentialRefreshRegistry || null;
   const listBindings =
     dependencies.listBindings || listActiveCodeClipProviderAccountBindings;
   const ingest =
@@ -371,26 +400,91 @@ async function pollCodeClipProviderSource(
   if (usability.usableForProviderApi !== true) {
     return finishFailure("credential_unusable");
   }
-
-  let secrets;
-  try {
-    secrets = await secretRead(
-      { id: credential.id, purpose: "provider_api", now },
-      { queryClient, env: credentialEnv }
-    );
-  } catch (error) {
-    mapKnownError(error);
+  if (
+    pollSource.provider === "tiktok" &&
+    !hasCredentialScope(credential, "video.list")
+  ) {
+    return finishFailure("reauthorization_required");
   }
+
+  async function readProviderApiSecrets() {
+    try {
+      return await secretRead(
+        { id: credential.id, purpose: "provider_api", now },
+        { queryClient, env: credentialEnv }
+      );
+    } catch (error) {
+      mapKnownError(error);
+    }
+    return null;
+  }
+
+  let secrets = await readProviderApiSecrets();
 
   if (!secrets || secrets.ok !== true || !secrets.accessToken) {
     const reason = secrets?.reason || "";
     if (reason === "REAUTHORIZATION_REQUIRED") {
       return finishFailure("reauthorization_required");
     }
-    if (reason === "TOKEN_EXPIRED" || reason === "TOKEN_NOT_PRESENT") {
+    if (reason === "TOKEN_EXPIRED") {
+      const refresher = getCredentialRefresher(refreshRegistry, pollSource.provider);
+      if (!refresher) {
+        return finishFailure("credential_unusable");
+      }
+      let refreshResult;
+      try {
+        refreshResult = await refresher(
+          {
+            credentialId: credential.id,
+            owner: buildCredentialRefreshOwner(claimOwner, credential.id),
+            now,
+          },
+          { queryClient, env: credentialEnv }
+        );
+      } catch (error) {
+        mapKnownError(error);
+      }
+      if (!refreshResult || refreshResult.ok !== true) {
+        const status = refreshResult?.status || "";
+        if (status === "reauthorization_required") {
+          return finishFailure("reauthorization_required");
+        }
+        return finishFailure("retryable");
+      }
+      try {
+        credential = await findCredential(
+          {
+            provider: pollSource.provider,
+            providerAccountId: pollSource.providerAccountId,
+            environment: pollSource.environment,
+          },
+          { queryClient, now }
+        );
+      } catch (error) {
+        mapKnownError(error);
+      }
+      if (!credential) {
+        return finishFailure("credential_unusable");
+      }
+      if (
+        pollSource.provider === "tiktok" &&
+        !hasCredentialScope(credential, "video.list")
+      ) {
+        return finishFailure("reauthorization_required");
+      }
+      secrets = await readProviderApiSecrets();
+      if (!secrets || secrets.ok !== true || !secrets.accessToken) {
+        const retryReason = secrets?.reason || "";
+        if (retryReason === "REAUTHORIZATION_REQUIRED") {
+          return finishFailure("reauthorization_required");
+        }
+        return finishFailure("credential_unusable");
+      }
+    } else if (reason === "TOKEN_NOT_PRESENT") {
+      return finishFailure("credential_unusable");
+    } else {
       return finishFailure("credential_unusable");
     }
-    return finishFailure("credential_unusable");
   }
 
   // --- Adapter registry + poll (HTTP outside TX) ---

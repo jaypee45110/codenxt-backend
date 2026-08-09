@@ -17,6 +17,9 @@ const {
 const {
   createCodeClipProductionPollAdapterRegistry,
 } = require("./production-adapter-registry");
+const {
+  createCodeClipProductionCredentialRefreshRegistry,
+} = require("./production-credential-refresh-registry");
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -229,6 +232,29 @@ function resolveAdapterRegistry(adapterRegistry) {
   return registry;
 }
 
+function resolveCredentialRefreshRegistry(credentialRefreshRegistry) {
+  const registry =
+    credentialRefreshRegistry === undefined
+      ? createCodeClipProductionCredentialRefreshRegistry()
+      : credentialRefreshRegistry;
+  if (registry === null) return null;
+  if (!registry || typeof registry.get !== "function") {
+    throw workerError(
+      "CREDENTIAL_REFRESH_REGISTRY_NOT_AVAILABLE",
+      "credential refresh registry is invalid",
+      { fieldName: "credentialRefreshRegistry" }
+    );
+  }
+  if (registry.list !== undefined && typeof registry.list !== "function") {
+    throw workerError(
+      "CREDENTIAL_REFRESH_REGISTRY_NOT_AVAILABLE",
+      "credential refresh registry is invalid",
+      { fieldName: "credentialRefreshRegistry" }
+    );
+  }
+  return registry;
+}
+
 function startedAtForClock(nowIso) {
   return nowIso || new Date().toISOString();
 }
@@ -394,6 +420,7 @@ async function runCodeClipProviderPollingWorkerCycle(
   {
     queryClient,
     adapterRegistry,
+    credentialRefreshRegistry,
   } = {}
 ) {
   const normalized = {
@@ -417,6 +444,7 @@ async function runCodeClipProviderPollingWorkerCycle(
 
   const pool = requirePool(queryClient);
   const registry = resolveAdapterRegistry(adapterRegistry);
+  const refreshRegistry = resolveCredentialRefreshRegistry(credentialRefreshRegistry);
   const startedAt = startedAtForClock(normalized.now);
 
   if (normalized.signal?.aborted === true) {
@@ -494,6 +522,7 @@ async function runCodeClipProviderPollingWorkerCycle(
         limit: normalized.limit,
         queryClient: pool,
         adapterRegistry: registry,
+        credentialRefreshRegistry: refreshRegistry,
       });
       items[index] = summarizeServiceResult(sourceId, result);
     } catch {

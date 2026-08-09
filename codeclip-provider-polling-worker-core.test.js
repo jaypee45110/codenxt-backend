@@ -58,14 +58,18 @@ function loadWorkerCore({
     sourceId: input.sourceId,
   }),
   createRegistry = () => registry(),
+  createRefreshRegistry = () => ({ get: () => null, list: () => [] }),
 } = {}) {
   const workerPath = require.resolve(MODULE_PATH);
   const pollSourcesPath = require.resolve("./verticals/codeclip/provider-poll-sources");
   const servicePath = require.resolve("./verticals/codeclip/provider-polling/service");
   const registryPath = require.resolve("./verticals/codeclip/provider-polling/production-adapter-registry");
+  const refreshRegistryPath = require.resolve(
+    "./verticals/codeclip/provider-polling/production-credential-refresh-registry"
+  );
 
   const originals = new Map(
-    [workerPath, pollSourcesPath, servicePath, registryPath].map((key) => [
+    [workerPath, pollSourcesPath, servicePath, registryPath, refreshRegistryPath].map((key) => [
       key,
       require.cache[key],
     ])
@@ -89,6 +93,14 @@ function loadWorkerCore({
     filename: registryPath,
     loaded: true,
     exports: { createCodeClipProductionPollAdapterRegistry: createRegistry },
+  };
+  require.cache[refreshRegistryPath] = {
+    id: refreshRegistryPath,
+    filename: refreshRegistryPath,
+    loaded: true,
+    exports: {
+      createCodeClipProductionCredentialRefreshRegistry: createRefreshRegistry,
+    },
   };
 
   const mod = require(MODULE_PATH);
@@ -207,6 +219,7 @@ test("input validation rejects invalid dependencies and public options", async (
       [{ signal: { aborted: "false" } }, valid, "INVALID_WORKER_CYCLE_INPUT"],
       [{}, { queryClient: pool(), adapterRegistry: {} }, "ADAPTER_REGISTRY_NOT_AVAILABLE"],
       [{}, { queryClient: pool(), adapterRegistry: { provider: "tiktok", poll: async () => ({}) } }, "ADAPTER_REGISTRY_NOT_AVAILABLE"],
+      [{}, { queryClient: pool(), adapterRegistry: registry(), credentialRefreshRegistry: {} }, "CREDENTIAL_REFRESH_REGISTRY_NOT_AVAILABLE"],
     ]) {
       await assert.rejects(
         () => runCodeClipProviderPollingWorkerCycle(input, deps),
@@ -311,6 +324,7 @@ test("source success invokes service once per source with unique safe owners", a
         assert.equal(call.limit, 10);
         assert.equal(call.now, OPERATION_NOW);
         assert.equal(call.adapterRegistry.get instanceof Function, true);
+        assert.equal(call.credentialRefreshRegistry.get instanceof Function, true);
       }
 
       assert.equal(result.scanned, 2);
