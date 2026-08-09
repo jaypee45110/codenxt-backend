@@ -108,6 +108,33 @@ test("repository updates only codeClip activation config and preserves identity"
   ]);
 });
 
+test("repository accepts TikTok provider published video activation config", async () => {
+  const row = campaignRow();
+  const client = createQueryClient(row);
+  const result = await updateCodeClipEventActivationConfig(
+    "CC-ACTIVATION",
+    {
+      activationMethod: "provider",
+      activationChannels: ["tiktok"],
+      activationEvent: "published_video",
+    },
+    { queryClient: client }
+  );
+
+  assert.equal(result.status, "updated");
+  assert.equal(result.changed, true);
+  assert.equal(result.row.raw_event.activationMethod, "provider");
+  assert.deepEqual(result.row.raw_event.activationChannels, ["tiktok"]);
+  assert.equal(result.row.raw_event.activationEvent, "published_video");
+  assert.deepEqual(client.calls[1].params, [
+    "CC-ACTIVATION",
+    "provider",
+    JSON.stringify(["tiktok"]),
+    "published_video",
+  ]);
+});
+
+
 test("repository is idempotent and fails closed without one-row confirmation", async () => {
   const unchangedRow = campaignRow({
     activationMethod: "provider",
@@ -409,6 +436,11 @@ test("activation update route validates contract and rejects non-codeClip rows",
       activationChannels: ["sms"],
       activationEvent: "published_video",
     });
+    const validTikTok = await patchActivation(baseUrl, "CC-VALIDATE", {
+      activationMethod: "provider",
+      activationChannels: ["tiktok"],
+      activationEvent: "published_video",
+    });
 
     assert.equal(unknown.status, 404);
     assert.equal(unknown.body.error.code, "EPISODE_NOT_FOUND");
@@ -421,7 +453,11 @@ test("activation update route validates contract and rejects non-codeClip rows",
     assert.equal(invalidCombo.body.error.code, "UNSUPPORTED_PROVIDER_ACTIVATION_EVENT");
     assert.equal(publishedNoYoutube.status, 400);
     assert.equal(publishedNoYoutube.body.error.code, "UNSUPPORTED_PROVIDER_ACTIVATION_CHANNEL");
-    assert.equal(routeState.updateCalls.length, 0);
+    assert.equal(validTikTok.status, 200);
+    assert.equal(validTikTok.body.event.activationMethod, "provider");
+    assert.deepEqual(validTikTok.body.event.activationChannels, ["tiktok"]);
+    assert.equal(validTikTok.body.event.activationEvent, "published_video");
+    assert.equal(routeState.updateCalls.length, 1);
   });
 });
 

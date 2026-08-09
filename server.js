@@ -337,7 +337,9 @@ function normalizeEventActivationConfig({
     throw new EventActivationConfigError("PROVIDER_ACTIVATION_CHANNELS_REQUIRED");
   }
 
-  if (providerEventMode && normalizedChannels.some((channel) => channel !== "youtube")) {
+  const providerEventChannels = new Set(["youtube", "tiktok"]);
+
+  if (providerEventMode && normalizedChannels.some((channel) => !providerEventChannels.has(channel))) {
     throw new EventActivationConfigError("UNSUPPORTED_PROVIDER_ACTIVATION_CHANNEL");
   }
 
@@ -349,8 +351,11 @@ function normalizeEventActivationConfig({
     throw new EventActivationConfigError("UNSUPPORTED_PROVIDER_ACTIVATION_EVENT");
   }
 
-  if (normalizedEvent === "published_video" && !normalizedChannels.includes("youtube")) {
-    throw new EventActivationConfigError("PUBLISHED_VIDEO_REQUIRES_YOUTUBE");
+  if (
+    normalizedEvent === "published_video" &&
+    !normalizedChannels.some((channel) => providerEventChannels.has(channel))
+  ) {
+    throw new EventActivationConfigError("PUBLISHED_VIDEO_REQUIRES_PROVIDER_VIDEO_CHANNEL");
   }
 
   if (normalizedEvent && !["provider", "both"].includes(normalizedMethod)) {

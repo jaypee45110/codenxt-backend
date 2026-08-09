@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   eventMatchesBoundProviderActivation,
+  eventMatchesBoundProviderEventActivation,
   resolveCodeClipProviderActivationEvent,
 } = require("./verticals/codeclip/provider-activation");
 
@@ -209,6 +210,62 @@ test("bound codeClip provider activation accepts keyword ingress when activation
         keyword: "clip",
       }
     ),
+    true
+  );
+});
+
+test("bound codeClip provider event activation accepts TikTok published videos", () => {
+  assert.equal(
+    eventMatchesBoundProviderEventActivation(
+      codeClipEvent({
+        activationMethod: "provider",
+        activationChannels: [" TikTok "],
+        activationEvent: " Published_Video ",
+      }),
+      {
+        provider: "tiktok",
+        channel: "tiktok",
+        activationEvent: "published_video",
+      }
+    ),
+    true
+  );
+});
+
+test("bound codeClip provider event activation keeps Meta and YouTube isolated", () => {
+  const youtubeEvent = codeClipEvent({
+    activationMethod: "provider",
+    activationChannels: ["youtube"],
+    activationEvent: "published_video",
+  });
+  const metaEvent = codeClipEvent({
+    activationMethod: "both",
+    activationChannels: ["messenger"],
+    activationEvent: "published_video",
+  });
+
+  assert.equal(
+    eventMatchesBoundProviderEventActivation(youtubeEvent, {
+      provider: "youtube",
+      channel: "youtube",
+      activationEvent: "published_video",
+    }),
+    true
+  );
+  assert.equal(
+    eventMatchesBoundProviderEventActivation(youtubeEvent, {
+      provider: "tiktok",
+      channel: "tiktok",
+      activationEvent: "published_video",
+    }),
+    false
+  );
+  assert.equal(
+    eventMatchesBoundProviderEventActivation(metaEvent, {
+      provider: "meta",
+      channel: "messenger",
+      activationEvent: "published_video",
+    }),
     true
   );
 });

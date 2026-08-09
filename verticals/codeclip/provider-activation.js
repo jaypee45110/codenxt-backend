@@ -2,6 +2,7 @@ const PROVIDER_CHANNEL_ALIASES = {
   meta: ["meta", "facebook", "instagram", "messenger", "whatsapp"],
   sms: ["sms"],
   test: ["test"],
+  tiktok: ["tiktok"],
   youtube: ["youtube"],
 };
 
