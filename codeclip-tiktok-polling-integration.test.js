@@ -285,6 +285,7 @@ function makeRuntimeStore() {
       event_code: delivery.eventCode,
       external_message_id: delivery.externalMessageId,
       initial_delivery_source: delivery.initialDeliverySource,
+      provider_detection_metadata: delivery.providerDetectionMetadata,
       processing_state: delivery.processingState,
       core_persistence_state: delivery.corePersistenceState,
     };
@@ -412,6 +413,15 @@ test("generic service creates provider_polling delivery for new video and replay
   assert.equal(store.state.deliveries.length, 1);
   assert.equal(store.state.deliveries[0].initial_delivery_source, "provider_polling");
   assert.equal(store.state.deliveries[0].external_message_id, "poll:tiktok:new-1");
+  assert.deepEqual(store.state.deliveries[0].provider_detection_metadata, {
+    provider: "tiktok",
+    channel: "tiktok",
+    providerContentId: "new-1",
+    publishedAt: "2026-08-05T10:00:00.000Z",
+    detectedAt: "2026-08-05T10:01:00.000Z",
+    detectionSource: "display_api_polling",
+    canonicalUrl: "https://www.tiktok.com/@creator/video/new-1",
+  });
   assert.equal(store.state.deliveries[0].core_persistence_state, "not_started");
   assert.deepEqual(store.state.sources[0].checkpoint, {
     initialized: true,

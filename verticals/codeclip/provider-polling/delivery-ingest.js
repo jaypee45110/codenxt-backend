@@ -16,6 +16,10 @@ const {
 const {
   buildCodeClipProviderPollingExternalMessageId,
 } = require("./adapter-contract");
+const {
+  CodeClipProviderPollingDetectionMetadataError,
+  buildCodeClipProviderPollingDetectionMetadata,
+} = require("./detection-metadata");
 
 class CodeClipProviderPollingIngestError extends Error {
   constructor(code, message, details = {}) {
@@ -41,6 +45,13 @@ function ingestError(code, message, details = {}) {
 
 function mapPollSourceError(error) {
   if (error instanceof CodeClipProviderPollSourceError) {
+    throw ingestError(error.code, error.message, error.details || {});
+  }
+  throw error;
+}
+
+function mapDetectionMetadataError(error) {
+  if (error instanceof CodeClipProviderPollingDetectionMetadataError) {
     throw ingestError(error.code, error.message, error.details || {});
   }
   throw error;
@@ -117,10 +128,25 @@ async function ingestCodeClipProviderPollDetections(
         fieldName: "detections",
       });
     }
-    const externalMessageId = buildCodeClipProviderPollingExternalMessageId({
-      provider,
-      providerObjectId: detection.providerObjectId,
-    });
+    if (!bindings.length) continue;
+    let externalMessageId;
+    let providerDetectionMetadata;
+    try {
+      externalMessageId = buildCodeClipProviderPollingExternalMessageId({
+        provider,
+        providerObjectId: detection.providerObjectId,
+      });
+      providerDetectionMetadata = buildCodeClipProviderPollingDetectionMetadata({
+        provider,
+        detection: {
+          ...detection,
+          source: detection.source || detection.deliverySource,
+          detectedAt: detection.detectedAt || now,
+        },
+      });
+    } catch (error) {
+      mapDetectionMetadataError(error);
+    }
     for (const binding of bindings) {
       const eventCode =
         binding.eventCode || binding.event_code || null;
@@ -136,6 +162,7 @@ async function ingestCodeClipProviderPollDetections(
         providerAccountId,
         eventCode,
         externalMessageId,
+        providerDetectionMetadata,
         initialDeliverySource: detection.deliverySource,
         receivedAt: detection.detectedAt || null,
       });
@@ -171,6 +198,7 @@ async function ingestCodeClipProviderPollDetections(
                 providerAccountId: identity.providerAccountId,
                 eventCode: identity.eventCode,
                 externalMessageId: identity.externalMessageId,
+                providerDetectionMetadata: identity.providerDetectionMetadata,
                 initialDeliverySource: identity.initialDeliverySource,
                 verificationState: "verified",
                 processingState: "processing",

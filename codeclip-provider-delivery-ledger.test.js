@@ -22,6 +22,9 @@ function createDeliveryRow(overrides = {}) {
     idempotency_key: overrides.idempotency_key ?? 'redis-key-1',
     payload_fingerprint: overrides.payload_fingerprint ?? 'fingerprint-1',
     initial_delivery_source: overrides.initial_delivery_source || 'websub',
+    provider_detection_metadata: Object.hasOwn(overrides, 'provider_detection_metadata')
+      ? overrides.provider_detection_metadata
+      : null,
     verification_state: overrides.verification_state || 'verified',
     processing_state: Object.hasOwn(overrides, 'processing_state')
       ? overrides.processing_state
@@ -95,13 +98,14 @@ function createStatefulDeliveryClient({ throwOn = null } = {}) {
           idempotency_key: params[5],
           payload_fingerprint: params[6],
           initial_delivery_source: params[7],
-          verification_state: params[8],
-          processing_state: params[9],
-          core_persistence_state: params[10],
-          completion_state: params[11],
-          retry_eligible: params[12],
-          terminal_state: params[13],
-          received_at: params[14] || '2026-07-11T00:00:00.000Z',
+          provider_detection_metadata: params[8] ? JSON.parse(params[8]) : null,
+          verification_state: params[9],
+          processing_state: params[10],
+          core_persistence_state: params[11],
+          completion_state: params[12],
+          retry_eligible: params[13],
+          terminal_state: params[14],
+          received_at: params[15] || '2026-07-11T00:00:00.000Z',
         });
         const key = deliveryKey(row);
         const existing = rows.find((item) => deliveryKey(item) === key);
@@ -182,7 +186,7 @@ test('codeClip provider delivery schema defines durable identity and indexes', a
 
   await ensureCodeClipProviderDeliveriesTable(client);
 
-  assert.equal(client.calls.length, 7);
+  assert.equal(client.calls.length, 8);
   assert.match(client.calls[0].sql, /CREATE TABLE IF NOT EXISTS codeclip_provider_deliveries/);
   assert.match(
     client.calls[0].sql,
@@ -190,6 +194,7 @@ test('codeClip provider delivery schema defines durable identity and indexes', a
   );
   assert.match(client.calls[0].sql, /CHECK \(attempt_count >= 1\)/);
   assert.match(client.calls[0].sql, /initial_delivery_source TEXT NOT NULL DEFAULT 'websub'/);
+  assert.match(client.calls[0].sql, /provider_detection_metadata JSONB/);
   assert.match(
     client.calls[0].sql,
     /CHECK \(initial_delivery_source IN \('websub', 'operator_reconciliation_recovery', 'atom_reconciliation', 'data_api_polling', 'provider_polling'\)\)/
@@ -200,13 +205,14 @@ test('codeClip provider delivery schema defines durable identity and indexes', a
   assert.match(client.calls[0].sql, /created_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[0].sql, /updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/);
   assert.match(client.calls[1].sql, /ADD COLUMN IF NOT EXISTS initial_delivery_source/);
-  assert.match(client.calls[2].sql, /codeclip_provider_deliveries_initial_source_chk/);
-  assert.match(client.calls[2].sql, /provider_polling/);
-  assert.match(client.calls[2].sql, /NOT LIKE '%provider_polling%'/);
-  assert.match(client.calls[3].sql, /codeclip_provider_deliveries_event_code_idx/);
-  assert.match(client.calls[4].sql, /codeclip_provider_deliveries_completion_state_idx/);
-  assert.match(client.calls[5].sql, /codeclip_provider_deliveries_processing_state_idx/);
-  assert.match(client.calls[6].sql, /codeclip_provider_deliveries_received_at_idx/);
+  assert.match(client.calls[2].sql, /ADD COLUMN IF NOT EXISTS provider_detection_metadata/);
+  assert.match(client.calls[3].sql, /codeclip_provider_deliveries_initial_source_chk/);
+  assert.match(client.calls[3].sql, /provider_polling/);
+  assert.match(client.calls[3].sql, /NOT LIKE '%provider_polling%'/);
+  assert.match(client.calls[4].sql, /codeclip_provider_deliveries_event_code_idx/);
+  assert.match(client.calls[5].sql, /codeclip_provider_deliveries_completion_state_idx/);
+  assert.match(client.calls[6].sql, /codeclip_provider_deliveries_processing_state_idx/);
+  assert.match(client.calls[7].sql, /codeclip_provider_deliveries_received_at_idx/);
 });
 
 test('codeClip provider delivery create distinguishes created and existing rows', async () => {
@@ -233,10 +239,85 @@ test('codeClip provider delivery create distinguishes created and existing rows'
   assert.equal(created.row.idempotencyKey, 'redis-key-1');
   assert.equal(created.row.payloadFingerprint, 'fingerprint-1');
   assert.equal(created.row.initialDeliverySource, 'websub');
+  assert.equal(created.row.providerDetectionMetadata, null);
   assert.equal(existing.status, 'existing');
   assert.equal(existing.existing, true);
   assert.equal(existing.row.id, created.row.id);
   assert.match(client.calls[0].sql, /ON CONFLICT \(provider, provider_account_id, event_code, external_message_id\)/);
+});
+
+test('codeClip provider delivery stores bounded provider detection metadata', async () => {
+  const client = createStatefulDeliveryClient();
+  const metadata = {
+    provider: 'tiktok',
+    channel: 'tiktok',
+    providerContentId: 'video-1',
+    publishedAt: '2026-08-05T10:00:00.000Z',
+    detectedAt: '2026-08-05T10:01:00.000Z',
+    detectionSource: 'display_api_polling',
+    canonicalUrl: 'https://www.tiktok.com/@creator/video/video-1',
+  };
+
+  const created = await createCodeClipProviderDelivery({
+    provider: 'tiktok',
+    providerAccountId: 'sandbox-account',
+    eventCode: 'CC-META',
+    externalMessageId: 'poll:tiktok:video-1',
+    initialDeliverySource: 'provider_polling',
+    providerDetectionMetadata: metadata,
+  }, client);
+  const duplicate = await createCodeClipProviderDelivery({
+    provider: 'tiktok',
+    providerAccountId: 'sandbox-account',
+    eventCode: 'CC-META',
+    externalMessageId: 'poll:tiktok:video-1',
+    initialDeliverySource: 'provider_polling',
+    providerDetectionMetadata: {
+      ...metadata,
+      publishedAt: '2026-08-05T11:00:00.000Z',
+    },
+  }, client);
+
+  assert.equal(created.status, 'created');
+  assert.deepEqual(created.row.providerDetectionMetadata, metadata);
+  assert.equal(duplicate.status, 'existing');
+  assert.deepEqual(duplicate.row.providerDetectionMetadata, metadata);
+  assert.equal(client.rows.length, 1);
+});
+
+test('codeClip provider delivery rejects unsafe detection metadata', async () => {
+  const client = createStatefulDeliveryClient();
+  const base = {
+    provider: 'tiktok',
+    providerAccountId: 'sandbox-account',
+    eventCode: 'CC-UNSAFE',
+    externalMessageId: 'poll:tiktok:video-unsafe',
+    initialDeliverySource: 'provider_polling',
+  };
+
+  const unknownField = await createCodeClipProviderDelivery({
+    ...base,
+    providerDetectionMetadata: {
+      provider: 'tiktok',
+      providerContentId: 'video-unsafe',
+      accessToken: 'must-not-persist',
+    },
+  }, client);
+  const badUrl = await createCodeClipProviderDelivery({
+    ...base,
+    externalMessageId: 'poll:tiktok:video-bad-url',
+    providerDetectionMetadata: {
+      provider: 'tiktok',
+      providerContentId: 'video-bad-url',
+      canonicalUrl: 'http://example.invalid/video',
+    },
+  }, client);
+
+  assert.equal(unknownField.status, 'failed');
+  assert.match(unknownField.error.message, /unsupported field/);
+  assert.equal(badUrl.status, 'failed');
+  assert.match(badUrl.error.message, /canonicalUrl/);
+  assert.equal(client.rows.length, 0);
 });
 
 test('codeClip provider delivery initial source is validated and never overwritten by duplicates', async () => {

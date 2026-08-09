@@ -695,6 +695,9 @@ test("poll service fenced ingest single-winner in PostgreSQL", async (t) => {
   const {
     ingestCodeClipProviderPollDetections,
   } = require("./verticals/codeclip/provider-polling/delivery-ingest");
+  const {
+    getCodeClipProviderPollingCompletionInput,
+  } = require("./verticals/codeclip/provider-polling/detection-metadata");
 
   const pool = new Pool({ connectionString });
   const schema = `codeclip_poll_svc_${process.pid}_${Date.now()}`;
@@ -712,7 +715,7 @@ test("poll service fenced ingest single-winner in PostgreSQL", async (t) => {
 
     const created = await createCodeClipProviderPollSource(
       {
-        provider: "youtube",
+        provider: "tiktok",
         environment: "sandbox",
         providerAccountId: "UC_svc_fence_channel_01",
         pollIntervalMs: 30_000,
@@ -735,7 +738,8 @@ test("poll service fenced ingest single-winner in PostgreSQL", async (t) => {
     // Expire and reclaim as B
     await pool.query(
       `UPDATE codeclip_provider_poll_sources
-       SET poll_claim_expires_at = '2026-08-04T11:00:00.000Z'
+       SET poll_claimed_at = '2026-08-04T10:00:00.000Z',
+           poll_claim_expires_at = '2026-08-04T11:00:00.000Z'
        WHERE id = $1`,
       [sourceId]
     );
@@ -759,11 +763,14 @@ test("poll service fenced ingest single-winner in PostgreSQL", async (t) => {
             owner: "worker.a",
             expectedVersion: 1,
             checkpoint: { from: "a" },
-            provider: "youtube",
-            providerAccountId: "UC_svc_fence_channel_01",
+            provider: "tiktok",
+            providerAccountId: "tiktok_sandbox_account_01",
             detections: [
               {
                 providerObjectId: "vid-a",
+                publishedAt: "2026-08-04T11:30:00.000Z",
+                detectedAt: OPERATION_NOW,
+                source: "display_api_polling",
                 deliverySource: "provider_polling",
               },
             ],
@@ -787,13 +794,16 @@ test("poll service fenced ingest single-winner in PostgreSQL", async (t) => {
         expectedVersion: 2,
         checkpoint: { from: "b" },
         nextPollAt: "2026-08-04T12:30:00.000Z",
-        provider: "youtube",
-        providerAccountId: "UC_svc_fence_channel_01",
+        provider: "tiktok",
+        providerAccountId: "tiktok_sandbox_account_01",
         detections: [
           {
             providerObjectId: "vid-b",
+            publishedAt: "2026-08-04T11:45:00.000Z",
+            source: "display_api_polling",
             deliverySource: "provider_polling",
             detectedAt: OPERATION_NOW,
+            canonicalUrl: "https://www.tiktok.com/@creator/video/vid-b",
           },
         ],
         bindings: [{ eventCode: "CC-FENCE" }],
@@ -816,6 +826,32 @@ test("poll service fenced ingest single-winner in PostgreSQL", async (t) => {
     assert.deepEqual(row.rows[0].checkpoint, { from: "b" });
     assert.equal(row.rows[0].poll_claim_owner, null);
     assert.equal(Number(row.rows[0].poll_claim_version), 2);
+
+    const deliveryRow = await pool.query(
+      `SELECT provider, initial_delivery_source, provider_detection_metadata
+       FROM codeclip_provider_deliveries
+       WHERE provider = 'tiktok'
+         AND event_code = 'CC-FENCE'
+         AND external_message_id = 'poll:tiktok:vid-b'`
+    );
+    assert.equal(deliveryRow.rows.length, 1);
+    assert.deepEqual(deliveryRow.rows[0].provider_detection_metadata, {
+      provider: "tiktok",
+      channel: "tiktok",
+      providerContentId: "vid-b",
+      publishedAt: "2026-08-04T11:45:00.000Z",
+      detectedAt: OPERATION_NOW,
+      detectionSource: "display_api_polling",
+      canonicalUrl: "https://www.tiktok.com/@creator/video/vid-b",
+    });
+    const completionInput = getCodeClipProviderPollingCompletionInput(
+      deliveryRow.rows[0]
+    );
+    assert.equal(completionInput.ok, true);
+    assert.deepEqual(
+      completionInput.completionInput,
+      deliveryRow.rows[0].provider_detection_metadata
+    );
 
     // Replay is existing
     await completeCodeClipProviderPollSourceClaim(
@@ -846,13 +882,16 @@ test("poll service fenced ingest single-winner in PostgreSQL", async (t) => {
         owner: "worker.b",
         expectedVersion: claimReplay.claimVersion,
         checkpoint: { from: "b2" },
-        provider: "youtube",
-        providerAccountId: "UC_svc_fence_channel_01",
+        provider: "tiktok",
+        providerAccountId: "tiktok_sandbox_account_01",
         detections: [
           {
             providerObjectId: "vid-b",
+            publishedAt: "2026-08-04T11:45:00.000Z",
+            source: "display_api_polling",
             deliverySource: "provider_polling",
             detectedAt: OPERATION_NOW,
+            canonicalUrl: "https://www.tiktok.com/@creator/video/changed",
           },
         ],
         bindings: [{ eventCode: "CC-FENCE" }],

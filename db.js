@@ -1273,6 +1273,7 @@ function mapCodeClipProviderDeliveryRow(row = null) {
     idempotencyKey: row.idempotency_key,
     payloadFingerprint: row.payload_fingerprint,
     initialDeliverySource: row.initial_delivery_source || 'websub',
+    providerDetectionMetadata: row.provider_detection_metadata || null,
     verificationState: row.verification_state,
     processingState: row.processing_state,
     attemptCount: row.attempt_count,
@@ -3241,6 +3242,7 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
       idempotency_key TEXT,
       payload_fingerprint TEXT,
       initial_delivery_source TEXT NOT NULL DEFAULT 'websub',
+      provider_detection_metadata JSONB,
       verification_state TEXT NOT NULL DEFAULT 'verified',
       processing_state TEXT NOT NULL DEFAULT 'received',
       attempt_count INTEGER NOT NULL DEFAULT 1,
@@ -3266,6 +3268,11 @@ async function ensureCodeClipProviderDeliveriesTable(queryClient = pool) {
   await queryClient.query(`
     ALTER TABLE codeclip_provider_deliveries
     ADD COLUMN IF NOT EXISTS initial_delivery_source TEXT NOT NULL DEFAULT 'websub'
+  `);
+
+  await queryClient.query(`
+    ALTER TABLE codeclip_provider_deliveries
+    ADD COLUMN IF NOT EXISTS provider_detection_metadata JSONB
   `);
 
   await queryClient.query(`
@@ -3410,6 +3417,100 @@ function normalizeCodeClipProviderDeliveryInitialSource(value = 'websub') {
   return normalized;
 }
 
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null || value.constructor === Object;
+}
+
+function optionalCodeClipProviderDeliveryIsoString(value, fieldName) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') {
+    throw new Error(`codeClip provider delivery ${fieldName} is invalid`);
+  }
+  const trimmed = value.trim();
+  const ms = Date.parse(trimmed);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString() !== trimmed) {
+    throw new Error(`codeClip provider delivery ${fieldName} is invalid`);
+  }
+  return trimmed;
+}
+
+function optionalCodeClipProviderDeliveryUrl(value, fieldName) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') {
+    throw new Error(`codeClip provider delivery ${fieldName} is invalid`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 2048) {
+    throw new Error(`codeClip provider delivery ${fieldName} is invalid`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch (_error) {
+    throw new Error(`codeClip provider delivery ${fieldName} is invalid`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`codeClip provider delivery ${fieldName} is invalid`);
+  }
+  return trimmed;
+}
+
+function normalizeCodeClipProviderDetectionMetadata(metadata = null) {
+  if (metadata === undefined || metadata === null) return null;
+  if (!isPlainObject(metadata)) {
+    throw new Error('codeClip provider delivery detection metadata is invalid');
+  }
+
+  const allowed = new Set([
+    'provider',
+    'channel',
+    'providerContentId',
+    'publishedAt',
+    'detectedAt',
+    'detectionSource',
+    'canonicalUrl',
+  ]);
+  for (const key of Object.keys(metadata)) {
+    if (!allowed.has(key)) {
+      throw new Error('codeClip provider delivery detection metadata contains an unsupported field');
+    }
+  }
+
+  const normalized = {};
+  const provider = optionalCodeClipProviderDeliveryString(metadata.provider);
+  if (provider) normalized.provider = provider.toLowerCase();
+  const channel = optionalCodeClipProviderDeliveryString(metadata.channel);
+  if (channel) normalized.channel = channel.toLowerCase();
+  const providerContentId = optionalCodeClipProviderDeliveryString(metadata.providerContentId);
+  if (providerContentId) {
+    if (providerContentId.length > 256) {
+      throw new Error('codeClip provider delivery providerContentId is invalid');
+    }
+    normalized.providerContentId = providerContentId;
+  }
+  const publishedAt = optionalCodeClipProviderDeliveryIsoString(metadata.publishedAt, 'publishedAt');
+  if (publishedAt) normalized.publishedAt = publishedAt;
+  const detectedAt = optionalCodeClipProviderDeliveryIsoString(metadata.detectedAt, 'detectedAt');
+  if (detectedAt) normalized.detectedAt = detectedAt;
+  const detectionSource = optionalCodeClipProviderDeliveryString(metadata.detectionSource);
+  if (detectionSource) {
+    if (detectionSource.length > 80) {
+      throw new Error('codeClip provider delivery detectionSource is invalid');
+    }
+    normalized.detectionSource = detectionSource.toLowerCase();
+  }
+  const canonicalUrl = optionalCodeClipProviderDeliveryUrl(metadata.canonicalUrl, 'canonicalUrl');
+  if (canonicalUrl) normalized.canonicalUrl = canonicalUrl;
+
+  if (JSON.stringify(normalized).length > 4096) {
+    throw new Error('codeClip provider delivery detection metadata is too large');
+  }
+
+  return Object.keys(normalized).length ? normalized : null;
+}
+
 async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool) {
   if (!queryClient) {
     return {
@@ -3445,6 +3546,20 @@ async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool)
       error,
     };
   }
+  let providerDetectionMetadata;
+  try {
+    providerDetectionMetadata = normalizeCodeClipProviderDetectionMetadata(
+      delivery.providerDetectionMetadata || delivery.provider_detection_metadata || null
+    );
+  } catch (error) {
+    return {
+      status: 'failed',
+      created: false,
+      existing: false,
+      row: null,
+      error,
+    };
+  }
 
   try {
     if (queryClient === pool) {
@@ -3462,6 +3577,7 @@ async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool)
           idempotency_key,
           payload_fingerprint,
           initial_delivery_source,
+          provider_detection_metadata,
           verification_state,
           processing_state,
           attempt_count,
@@ -3473,7 +3589,7 @@ async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool)
           last_attempt_at,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12,$13,$14,COALESCE($15::timestamptz,NOW()),NOW(),NOW())
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,1,$12,$13,$14,$15,COALESCE($16::timestamptz,NOW()),NOW(),NOW())
         ON CONFLICT (provider, provider_account_id, event_code, external_message_id)
         DO NOTHING
         RETURNING *
@@ -3487,6 +3603,7 @@ async function createCodeClipProviderDelivery(delivery = {}, queryClient = pool)
         optionalCodeClipProviderDeliveryString(delivery.idempotencyKey || delivery.idempotency_key),
         optionalCodeClipProviderDeliveryString(delivery.payloadFingerprint || delivery.payload_fingerprint),
         initialDeliverySource,
+        providerDetectionMetadata ? JSON.stringify(providerDetectionMetadata) : null,
         delivery.verificationState || delivery.verification_state || 'verified',
         delivery.processingState || delivery.processing_state || 'processing',
         delivery.corePersistenceState || delivery.core_persistence_state || 'not_started',
