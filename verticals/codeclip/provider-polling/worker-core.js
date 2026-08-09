@@ -44,6 +44,17 @@ const SCAN_DATABASE_UNAVAILABLE_CODES = Object.freeze(
   ])
 );
 
+/** Allowlisted due-source scan stages (must match repository tagging). */
+const DUE_SOURCE_SCAN_STAGE_ALLOWLIST = Object.freeze(
+  new Set([
+    "due_source_scan_enter",
+    "due_source_query_start",
+    "due_source_query_failed",
+    "due_source_row_mapping_failed",
+    "due_source_scan_failed",
+  ])
+);
+
 class CodeClipProviderPollingWorkerCoreError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -63,6 +74,12 @@ class CodeClipProviderPollingWorkerCoreError extends Error {
     if (this.underlyingCode !== undefined && this.underlyingCode !== null) {
       json.underlyingCode = this.underlyingCode;
     }
+    if (this.underlyingName !== undefined && this.underlyingName !== null) {
+      json.underlyingName = this.underlyingName;
+    }
+    if (this.scanStage !== undefined && this.scanStage !== null) {
+      json.scanStage = this.scanStage;
+    }
     return json;
   }
 }
@@ -77,9 +94,30 @@ function sanitizeUnderlyingCode(value) {
   return code || null;
 }
 
+/**
+ * Safe Error.name only. Never copies message, stack, or cause.
+ */
+function sanitizeUnderlyingName(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const name = String(value).trim().slice(0, 80);
+  return name || null;
+}
+
+/**
+ * Allowlisted scan stage only; arbitrary exception strings are dropped.
+ */
+function sanitizeScanStage(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const stage = String(value).trim().slice(0, 80);
+  if (!stage || !DUE_SOURCE_SCAN_STAGE_ALLOWLIST.has(stage)) return null;
+  return stage;
+}
+
 function workerError(code, message, details = {}) {
   const safe = {};
   let underlyingCode = null;
+  let underlyingName = null;
+  let scanStage = null;
   if (details && typeof details === "object") {
     for (const key of ["fieldName", "reason", "classification"]) {
       if (details[key] !== undefined && details[key] !== null) {
@@ -87,10 +125,18 @@ function workerError(code, message, details = {}) {
       }
     }
     underlyingCode = sanitizeUnderlyingCode(details.underlyingCode);
+    underlyingName = sanitizeUnderlyingName(details.underlyingName);
+    scanStage = sanitizeScanStage(details.scanStage);
   }
   const error = new CodeClipProviderPollingWorkerCoreError(code, message, safe);
   if (underlyingCode) {
     error.underlyingCode = underlyingCode;
+  }
+  if (underlyingName) {
+    error.underlyingName = underlyingName;
+  }
+  if (scanStage) {
+    error.scanStage = scanStage;
   }
   return error;
 }
@@ -434,29 +480,40 @@ function mapScanError(error) {
   if (error instanceof CodeClipProviderPollingWorkerCoreError) throw error;
 
   const underlyingCode = sanitizeUnderlyingCode(error && error.code);
+  const underlyingName = sanitizeUnderlyingName(error && error.name);
+  const scanStage =
+    sanitizeScanStage(error && error.scanStage) || "due_source_scan_failed";
+
+  const diagnostics = {
+    scanStage,
+    ...(underlyingCode ? { underlyingCode } : {}),
+    ...(underlyingName ? { underlyingName } : {}),
+  };
 
   if (underlyingCode === "DATABASE_UNAVAILABLE") {
-    throw workerError("DATABASE_UNAVAILABLE", "due source scan failed", {
-      underlyingCode,
-    });
+    throw workerError(
+      "DATABASE_UNAVAILABLE",
+      "due source scan failed",
+      diagnostics
+    );
   }
 
   if (
     underlyingCode &&
     SCAN_DATABASE_UNAVAILABLE_CODES.has(underlyingCode)
   ) {
-    throw workerError("DATABASE_UNAVAILABLE", "due source scan failed", {
-      underlyingCode,
-    });
+    throw workerError(
+      "DATABASE_UNAVAILABLE",
+      "due source scan failed",
+      diagnostics
+    );
   }
 
-  if (underlyingCode) {
-    throw workerError("DUE_SOURCE_SCAN_FAILED", "due source scan failed", {
-      underlyingCode,
-    });
-  }
-
-  throw workerError("DUE_SOURCE_SCAN_FAILED", "due source scan failed");
+  throw workerError(
+    "DUE_SOURCE_SCAN_FAILED",
+    "due source scan failed",
+    diagnostics
+  );
 }
 
 async function runCodeClipProviderPollingWorkerCycle(

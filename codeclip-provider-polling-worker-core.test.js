@@ -276,6 +276,8 @@ test("due scan forwards filters and maps scan failure to typed global error", as
         (error) => {
           assertWorkerError(error, "DUE_SOURCE_SCAN_FAILED");
           assert.equal(error.underlyingCode, undefined);
+          assert.equal(error.underlyingName, "Error");
+          assert.equal(error.scanStage, "due_source_scan_failed");
           const serialized = JSON.stringify(error);
           assert.equal(serialized.includes("database exploded"), false);
           assert.equal(serialized.includes(ACCOUNT_ID), false);
@@ -302,6 +304,7 @@ test("due-source scan maps network system codes to DATABASE_UNAVAILABLE with saf
             `connect ${systemCode} secret-host DATABASE_URL=postgresql://user:pass@host/db SELECT * FROM secrets`
           );
           error.code = systemCode;
+          error.scanStage = "due_source_query_failed";
           error.stack = `Error: leaked stack ${TOKEN}\n    at listDue`;
           throw error;
         },
@@ -316,6 +319,8 @@ test("due-source scan maps network system codes to DATABASE_UNAVAILABLE with saf
           (error) => {
             assertWorkerError(error, "DATABASE_UNAVAILABLE");
             assert.equal(error.underlyingCode, systemCode);
+            assert.equal(error.underlyingName, "Error");
+            assert.equal(error.scanStage, "due_source_query_failed");
             const serialized = JSON.stringify(error);
             assert.equal(serialized.includes(TOKEN), false);
             assert.equal(serialized.includes("postgresql://"), false);
@@ -337,6 +342,7 @@ test("due-source scan preserves DATABASE_UNAVAILABLE and PG-style codes safely",
       listDue: async () => {
         const error = new Error("pool missing");
         error.code = "DATABASE_UNAVAILABLE";
+        error.scanStage = "due_source_scan_enter";
         throw error;
       },
     },
@@ -350,6 +356,8 @@ test("due-source scan preserves DATABASE_UNAVAILABLE and PG-style codes safely",
         (error) => {
           assertWorkerError(error, "DATABASE_UNAVAILABLE");
           assert.equal(error.underlyingCode, "DATABASE_UNAVAILABLE");
+          assert.equal(error.underlyingName, "Error");
+          assert.equal(error.scanStage, "due_source_scan_enter");
           return true;
         }
       );
@@ -363,6 +371,7 @@ test("due-source scan preserves DATABASE_UNAVAILABLE and PG-style codes safely",
           'relation "codeclip_provider_poll_sources" does not exist'
         );
         error.code = "42P01";
+        error.scanStage = "due_source_query_failed";
         error.detail = "leaked detail with " + ACCOUNT_ID;
         error.hint = "leaked hint";
         throw error;
@@ -378,12 +387,79 @@ test("due-source scan preserves DATABASE_UNAVAILABLE and PG-style codes safely",
         (error) => {
           assertWorkerError(error, "DUE_SOURCE_SCAN_FAILED");
           assert.equal(error.underlyingCode, "42P01");
+          assert.equal(error.underlyingName, "Error");
+          assert.equal(error.scanStage, "due_source_query_failed");
           const serialized = JSON.stringify(error);
           assert.equal(serialized.includes("relation"), false);
           assert.equal(serialized.includes("does not exist"), false);
           assert.equal(serialized.includes("leaked detail"), false);
           assert.equal(serialized.includes("leaked hint"), false);
           assert.equal(serialized.includes(ACCOUNT_ID), false);
+          return true;
+        }
+      );
+    }
+  );
+});
+
+test("due-source scan maps TypeError during row normalization with scanStage", async () => {
+  await withWorker(
+    {
+      listDue: async () => {
+        const error = new TypeError(
+          `Cannot read properties of null (reading 'id') SELECT * FROM secrets ${TOKEN}`
+        );
+        error.scanStage = "due_source_row_mapping_failed";
+        error.stack = `TypeError: leaked stack ${TOKEN}\n    at toPublicPollSource`;
+        throw error;
+      },
+    },
+    async ({ runCodeClipProviderPollingWorkerCycle }) => {
+      await assert.rejects(
+        () =>
+          runCodeClipProviderPollingWorkerCycle(
+            { now: OPERATION_NOW },
+            { queryClient: pool(), adapterRegistry: registry() }
+          ),
+        (error) => {
+          assertWorkerError(error, "DUE_SOURCE_SCAN_FAILED");
+          assert.equal(error.underlyingCode, undefined);
+          assert.equal(error.underlyingName, "TypeError");
+          assert.equal(error.scanStage, "due_source_row_mapping_failed");
+          const serialized = JSON.stringify(error);
+          assert.equal(serialized.includes(TOKEN), false);
+          assert.equal(serialized.includes("SELECT "), false);
+          assert.equal(serialized.includes("Cannot read"), false);
+          assert.equal(serialized.includes("leaked stack"), false);
+          return true;
+        }
+      );
+    }
+  );
+});
+
+test("due-source scan ignores arbitrary non-allowlisted scanStage strings", async () => {
+  await withWorker(
+    {
+      listDue: async () => {
+        const error = new Error("boom");
+        error.code = "42P01";
+        error.scanStage = "SELECT * FROM secrets; DROP TABLE users";
+        throw error;
+      },
+    },
+    async ({ runCodeClipProviderPollingWorkerCycle }) => {
+      await assert.rejects(
+        () =>
+          runCodeClipProviderPollingWorkerCycle(
+            { now: OPERATION_NOW },
+            { queryClient: pool(), adapterRegistry: registry() }
+          ),
+        (error) => {
+          assertWorkerError(error, "DUE_SOURCE_SCAN_FAILED");
+          assert.equal(error.underlyingCode, "42P01");
+          assert.equal(error.scanStage, "due_source_scan_failed");
+          assert.equal(JSON.stringify(error).includes("DROP TABLE"), false);
           return true;
         }
       );

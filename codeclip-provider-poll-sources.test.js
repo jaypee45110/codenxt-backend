@@ -932,6 +932,90 @@ test("listDue rejects non-polling provider filter", async () => {
       ),
     (error) => {
       assertPollError(error, "INVALID_POLL_SOURCE_INPUT");
+      assert.equal(error.scanStage, "due_source_scan_enter");
+      return true;
+    }
+  );
+});
+
+test("listDue tags query failures with due_source_query_failed scanStage", async () => {
+  const client = {
+    async query() {
+      const error = new Error(
+        "getaddrinfo ENOTFOUND secret-host DATABASE_URL=postgresql://u:p@h/db"
+      );
+      error.code = "ENOTFOUND";
+      error.stack = "Error: leaked stack\n    at query";
+      throw error;
+    },
+  };
+  await assert.rejects(
+    () =>
+      listDueCodeClipProviderPollSources(
+        { now: OPERATION_NOW, limit: 1 },
+        { queryClient: client }
+      ),
+    (error) => {
+      assert.equal(error.code, "ENOTFOUND");
+      assert.equal(error.scanStage, "due_source_query_failed");
+      assert.equal(String(error.message || "").includes("DATABASE_URL"), true);
+      // Stage tagging must not strip the original error; sanitization is worker-core.
+      return true;
+    }
+  );
+});
+
+test("listDue tags row mapping failures with due_source_row_mapping_failed", async () => {
+  let calls = 0;
+  const client = {
+    async query(sql) {
+      calls += 1;
+      if (calls === 1) {
+        // operation clock
+        return { rows: [{ operation_now: OPERATION_NOW }] };
+      }
+      // Force toPublicPollSource path with a non-array rows that still maps if we throw in map
+      const badRow = null;
+      return {
+        rows: {
+          // iterable-like fake that map will try to use - use Proxy
+          length: 1,
+          0: badRow,
+          map(fn) {
+            return [fn(this[0])];
+          },
+        },
+      };
+    },
+  };
+  // toPublicPollSource(null) returns null without throw - need real throw during map
+  const throwingClient = {
+    async query() {
+      if (throwingClient.n === undefined) throwingClient.n = 0;
+      throwingClient.n += 1;
+      if (throwingClient.n === 1) {
+        return { rows: [{ operation_now: OPERATION_NOW }] };
+      }
+      return {
+        rows: [
+          {
+            get id() {
+              throw new TypeError("Cannot read properties of null");
+            },
+          },
+        ],
+      };
+    },
+  };
+  await assert.rejects(
+    () =>
+      listDueCodeClipProviderPollSources(
+        { now: OPERATION_NOW, limit: 1 },
+        { queryClient: throwingClient }
+      ),
+    (error) => {
+      assert.equal(error.name, "TypeError");
+      assert.equal(error.scanStage, "due_source_row_mapping_failed");
       return true;
     }
   );

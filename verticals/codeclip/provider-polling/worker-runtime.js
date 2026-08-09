@@ -454,6 +454,37 @@ function sanitizeUnderlyingCode(error) {
   return code || null;
 }
 
+/**
+ * Safe Error.name only from worker core errors.
+ */
+function sanitizeUnderlyingName(error) {
+  const raw = error?.underlyingName;
+  if (raw === undefined || raw === null || raw === "") return null;
+  const name = String(raw).trim().slice(0, 80);
+  return name || null;
+}
+
+const SCAN_STAGE_ALLOWLIST = Object.freeze(
+  new Set([
+    "due_source_scan_enter",
+    "due_source_query_start",
+    "due_source_query_failed",
+    "due_source_row_mapping_failed",
+    "due_source_scan_failed",
+  ])
+);
+
+/**
+ * Allowlisted scan stage only.
+ */
+function sanitizeScanStage(error) {
+  const raw = error?.scanStage;
+  if (raw === undefined || raw === null || raw === "") return null;
+  const stage = String(raw).trim().slice(0, 80);
+  if (!stage || !SCAN_STAGE_ALLOWLIST.has(stage)) return null;
+  return stage;
+}
+
 function createController() {
   if (typeof AbortController === "function") {
     return new AbortController();
@@ -518,6 +549,8 @@ function createCodeClipProviderPollingWorkerRuntime(
       "durationMs",
       "errorCode",
       "underlyingCode",
+      "underlyingName",
+      "scanStage",
       "state",
     ]) {
       if (fields[key] !== undefined && fields[key] !== null) {
@@ -617,10 +650,14 @@ function createCodeClipProviderPollingWorkerRuntime(
         lastCycleStatus = "failed";
         lastErrorCode = sanitizeErrorCode(error);
         const underlyingCode = sanitizeUnderlyingCode(error);
+        const underlyingName = sanitizeUnderlyingName(error);
+        const scanStage = sanitizeScanStage(error);
         safeLog("error", "provider_polling_cycle_failed", {
           cycleNumber,
           errorCode: lastErrorCode,
           ...(underlyingCode ? { underlyingCode } : {}),
+          ...(underlyingName ? { underlyingName } : {}),
+          ...(scanStage ? { scanStage } : {}),
         });
         return {
           ok: false,
@@ -629,6 +666,8 @@ function createCodeClipProviderPollingWorkerRuntime(
           environment: normalized.environment,
           errorCode: lastErrorCode,
           ...(underlyingCode ? { underlyingCode } : {}),
+          ...(underlyingName ? { underlyingName } : {}),
+          ...(scanStage ? { scanStage } : {}),
           startedAt: lastCycleStartedAt,
           completedAt: lastCycleCompletedAt,
           durationMs: durationBetween(lastCycleStartedAt, lastCycleCompletedAt),

@@ -964,92 +964,170 @@ async function findCodeClipProviderPollSource(
 }
 
 /**
+ * Safe due-source scan stage allowlist (observability only).
+ * No separate connection-acquisition phase: listDue uses queryClient.query
+ * directly (pool.query or client.query), not pool.connect().
+ */
+const DUE_SOURCE_SCAN_STAGES = Object.freeze({
+  ENTER: "due_source_scan_enter",
+  QUERY_START: "due_source_query_start",
+  QUERY_FAILED: "due_source_query_failed",
+  ROW_MAPPING_FAILED: "due_source_row_mapping_failed",
+  SCAN_FAILED: "due_source_scan_failed",
+});
+
+function attachDueSourceScanStage(error, stage) {
+  if (!error || typeof error !== "object") return error;
+  if (error.scanStage !== undefined && error.scanStage !== null) return error;
+  try {
+    error.scanStage = stage;
+  } catch {
+    // ignore non-extensible errors
+  }
+  return error;
+}
+
+/**
  * List active sources that are due and not under an active claim.
+ *
+ * Observability: attaches allowlisted scanStage on thrown errors so worker-core
+ * can distinguish enter / query / row-mapping without leaking SQL or messages.
  */
 async function listDueCodeClipProviderPollSources(
   { limit, provider, environment, now } = {},
   { queryClient } = {}
 ) {
-  const client = requireQueryClient(queryClient);
+  let scanStage = DUE_SOURCE_SCAN_STAGES.ENTER;
+  try {
+    const client = requireQueryClient(queryClient);
 
-  const normalizedLimit = normalizeListLimit(limit);
-  const injectedNow = normalizeInjectedNow(now);
+    const normalizedLimit = normalizeListLimit(limit);
+    const injectedNow = normalizeInjectedNow(now);
 
-  let normalizedProvider = null;
-  if (provider !== undefined && provider !== null && provider !== "") {
-    const definition = getCodeClipProviderDefinition(provider);
-    if (!definition || definition.capabilities.polling !== true) {
-      throw pollSourceError(
-        "INVALID_POLL_SOURCE_INPUT",
-        "provider filter is invalid",
-        { fieldName: "provider" }
-      );
+    let normalizedProvider = null;
+    if (provider !== undefined && provider !== null && provider !== "") {
+      const definition = getCodeClipProviderDefinition(provider);
+      if (!definition || definition.capabilities.polling !== true) {
+        throw attachDueSourceScanStage(
+          pollSourceError(
+            "INVALID_POLL_SOURCE_INPUT",
+            "provider filter is invalid",
+            { fieldName: "provider" }
+          ),
+          DUE_SOURCE_SCAN_STAGES.ENTER
+        );
+      }
+      normalizedProvider = definition.name;
     }
-    normalizedProvider = definition.name;
-  }
 
-  let normalizedEnvironment = null;
-  if (environment !== undefined && environment !== null && environment !== "") {
-    const envResult = normalizeCodeClipProviderCredentialEnvironment(environment);
-    if (!envResult.ok) {
-      throw pollSourceError(
-        "INVALID_POLL_SOURCE_INPUT",
-        "environment filter is invalid",
-        { fieldName: "environment", reason: envResult.reason || null }
-      );
+    let normalizedEnvironment = null;
+    if (environment !== undefined && environment !== null && environment !== "") {
+      const envResult = normalizeCodeClipProviderCredentialEnvironment(environment);
+      if (!envResult.ok) {
+        throw attachDueSourceScanStage(
+          pollSourceError(
+            "INVALID_POLL_SOURCE_INPUT",
+            "environment filter is invalid",
+            { fieldName: "environment", reason: envResult.reason || null }
+          ),
+          DUE_SOURCE_SCAN_STAGES.ENTER
+        );
+      }
+      normalizedEnvironment = envResult.environment;
     }
-    normalizedEnvironment = envResult.environment;
-  }
 
-  // Resolve clock once for consistent due comparison.
-  const clockResult = await client.query(
-    `
+    // Resolve clock once for consistent due comparison.
+    scanStage = DUE_SOURCE_SCAN_STAGES.QUERY_START;
+    let clockResult;
+    try {
+      clockResult = await client.query(
+        `
       SELECT COALESCE($1::timestamptz, NOW()) AS operation_now
     `,
-    [injectedNow]
-  );
-  const operationNowIso = toIsoTimestamp(clockResult.rows?.[0]?.operation_now);
-  if (!operationNowIso) {
-    throw pollSourceError("DATABASE_ERROR", "failed to resolve operation clock");
-  }
+        [injectedNow]
+      );
+    } catch (error) {
+      throw attachDueSourceScanStage(error, DUE_SOURCE_SCAN_STAGES.QUERY_FAILED);
+    }
 
-  const params = [CODECLIP_VERTICAL, operationNowIso, normalizedLimit];
-  const filters = [
-    "vertical = $1",
-    "status = 'active'",
-    "next_poll_at IS NOT NULL",
-    "next_poll_at <= $2::timestamptz",
-    `(
+    let operationNowIso;
+    try {
+      operationNowIso = toIsoTimestamp(clockResult.rows?.[0]?.operation_now);
+    } catch (error) {
+      throw attachDueSourceScanStage(
+        error,
+        DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED
+      );
+    }
+    if (!operationNowIso) {
+      throw attachDueSourceScanStage(
+        pollSourceError("DATABASE_ERROR", "failed to resolve operation clock"),
+        DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED
+      );
+    }
+
+    const params = [CODECLIP_VERTICAL, operationNowIso, normalizedLimit];
+    const filters = [
+      "vertical = $1",
+      "status = 'active'",
+      "next_poll_at IS NOT NULL",
+      "next_poll_at <= $2::timestamptz",
+      `(
       poll_claim_expires_at IS NULL
       OR poll_claim_expires_at <= $2::timestamptz
     )`,
-  ];
+    ];
 
-  if (normalizedProvider) {
-    params.push(normalizedProvider);
-    filters.push(`provider = $${params.length}`);
-  }
-  if (normalizedEnvironment) {
-    params.push(normalizedEnvironment);
-    filters.push(`environment = $${params.length}`);
-  }
+    if (normalizedProvider) {
+      params.push(normalizedProvider);
+      filters.push(`provider = $${params.length}`);
+    }
+    if (normalizedEnvironment) {
+      params.push(normalizedEnvironment);
+      filters.push(`environment = $${params.length}`);
+    }
 
-  const result = await client.query(
-    `
+    scanStage = DUE_SOURCE_SCAN_STAGES.QUERY_START;
+    let result;
+    try {
+      result = await client.query(
+        `
       SELECT ${SAFE_SELECT_COLUMNS}
       FROM codeclip_provider_poll_sources
       WHERE ${filters.join("\n        AND ")}
       ORDER BY next_poll_at ASC, id ASC
       LIMIT $3
     `,
-    params
-  );
+        params
+      );
+    } catch (error) {
+      throw attachDueSourceScanStage(error, DUE_SOURCE_SCAN_STAGES.QUERY_FAILED);
+    }
 
-  return {
-    items: (result.rows || []).map((row) => toPublicPollSource(row)),
-    limit: normalizedLimit,
-    asOf: operationNowIso,
-  };
+    scanStage = DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED;
+    let items;
+    try {
+      items = (result.rows || []).map((row) => toPublicPollSource(row));
+    } catch (error) {
+      throw attachDueSourceScanStage(
+        error,
+        DUE_SOURCE_SCAN_STAGES.ROW_MAPPING_FAILED
+      );
+    }
+
+    return {
+      items,
+      limit: normalizedLimit,
+      asOf: operationNowIso,
+    };
+  } catch (error) {
+    // Preserve an already-attached allowlisted stage; otherwise fall back.
+    const fallbackStage =
+      scanStage === DUE_SOURCE_SCAN_STAGES.QUERY_START
+        ? DUE_SOURCE_SCAN_STAGES.QUERY_FAILED
+        : scanStage || DUE_SOURCE_SCAN_STAGES.SCAN_FAILED;
+    throw attachDueSourceScanStage(error, fallbackStage);
+  }
 }
 
 /**
