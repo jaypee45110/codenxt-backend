@@ -1319,3 +1319,143 @@ test("query overrides for event/environment/return are ignored", async () => {
   );
   assert.equal(seenEvent, EVENT);
 });
+
+function successCallbackDeps(harness, overrides = {}) {
+  return {
+    queryClient: harness.pool,
+    env: envBase(),
+    claimState: async () => ({
+      ok: true,
+      claimVersion: 1,
+      oauthState: claimedState(),
+      alreadyCompleted: false,
+    }),
+    exchangeCode: async () => tokenResult({ scopes: ["user.info.basic", "video.list"] }),
+    findCredential: async () => null,
+    createCredential: async () => ({
+      created: true,
+      credential: {
+        id: "9",
+        status: "active",
+        providerAccountId: OPEN_ID,
+      },
+    }),
+    updateCredentialTokens: async () => {
+      throw new Error("should not update");
+    },
+    createBinding: async () => ({
+      created: true,
+      row: {
+        id: "b1",
+        eventCode: EVENT,
+        provider: "tiktok",
+        channel: "tiktok",
+        providerAccountId: OPEN_ID,
+        status: "active",
+      },
+    }),
+    appendBindingAudit: async () => ({}),
+    completeState: async () => ({ status: "completed", alreadyCompleted: false }),
+    getEventByCode: async () => ({ event_code: EVENT, vertical: "codeclip" }),
+    ...overrides,
+  };
+}
+
+test("enablePollingActivation activates sandbox poll source after connect", async () => {
+  const harness = createPoolHarness();
+  const activations = [];
+  const result = await completeCodeClipTikTokOAuthConnection(
+    { code: AUTH_CODE, state: RAW_STATE, now: NOW, requestId: "poll-1" },
+    successCallbackDeps(harness, {
+      enablePollingActivation: true,
+      activatePollingImpl: async (input) => {
+        activations.push(input);
+        assert.equal(input.eventCode, EVENT);
+        assert.equal(input.environment, "sandbox");
+        assert.equal(input.providerAccountId, OPEN_ID);
+        return { status: "activated" };
+      },
+    })
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "connected");
+  assert.equal(result.pollingActivated, true);
+  assert.equal(activations.length, 1);
+  assert.equal(
+    new URL(result.redirectUrl).searchParams.get("tiktok"),
+    "connected"
+  );
+  assertNoLeak(result);
+});
+
+test("enablePollingActivation is idempotent when poll source already active", async () => {
+  const harness = createPoolHarness();
+  const result = await completeCodeClipTikTokOAuthConnection(
+    { code: AUTH_CODE, state: RAW_STATE, now: NOW },
+    successCallbackDeps(harness, {
+      enablePollingActivation: true,
+      activatePollingImpl: async () => ({ status: "already_active" }),
+    })
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "connected");
+  assert.equal(result.pollingActivated, true);
+});
+
+test("enablePollingActivation failure yields setup_pending not fully connected", async () => {
+  const harness = createPoolHarness();
+  const result = await completeCodeClipTikTokOAuthConnection(
+    { code: AUTH_CODE, state: RAW_STATE, now: NOW },
+    successCallbackDeps(harness, {
+      enablePollingActivation: true,
+      activatePollingImpl: async () => {
+        const err = new Error("transient");
+        err.code = "DATABASE_ERROR";
+        throw err;
+      },
+    })
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "setup_pending");
+  assert.equal(result.pollingActivated, false);
+  assert.equal(result.pollingActivationError, "DATABASE_ERROR");
+  assert.equal(
+    new URL(result.redirectUrl).searchParams.get("tiktok"),
+    "setup_pending"
+  );
+  // Credential/binding still succeeded — no secrets leaked.
+  assert.equal(result.credentialCreated, true);
+  assert.equal(result.bindingCreated, true);
+  assertNoLeak(result);
+});
+
+test("enablePollingActivation never runs for production environment", async () => {
+  const harness = createPoolHarness();
+  let activated = false;
+  const result = await completeCodeClipTikTokOAuthConnection(
+    { code: AUTH_CODE, state: RAW_STATE, now: NOW },
+    successCallbackDeps(harness, {
+      enablePollingActivation: true,
+      claimState: async () => ({
+        ok: true,
+        claimVersion: 1,
+        oauthState: claimedState({ environment: "production" }),
+        alreadyCompleted: false,
+      }),
+      exchangeCode: async () =>
+        tokenResult({
+          scopes: ["user.info.basic", "video.list"],
+        }),
+      activatePollingImpl: async () => {
+        activated = true;
+        return { status: "activated" };
+      },
+    })
+  );
+  assert.equal(activated, false);
+  assert.equal(result.ok, true);
+  // Without sandbox activation path, status stays connected for credential+binding.
+  assert.equal(result.status, "connected");
+  assert.equal(result.pollingActivated, false);
+});

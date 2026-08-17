@@ -530,12 +530,46 @@ async function refreshCodePodGoldXtraRedisToken(token, row) {
   }
 }
 
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-admin-key", "x-dashboard-key"]
+const CODECLIP_CREATOR_CORS_ORIGINS = new Set(
+  String(process.env.CODECLIP_CREATOR_CORS_ORIGINS || "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .concat([
+      "https://codeclip.codenxt.global",
+      "https://codeclip-deploy.pages.dev",
+    ])
+);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      // Credentialed creator SPA calls (TikTok OAuth round-trip cookie).
+      if (origin && CODECLIP_CREATOR_CORS_ORIGINS.has(origin)) {
+        return callback(null, origin);
+      }
+      // Default public API behavior for non-credentialed clients.
+      return callback(null, true);
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "x-admin-key",
+      "x-dashboard-key",
+    ],
+  })
+);
+app.options(/.*/, cors({
+  origin(origin, callback) {
+    if (origin && CODECLIP_CREATOR_CORS_ORIGINS.has(origin)) {
+      return callback(null, origin);
+    }
+    return callback(null, true);
+  },
+  credentials: true,
 }));
-app.options(/.*/, cors());
 
 const {
   captureCodeClipProviderRawBody,
@@ -7162,14 +7196,23 @@ function timingSafeStringEqual(left, right) {
 }
 
 /**
- * Creator Episode access via dashboardAccessKey (x-dashboard-key).
- * Shared by YouTube + TikTok creator provider routes. Not admin-key auth.
+ * Creator Episode access via:
+ * 1) x-dashboard-key (dashboardAccessKey), or
+ * 2) short-lived HttpOnly creator capability cookie (OAuth round-trip).
+ * Never accepts the raw dashboardAccessKey from cookies/query/body.
  */
 async function requireCodeClipCreatorEpisodeAccess(req, res, next) {
   const eventCode = String(req.params?.eventCode || "").trim();
   const providedKey = String(req.headers["x-dashboard-key"] || "").trim();
+  const {
+    readCodeClipCreatorSessionFromRequest,
+    verifyCodeClipCreatorSessionToken,
+  } = require("./verticals/codeclip/creator-session");
 
-  if (!providedKey) {
+  const sessionToken = readCodeClipCreatorSessionFromRequest(req);
+
+  // No capability presented at all → 401 before event lookup (shared creator contract).
+  if (!providedKey && !sessionToken) {
     return res.status(401).set("Cache-Control", "no-store").json({
       ok: false,
       error: { code: "creator_connection_unauthorized" },
@@ -7184,14 +7227,32 @@ async function requireCodeClipCreatorEpisodeAccess(req, res, next) {
         error: { code: "creator_episode_not_found" },
       });
     }
-    const campaignKey = getCodeClipDashboardKeyFromEvent(event);
-    if (!campaignKey || !timingSafeStringEqual(providedKey, campaignKey)) {
-      return res.status(403).set("Cache-Control", "no-store").json({
+
+    if (providedKey) {
+      const campaignKey = getCodeClipDashboardKeyFromEvent(event);
+      if (!campaignKey || !timingSafeStringEqual(providedKey, campaignKey)) {
+        return res.status(403).set("Cache-Control", "no-store").json({
+          ok: false,
+          error: { code: "creator_connection_forbidden" },
+        });
+      }
+      req.codeClipCreatorEvent = event;
+      req.codeClipCreatorAuthMethod = "dashboard_key";
+      return next();
+    }
+
+    const verified = verifyCodeClipCreatorSessionToken(sessionToken, {
+      eventCode,
+    });
+    if (!verified.ok) {
+      return res.status(401).set("Cache-Control", "no-store").json({
         ok: false,
-        error: { code: "creator_connection_forbidden" },
+        error: { code: "creator_connection_unauthorized" },
       });
     }
+
     req.codeClipCreatorEvent = event;
+    req.codeClipCreatorAuthMethod = "creator_session_cookie";
     return next();
   } catch {
     return res.status(503).set("Cache-Control", "no-store").json({
@@ -7507,6 +7568,10 @@ app.post(
       mapCreatorConnectHttpStatus,
       mapCreatorConnectError,
     } = require("./verticals/codeclip/tiktok/creator-connect");
+    const {
+      createCodeClipCreatorSessionToken,
+      buildCodeClipCreatorSessionSetCookie,
+    } = require("./verticals/codeclip/creator-session");
 
     try {
       const result = await startCodeClipTikTokCreatorConnect(
@@ -7519,6 +7584,15 @@ app.post(
           env: process.env,
           getEventByCode: async () => req.codeClipCreatorEvent,
         }
+      );
+      // Issue HttpOnly capability cookie so status works after external OAuth
+      // navigation without persisting dashboardAccessKey in the browser.
+      const sessionToken = createCodeClipCreatorSessionToken({
+        eventCode: req.params.eventCode,
+      });
+      res.setHeader(
+        "Set-Cookie",
+        buildCodeClipCreatorSessionSetCookie(sessionToken, { secure: true })
       );
       return res.set("Cache-Control", "no-store").json(result);
     } catch (error) {
@@ -7601,6 +7675,8 @@ app.get("/api/codeclip/providers/tiktok/oauth/callback", async (req, res) => {
         queryClient: database.pool,
         env: process.env,
         getEventByCode: getCampaignByCode,
+        // Creator self-service + sandbox operator OAuth: activate poll source after bind.
+        enablePollingActivation: true,
       }
       );
 

@@ -15,6 +15,9 @@ const {
   inspectCodeClipProviderCredentialUsability,
 } = require("../provider-credentials");
 const {
+  findCodeClipProviderPollSource,
+} = require("../provider-poll-sources");
+const {
   startCodeClipTikTokOAuthConnection,
   CodeClipTikTokOAuthConnectionError,
 } = require("./oauth-connection");
@@ -106,18 +109,27 @@ function pickTikTokBinding(bindings) {
 /**
  * Creator-safe connection status (no open_id / tokens / ciphertext).
  */
+function isActivePollSource(pollSource) {
+  return (
+    pollSource &&
+    String(pollSource.status || "").toLowerCase() === "active"
+  );
+}
+
 function toCreatorSafeTikTokConnectionStatus({
   eventCode,
   environment,
   binding,
   credential,
   usability,
+  pollSource,
 } = {}) {
   const scopes = scopeFlags(credential?.scopes);
   const reauth =
     credential?.reauthorizationRequired === true ||
     credential?.status === "reauthorization_required" ||
     usability?.reauthorizationRequired === true;
+  const pollingReady = Boolean(isActivePollSource(pollSource));
 
   let status = "not_connected";
   if (binding && String(binding.status || "").toLowerCase() === "active") {
@@ -127,7 +139,8 @@ function toCreatorSafeTikTokConnectionStatus({
       credential &&
       (credential.status === "active" || credential.status === "refresh_needed")
     ) {
-      status = "connected";
+      // Fully connected only when sandbox poll source is active.
+      status = pollingReady ? "connected" : "setup_pending";
     } else if (credential && ["disabled", "revoked"].includes(credential.status)) {
       status = "error";
     } else if (!credential) {
@@ -159,8 +172,7 @@ function toCreatorSafeTikTokConnectionStatus({
         userInfoBasic: scopes.userInfoBasic === true,
       },
       displayName,
-      // Polling activation remains a separate operator/foundation path.
-      pollingActivated: null,
+      pollingReady,
     },
   };
 }
@@ -185,8 +197,11 @@ async function startCodeClipTikTokCreatorConnect(
         eventCode,
         environment,
         returnUrl,
-        // Default scopes come from OAuth state layer when omitted.
-        requestedScopes: input.requestedScopes,
+        // Creator self-service needs video.list for polling readiness.
+        requestedScopes: input.requestedScopes || [
+          "user.info.basic",
+          "video.list",
+        ],
         actor: { type: "system", id: "tiktok_creator_connect" },
         disableAutoAuth: input.disableAutoAuth,
         now: input.now,
@@ -242,6 +257,8 @@ async function getCodeClipTikTokCreatorConnectionStatus(
     options.findCredential || findCodeClipProviderCredential;
   const inspectUsability =
     options.inspectUsability || inspectCodeClipProviderCredentialUsability;
+  const findPollSource =
+    options.findPollSource || findCodeClipProviderPollSource;
 
   const bindings = await listBindingsForEvent(eventCode, {
     includeDisabled: true,
@@ -251,6 +268,7 @@ async function getCodeClipTikTokCreatorConnectionStatus(
 
   let credential = null;
   let usability = null;
+  let pollSource = null;
   if (binding?.providerAccountId) {
     credential = await findCredential(
       {
@@ -266,6 +284,14 @@ async function getCodeClipTikTokCreatorConnectionStatus(
         { queryClient }
       );
     }
+    pollSource = await findPollSource(
+      {
+        provider: PROVIDER,
+        environment,
+        providerAccountId: binding.providerAccountId,
+      },
+      { queryClient }
+    );
   }
 
   return toCreatorSafeTikTokConnectionStatus({
@@ -274,6 +300,7 @@ async function getCodeClipTikTokCreatorConnectionStatus(
     binding,
     credential,
     usability,
+    pollSource,
   });
 }
 

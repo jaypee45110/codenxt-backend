@@ -56,12 +56,29 @@ test("creator-safe serializer never exposes secrets or open_id", () => {
   });
 
   const serialized = JSON.stringify(status);
-  assert.equal(status.connection.status, "connected");
+  // Without poll source → setup_pending (not fully ready).
+  assert.equal(status.connection.status, "setup_pending");
+  assert.equal(status.connection.pollingReady, false);
   assert.equal(status.connection.capabilities.videoList, true);
   assert.equal(status.connection.displayName, "Creator Channel");
   assert.equal(status.connection.environment, "sandbox");
   assert.doesNotMatch(serialized, /open-id-should-not-leak/);
   assert.doesNotMatch(serialized, /accessToken|refreshToken|ciphertext|client_secret|open_id|providerAccountId/i);
+
+  const fullyReady = toCreatorSafeTikTokConnectionStatus({
+    eventCode: EVENT_CODE,
+    environment: "sandbox",
+    binding: { status: "active", displayName: "Creator Channel" },
+    credential: {
+      status: "active",
+      scopes: ["user.info.basic", "video.list"],
+      reauthorizationRequired: false,
+    },
+    usability: { reauthorizationRequired: false },
+    pollSource: { status: "active" },
+  });
+  assert.equal(fullyReady.connection.status, "connected");
+  assert.equal(fullyReady.connection.pollingReady, true);
 });
 
 test("serializer reports not_connected and reauthorization_required", () => {
@@ -170,10 +187,42 @@ test("getCodeClipTikTokCreatorConnectionStatus connected with video.list", async
       inspectUsability: async () => ({ reauthorizationRequired: false }),
     }
   );
-  assert.equal(result.connection.status, "connected");
+  // Missing poll source → not fully ready.
+  assert.equal(result.connection.status, "setup_pending");
+  assert.equal(result.connection.pollingReady, false);
   assert.equal(result.connection.capabilities.videoList, true);
   assert.equal(result.connection.displayName, "Safe Name");
   assert.doesNotMatch(JSON.stringify(result), /tt-open-id-secret/);
+});
+
+test("getCodeClipTikTokCreatorConnectionStatus connected only when poll source active", async () => {
+  const result = await getCodeClipTikTokCreatorConnectionStatus(
+    { eventCode: EVENT_CODE },
+    {
+      queryClient: { async query() { return { rows: [] }; } },
+      env: envSandbox(),
+      listBindingsForEvent: async () => [
+        {
+          provider: "tiktok",
+          channel: "tiktok",
+          status: "active",
+          providerAccountId: "tt-open-id-secret",
+          displayName: "Safe Name",
+        },
+      ],
+      findCredential: async () => ({
+        id: 9,
+        status: "active",
+        scopes: ["user.info.basic", "video.list"],
+        reauthorizationRequired: false,
+      }),
+      inspectUsability: async () => ({ reauthorizationRequired: false }),
+      findPollSource: async () => ({ status: "active", environment: "sandbox" }),
+    }
+  );
+  assert.equal(result.connection.status, "connected");
+  assert.equal(result.connection.pollingReady, true);
+  assert.doesNotMatch(JSON.stringify(result), /tt-open-id-secret|accessToken/i);
 });
 
 /**
@@ -197,16 +246,29 @@ function buildCreatorTikTokTestApp({
   async function requireCreator(req, res, next) {
     const eventCode = String(req.params?.eventCode || "").trim();
     const providedKey = String(req.headers["x-dashboard-key"] || "").trim();
-    if (!providedKey) {
+    const {
+      readCodeClipCreatorSessionFromRequest,
+      verifyCodeClipCreatorSessionToken,
+    } = require("./verticals/codeclip/creator-session");
+    const sessionToken = readCodeClipCreatorSessionFromRequest(req);
+    if (!providedKey && !sessionToken) {
       return res.status(401).json({ ok: false, error: { code: "creator_connection_unauthorized" } });
     }
     const event = eventsByCode[eventCode];
     if (!event) {
       return res.status(404).json({ ok: false, error: { code: "creator_episode_not_found" } });
     }
-    const key = String(event.dashboardAccessKey || "").trim();
-    if (!key || !timingSafeEqual(providedKey, key)) {
-      return res.status(403).json({ ok: false, error: { code: "creator_connection_forbidden" } });
+    if (providedKey) {
+      const key = String(event.dashboardAccessKey || "").trim();
+      if (!key || !timingSafeEqual(providedKey, key)) {
+        return res.status(403).json({ ok: false, error: { code: "creator_connection_forbidden" } });
+      }
+      req.codeClipCreatorEvent = event;
+      return next();
+    }
+    const verified = verifyCodeClipCreatorSessionToken(sessionToken, { eventCode });
+    if (!verified.ok) {
+      return res.status(401).json({ ok: false, error: { code: "creator_connection_unauthorized" } });
     }
     req.codeClipCreatorEvent = event;
     return next();
@@ -217,8 +279,19 @@ function buildCreatorTikTokTestApp({
     requireCreator,
     async (req, res) => {
       try {
+        const {
+          createCodeClipCreatorSessionToken,
+          buildCodeClipCreatorSessionSetCookie,
+        } = require("./verticals/codeclip/creator-session");
         if (typeof startConnect === "function") {
           const result = await startConnect(req);
+          const sessionToken = createCodeClipCreatorSessionToken({
+            eventCode: req.params.eventCode,
+          });
+          res.setHeader(
+            "Set-Cookie",
+            buildCodeClipCreatorSessionSetCookie(sessionToken, { secure: true })
+          );
           return res.json(result);
         }
         const result = await startCodeClipTikTokCreatorConnect(
@@ -465,4 +538,59 @@ test("OAuth connection error maps to TIKTOK_NOT_CONFIGURED", () => {
     )
   );
   assert.equal(mapped.code, "TIKTOK_NOT_CONFIGURED");
+});
+
+test("creator connect Set-Cookie enables status without dashboardAccessKey", async () => {
+  const app = buildCreatorTikTokTestApp({
+    eventsByCode: {
+      [EVENT_CODE]: {
+        code: EVENT_CODE,
+        vertical: "codeclip",
+        dashboardAccessKey: DASHBOARD_KEY,
+      },
+    },
+    startConnect: async (req) => ({
+      ok: true,
+      provider: "tiktok",
+      eventCode: req.params.eventCode,
+      environment: "sandbox",
+      authorizationUrl: "https://www.tiktok.com/v2/auth/authorize/?state=opaque",
+      expiresAt: new Date(Date.now() + 600000).toISOString(),
+    }),
+  });
+
+  await withServer(app, async (baseUrl) => {
+    const connect = await fetch(
+      `${baseUrl}/api/codeclip/events/${EVENT_CODE}/providers/tiktok/connect`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-dashboard-key": DASHBOARD_KEY,
+        },
+        body: JSON.stringify({ returnUrl: RETURN_URL }),
+      }
+    );
+    assert.equal(connect.status, 200);
+    const setCookie = connect.headers.getSetCookie
+      ? connect.headers.getSetCookie()
+      : [connect.headers.get("set-cookie")].filter(Boolean);
+    const cookieHeader = setCookie
+      .map((c) => String(c).split(";")[0])
+      .join("; ");
+    assert.match(cookieHeader, /codeclip_creator_cap=/);
+    assert.doesNotMatch(cookieHeader, /dashboardAccessKey|creator-dashboard-key/i);
+
+    const status = await fetch(
+      `${baseUrl}/api/codeclip/events/${EVENT_CODE}/providers/tiktok/status`,
+      { headers: { cookie: cookieHeader } }
+    );
+    assert.equal(status.status, 200);
+    const body = await status.json();
+    assert.equal(body.connection.status, "not_connected");
+    assert.doesNotMatch(
+      JSON.stringify(body),
+      /open_id|accessToken|dashboardAccessKey/i
+    );
+  });
 });

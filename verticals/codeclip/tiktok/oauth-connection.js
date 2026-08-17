@@ -217,7 +217,7 @@ function resolveCallbackMutationActors(_createdBy) {
   };
 }
 
-function buildSafeRedirect(returnUrl, status) {
+function buildSafeRedirect(returnUrl, status, { eventCode } = {}) {
   if (typeof returnUrl !== "string" || !returnUrl.trim()) {
     throw connectionError("INVALID_CALLBACK", "return URL is unavailable");
   }
@@ -231,6 +231,11 @@ function buildSafeRedirect(returnUrl, status) {
     throw connectionError("INVALID_CALLBACK", "return URL is unavailable");
   }
   parsed.searchParams.set(REDIRECT_STATUS_PARAM, status);
+  const code = String(eventCode || "").trim();
+  if (code) {
+    // Public episode identity only — never dashboardAccessKey.
+    parsed.searchParams.set("event", code);
+  }
   return parsed.toString();
 }
 
@@ -779,11 +784,14 @@ async function completeCodeClipTikTokOAuthConnection(
   if (claimResult?.alreadyCompleted === true || claimResult?.status === "completed") {
     // Completed means a prior successful connection, not cancellation.
     const returnUrl = claimResult.oauthState?.returnUrl;
+    const completedEventCode = claimResult.oauthState?.eventCode || null;
     return {
       ok: true,
       status: "already_connected",
-      redirectUrl: buildSafeRedirect(returnUrl, "already_connected"),
-      eventCode: claimResult.oauthState?.eventCode || null,
+      redirectUrl: buildSafeRedirect(returnUrl, "already_connected", {
+        eventCode: completedEventCode,
+      }),
+      eventCode: completedEventCode,
     };
   }
 
@@ -1004,14 +1012,76 @@ async function completeCodeClipTikTokOAuthConnection(
       !persisted.bindingResult.reactivated &&
       !persisted.credentialResult.created;
 
-    const status = already ? "already_connected" : "connected";
+    // Optional post-connect sandbox polling activation (creator/self-service).
+    // Enabled by the HTTP callback route; unit tests leave it off to avoid DB.
+    // Production environment never activates here from creator connect (sandbox-only).
+    let pollingActivated = false;
+    let pollingActivationError = null;
+    const shouldActivatePolling =
+      options.enablePollingActivation === true &&
+      String(environment || "").toLowerCase() === "sandbox";
+    if (shouldActivatePolling) {
+      try {
+        const activate =
+          typeof options.activatePollingImpl === "function"
+            ? options.activatePollingImpl
+            : async (input, deps) => {
+                const {
+                  activateCodeClipTikTokPolling,
+                } = require("./polling-activation");
+                const {
+                  createCodeClipProductionPollAdapterRegistry,
+                } = require("../provider-polling/production-adapter-registry");
+                return activateCodeClipTikTokPolling(input, {
+                  ...deps,
+                  adapterRegistry:
+                    deps.adapterRegistry ||
+                    createCodeClipProductionPollAdapterRegistry(),
+                });
+              };
+        const openId = String(
+          persisted.credentialResult?.credential?.providerAccountId ||
+            tokenResult.openId ||
+            ""
+        ).trim();
+        if (openId) {
+          const activation = await activate(
+            {
+              eventCode,
+              environment: "sandbox",
+              providerAccountId: openId,
+              now: operationNow,
+            },
+            { queryClient, adapterRegistry: options.adapterRegistry }
+          );
+          pollingActivated = ["activated", "already_active", "reactivated"].includes(
+            String(activation?.status || "")
+          );
+        }
+      } catch (activationError) {
+        pollingActivationError =
+          activationError?.code || activationError?.name || "POLLING_ACTIVATION_FAILED";
+        pollingActivated = false;
+      }
+    } else if (options.enablePollingActivation !== true) {
+      // Legacy/unit path: treat credential+binding success as connected.
+      pollingActivated = true;
+    }
+
+    let status = already ? "already_connected" : "connected";
+    if (shouldActivatePolling && !pollingActivated) {
+      status = "setup_pending";
+    }
+
     return {
       ok: true,
       status,
-      redirectUrl: buildSafeRedirect(returnUrl, status),
+      redirectUrl: buildSafeRedirect(returnUrl, status, { eventCode }),
       eventCode,
       bindingCreated: Boolean(persisted.bindingResult.created),
       credentialCreated: Boolean(persisted.credentialResult.created),
+      pollingActivated,
+      pollingActivationError,
     };
   } catch (error) {
     const mapped = mapUnknownError(error);
@@ -1032,7 +1102,7 @@ async function completeCodeClipTikTokOAuthConnection(
       return {
         ok: false,
         status: redirectStatus,
-        redirectUrl: buildSafeRedirect(returnUrl, redirectStatus),
+        redirectUrl: buildSafeRedirect(returnUrl, redirectStatus, { eventCode }),
         eventCode,
         errorCode: mapped.code,
       };
@@ -1040,7 +1110,9 @@ async function completeCodeClipTikTokOAuthConnection(
     return {
       ok: false,
       status: "authorization_failed",
-      redirectUrl: buildSafeRedirect(returnUrl, "authorization_failed"),
+      redirectUrl: buildSafeRedirect(returnUrl, "authorization_failed", {
+        eventCode,
+      }),
       eventCode,
       errorCode: mapped.code,
     };
