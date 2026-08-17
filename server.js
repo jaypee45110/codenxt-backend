@@ -7161,6 +7161,10 @@ function timingSafeStringEqual(left, right) {
   return crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+/**
+ * Creator Episode access via dashboardAccessKey (x-dashboard-key).
+ * Shared by YouTube + TikTok creator provider routes. Not admin-key auth.
+ */
 async function requireCodeClipCreatorEpisodeAccess(req, res, next) {
   const eventCode = String(req.params?.eventCode || "").trim();
   const providedKey = String(req.headers["x-dashboard-key"] || "").trim();
@@ -7168,7 +7172,7 @@ async function requireCodeClipCreatorEpisodeAccess(req, res, next) {
   if (!providedKey) {
     return res.status(401).set("Cache-Control", "no-store").json({
       ok: false,
-      error: { code: "youtube_connection_unauthorized" },
+      error: { code: "creator_connection_unauthorized" },
     });
   }
 
@@ -7177,14 +7181,14 @@ async function requireCodeClipCreatorEpisodeAccess(req, res, next) {
     if (!event) {
       return res.status(404).set("Cache-Control", "no-store").json({
         ok: false,
-        error: { code: "youtube_episode_not_found" },
+        error: { code: "creator_episode_not_found" },
       });
     }
     const campaignKey = getCodeClipDashboardKeyFromEvent(event);
     if (!campaignKey || !timingSafeStringEqual(providedKey, campaignKey)) {
       return res.status(403).set("Cache-Control", "no-store").json({
         ok: false,
-        error: { code: "youtube_connection_forbidden" },
+        error: { code: "creator_connection_forbidden" },
       });
     }
     req.codeClipCreatorEvent = event;
@@ -7192,7 +7196,7 @@ async function requireCodeClipCreatorEpisodeAccess(req, res, next) {
   } catch {
     return res.status(503).set("Cache-Control", "no-store").json({
       ok: false,
-      error: { code: "youtube_connection_unavailable" },
+      error: { code: "creator_connection_unavailable" },
     });
   }
 }
@@ -7208,13 +7212,26 @@ function mapCodeClipYouTubeConnectionHttpStatus(code) {
       "youtube_channel_ambiguous",
       "youtube_connection_invalid",
       "youtube_oauth_return_url_not_allowed",
+      "creator_connection_unauthorized",
     ].includes(code)
   ) {
-    return 400;
+    return code === "creator_connection_unauthorized" ? 401 : 400;
   }
-  if (code === "youtube_episode_not_found") return 404;
+  if (
+    code === "youtube_episode_not_found" ||
+    code === "creator_episode_not_found"
+  ) {
+    return 404;
+  }
+  if (code === "creator_connection_forbidden") return 403;
   if (code === "youtube_binding_conflict") return 409;
-  if (code === "youtube_oauth_unavailable" || code === "youtube_connection_unavailable") return 503;
+  if (
+    code === "youtube_oauth_unavailable" ||
+    code === "youtube_connection_unavailable" ||
+    code === "creator_connection_unavailable"
+  ) {
+    return 503;
+  }
   return 503;
 }
 
@@ -7475,6 +7492,91 @@ app.post(
         error: error?.name || "Error",
       });
       return sendCodeClipTikTokOAuthError(res, error);
+    }
+  }
+);
+
+// Creator TikTok connect (Episode dashboardAccessKey). Sandbox-only orchestration.
+app.post(
+  "/api/codeclip/events/:eventCode/providers/tiktok/connect",
+  requireCodeClipCreatorEpisodeAccess,
+  async (req, res) => {
+    const {
+      startCodeClipTikTokCreatorConnect,
+      CodeClipTikTokCreatorConnectError,
+      mapCreatorConnectHttpStatus,
+      mapCreatorConnectError,
+    } = require("./verticals/codeclip/tiktok/creator-connect");
+
+    try {
+      const result = await startCodeClipTikTokCreatorConnect(
+        {
+          eventCode: req.params.eventCode,
+          returnUrl: req.body?.returnUrl,
+        },
+        {
+          queryClient: database.pool,
+          env: process.env,
+          getEventByCode: async () => req.codeClipCreatorEvent,
+        }
+      );
+      return res.set("Cache-Control", "no-store").json(result);
+    } catch (error) {
+      const mapped =
+        error instanceof CodeClipTikTokCreatorConnectError
+          ? error
+          : mapCreatorConnectError(error);
+      console.warn("codeClip TikTok creator connect failed", {
+        vertical: "codeclip",
+        provider: "tiktok",
+        route: "/api/codeclip/events/:eventCode/providers/tiktok/connect",
+        operationalEvent: "tiktok_creator_connect_failed",
+        error: mapped?.code || error?.name || "Error",
+      });
+      return res
+        .status(mapCreatorConnectHttpStatus(mapped.code))
+        .set("Cache-Control", "no-store")
+        .json({
+          ok: false,
+          error: { code: mapped.code },
+        });
+    }
+  }
+);
+
+// Creator TikTok connection status (Episode dashboardAccessKey). Safe serializer only.
+app.get(
+  "/api/codeclip/events/:eventCode/providers/tiktok/status",
+  requireCodeClipCreatorEpisodeAccess,
+  async (req, res) => {
+    const {
+      getCodeClipTikTokCreatorConnectionStatus,
+      CodeClipTikTokCreatorConnectError,
+      mapCreatorConnectHttpStatus,
+      mapCreatorConnectError,
+    } = require("./verticals/codeclip/tiktok/creator-connect");
+
+    try {
+      const result = await getCodeClipTikTokCreatorConnectionStatus(
+        { eventCode: req.params.eventCode },
+        {
+          queryClient: database.pool,
+          env: process.env,
+        }
+      );
+      return res.set("Cache-Control", "no-store").json(result);
+    } catch (error) {
+      const mapped =
+        error instanceof CodeClipTikTokCreatorConnectError
+          ? error
+          : mapCreatorConnectError(error);
+      return res
+        .status(mapCreatorConnectHttpStatus(mapped.code))
+        .set("Cache-Control", "no-store")
+        .json({
+          ok: false,
+          error: { code: mapped.code },
+        });
     }
   }
 );

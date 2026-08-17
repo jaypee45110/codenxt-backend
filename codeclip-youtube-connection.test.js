@@ -492,7 +492,7 @@ test("YouTube creator-facing start route rejects missing creator authorization",
   assert.equal(response.status, 401);
   assert.deepEqual(response.body, {
     ok: false,
-    error: { code: "youtube_connection_unauthorized" },
+    error: { code: "creator_connection_unauthorized" },
   });
   assertNoLeak(response.body);
 });
